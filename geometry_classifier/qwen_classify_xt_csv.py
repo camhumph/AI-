@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-BASE = Path(r"C:\CMS_AI\geometry_classifier")
+BASE = Path(__file__).resolve().parent
 KNOWLEDGE = BASE / "mold_geometry_knowledge.md"
 VENDOR_KNOWLEDGE = BASE / "vendor_knowledge_sources.md"
 OUT_DIR = BASE / "outputs"
@@ -16,10 +16,49 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 SHORT_RULES = """
-Use geometry only. Component names may be wrong.
-Exception: if a STEP/imported assembly has deliberate shop-standard tokens like
-A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, or
-LBB, treat those as strong hints and still cross-check them against geometry.
+Exact shop-standard tokens in imported STEP/CAD component names are STRONG
+ANCHOR EVIDENCE, not weak notes. When a component name contains an exact shop
+token, trust it over generic bounding-box geometry:
+  A-PLATE / A_PLATE            -> a_plate
+  B-PLATE / B_PLATE            -> b_plate
+  SC-RETAINER-PLATE            -> sc_retainer_plate
+  SC-BACKUP-PLATE              -> sc_backup_plate
+  CLAMP-PLATE                  -> bottom_clamp_plate
+  EJ-RET-PLATE                 -> ejector_plate (thinner ejector-stack plate)
+  EJ-BACKUP-PLATE              -> bottom_ejector_plate (thicker/lower ejector-stack plate)
+  RAIL / RAIL-TOP / RAIL-BOTTOM -> rail
+  LDR-PIN                      -> leader_pin
+  LBB                          -> leader_pin_bushing
+  PLC75 / LATCH-LOCK / SAFETY-STRAP (any spelling) -> latch_lock
+Only fall back to pure bounding-box geometry when names are generic or missing
+(e.g. "plate", "block", stale/copied names, McMaster/DME/PCS catalog numbers
+with no shop prefix).
+
+Plate naming: always use "A Plate" / "B Plate". Never use cavity_plate/core_plate.
+
+Bottom-up stack anchoring: decide the bottom of the stack from the rails and
+ejector-stack plates first. Leader pins and bushings only decide orientation
+when rails/ejector plates are missing or ambiguous. Do not let leader-pin
+direction flip a stack orientation that rails/ejector plates already establish.
+On plate-sequenced/SC bases, leader pins can seat in the B-plate area and run
+upward toward the A-side (reversed pins) -- this must never flip a confirmed
+A/B assignment.
+
+Ejector stack naming: the thinner ejector-stack plate is always "ejector_plate".
+The thicker/lower ejector-stack plate is "bottom_ejector_plate" -- never call
+the thinner plate "ejector_retainer_plate".
+
+Latch-lock / sequenced bases: if any component name contains PLC, LATCH-LOCK,
+SAFETY-STRAP (or "SAFTEY-STRAP"), or a Progressive Components latch assembly
+name, the base is a plate-sequenced/latch-lock standard base. Latch locks mark
+secondary parting/opening lines between plates; they do not set guide
+direction. Leader pins set guide direction only. A "weird" standard base can
+be missing its Top Clamp Plate -- if the first full-footprint plate is
+noticeably thicker than the inner stack, call it a_plate and note the top
+clamp plate as missing rather than forcing a 5-plate pattern.
+
+Quote-row mapping: ejector-stack and pin-plate rows must never be merged or
+mapped into the a_plate row.
 
 Analyze the whole mold first:
 - Find the stack axis from full-footprint plates.
@@ -30,14 +69,20 @@ Analyze the whole mold first:
   3 b_plate
   4 support_plate
   5 bottom_clamp_plate
+- For a plate-sequenced/SC stack with no top clamp, sorted top to bottom:
+  1 a_plate
+  2 b_plate
+  3 sc_retainer_plate
+  4 sc_backup_plate
+  5 bottom_clamp_plate
 - Rails are long narrow side blocks near the ejector side.
 - Pin/ejector plates are long narrower plates inside/between rails.
-- pin_plate/ejector retainer is above ejector_plate in the ejector stack.
 - Leader pins are long round pins.
 - Leader/shoulder bushings are short round cylinders near leader-pin locations.
 - Support pillars are large round posts and are not leader pins.
 - Return/ejector pins are smaller long round pins.
-- The parting line is between a_plate and b_plate.
+- The parting line is between a_plate and b_plate. Latch-lock/sequenced bases
+  can also have secondary parting/opening lines near sc_retainer_plate/sc_backup_plate.
 """
 
 
@@ -56,9 +101,10 @@ ROLES = [
     "rail_2",
     "pin_plate",
     "ejector_plate",
-    "ejector_retainer_plate",
     "bottom_ejector_plate",
+    "ejector_retainer_plate",  # deprecated alias, kept for legacy CORRECT_ME.csv corrections
     "ejector_backup_plate",
+    "latch_lock",
     "leader_pin",
     "leader_pin_bushing",
     "guided_ejector_bushing",
@@ -117,8 +163,8 @@ Your job:
 2. Decide the stack axis.
 3. Decide the full-footprint stack order.
 4. Use leader pins, bushings, rails, ejector stack, and dimensions to identify the A plate, B plate, parting line, and part names.
-5. Do not trust CAD component names. Names may be wrong or mixed up.
-6. Use CAD names only as weak notes after geometry has decided.
+5. Exact shop-standard tokens in CAD component names (e.g. A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB, PLC75, LATCH-LOCK, SAFETY-STRAP) are STRONG anchor evidence. Trust them over generic geometry.
+6. Only fall back to pure geometry when names are generic, stale, or missing.
 7. Return JSON only. No explanation outside JSON. No markdown.
 
 Allowed roles:
@@ -194,15 +240,47 @@ def name_key(row):
     return str(row.get("name", "")).upper().replace("\\", "/")
 
 
+LATCH_LOCK_TOKENS = (
+    "LATCH-LOCK",
+    "LATCH_LOCK",
+    "SAFETY-STRAP",
+    "SAFETY_STRAP",
+    "SAFTEY-STRAP",  # observed misspelling in real shop CAD names (e.g. T001015)
+    "SAFTEY_STRAP",
+    "PLC75",
+)
+
+LATCH_LOCK_REGEX = re.compile(r"\bPLC\d")
+
+
+def is_latch_lock_name(name):
+    if any(token in name for token in LATCH_LOCK_TOKENS):
+        return True
+    return bool(LATCH_LOCK_REGEX.search(name))
+
+
 def apply_strong_shop_name_hints(rows, roles):
-    """Use exact imported shop tokens only; generic CAD names remain weak."""
+    """Use exact imported shop tokens as primary anchor evidence.
+
+    These are deliberate shop/vendor-standard naming tokens on STEP imports
+    (e.g. A-PLATE, B-PLATE, LDR-PIN). They take priority over generic
+    bounding-box geometry rules. Generic/stale/copied names still fall through
+    to geometry-only classification below.
+    """
     for row in rows:
         idx = str(row["i"])
         name = name_key(row)
         if not name:
             continue
 
-        if "A-PLATE" in name or "A_PLATE" in name:
+        if is_latch_lock_name(name):
+            roles[idx] = (
+                "latch_lock",
+                "HIGH",
+                "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+                False,
+            )
+        elif "A-PLATE" in name or "A_PLATE" in name:
             roles[idx] = ("a_plate", "HIGH", "Strong shop token A-PLATE, confirmed as a full-footprint mold plate.", True)
         elif "B-PLATE" in name or "B_PLATE" in name:
             roles[idx] = ("b_plate", "HIGH", "Strong shop token B-PLATE, confirmed as a full-footprint mold plate.", True)
@@ -213,9 +291,9 @@ def apply_strong_shop_name_hints(rows, roles):
         elif "CLAMP-PLATE" in name or "CLAMP_PLATE" in name:
             roles[idx] = ("bottom_clamp_plate", "HIGH", "Strong shop token CLAMP-PLATE on the ejector/clamp side.", True)
         elif "EJ-BACKUP-PLATE" in name or "EJ_BACKUP_PLATE" in name:
-            roles[idx] = ("ejector_retainer_plate", "HIGH", "Strong shop token EJ-BACKUP-PLATE; backing/retainer plate in ejector stack.", True)
+            roles[idx] = ("bottom_ejector_plate", "HIGH", "Strong shop token EJ-BACKUP-PLATE; thicker/lower backing plate in ejector stack. CMS naming: Bottom Ejector Plate (never Ejector Retainer Plate).", True)
         elif "EJ-RET-PLATE" in name or "EJ_RET_PLATE" in name:
-            roles[idx] = ("ejector_plate", "HIGH", "Strong shop token EJ-RET-PLATE; user standard treats this as the ejector plate.", True)
+            roles[idx] = ("ejector_plate", "HIGH", "Strong shop token EJ-RET-PLATE; thinner plate in ejector stack. CMS naming: Ejector Plate.", True)
         elif "RAIL-" in name or "_RAIL" in name or "/RAIL" in name:
             roles[idx] = ("rail", "HIGH", "Strong shop token RAIL; long side rail/support block.", True)
         elif "LDR-PIN" in name or "LDR_PIN" in name:
@@ -235,6 +313,8 @@ def classify_geometry(rows):
     stack_axis = "CenterY"
     roles = {}
     apply_strong_shop_name_hints(rows, roles)
+
+    has_latch_lock = any(is_latch_lock_name(name_key(r)) for r in rows)
 
     full_plates = [
         r for r in rows
@@ -322,6 +402,9 @@ def classify_geometry(rows):
                 "Two-half mold pattern: matching inner block on low side of stack axis.",
                 True,
             )
+            # NOTE: rails/ejector-stack detection above already anchors bottom_pos.
+            # a_plate/b_plate assignment here must not be re-derived from leader
+            # pin direction; it stays anchored to the rail/ejector-established axis.
 
         thin_large = [
             r for r in rows
@@ -338,17 +421,17 @@ def classify_geometry(rows):
             roles[str(rails[1]["i"])] = ("rail_2", "MEDIUM", "Two-half mold pattern: second largest thin rail/strip plate.", True)
         if len(thin_large) >= 4:
             ejector_candidates = thin_large[2:4]
-            ejector_candidates.sort(key=lambda r: r["v"], reverse=True)
+            ejector_candidates.sort(key=lambda r: r["t"])
             roles[str(ejector_candidates[0]["i"])] = (
-                "ejector_retainer_plate",
+                "ejector_plate",
                 "MEDIUM",
-                "Two-half mold pattern: larger remaining thin ejector-stack plate.",
+                "Two-half mold pattern: thinner remaining ejector-stack plate. CMS naming: Ejector Plate.",
                 True,
             )
             roles[str(ejector_candidates[1]["i"])] = (
-                "ejector_backup_plate",
+                "bottom_ejector_plate",
                 "MEDIUM",
-                "Two-half mold pattern: smaller remaining thin ejector-stack plate.",
+                "Two-half mold pattern: thicker/lower remaining ejector-stack plate. CMS naming: Bottom Ejector Plate (never Ejector Retainer Plate).",
                 True,
             )
 
@@ -393,9 +476,9 @@ def classify_geometry(rows):
             roles[idx] = ("rail", "HIGH", "Long narrow full-length side block in ejector/rail zone.", True)
         elif long_full and ejector_width and centered_side and bottom_pos <= axis_pos <= support_pos + 2.0:
             if row["t"] <= 0.8 or axis_pos > bottom_pos + 1.5:
-                roles[idx] = ("ejector_plate", "MEDIUM", "Thinner centered ejector-stack plate; ejector plate.", True)
+                roles[idx] = ("ejector_plate", "MEDIUM", "Thinner centered ejector-stack plate. CMS naming: Ejector Plate.", True)
             else:
-                roles[idx] = ("ejector_retainer_plate", "MEDIUM", "Thicker/backing centered ejector-stack plate; ejector retainer plate.", True)
+                roles[idx] = ("bottom_ejector_plate", "MEDIUM", "Thicker/lower centered ejector-stack plate. CMS naming: Bottom Ejector Plate (never Ejector Retainer Plate).", True)
         elif axis_pos > support_pos and row["w"] < max_w * 0.75 and row["l"] < max_l * 0.75:
             roles[idx] = ("insert_or_core_detail", "LOW", "Smaller block inside cavity/core area; not a standard full plate.", False)
         elif top_pos >= axis_pos >= bottom_pos:
@@ -475,16 +558,32 @@ def classify_geometry(rows):
         )
 
     parting = "Between a_plate and b_plate from the full-footprint stack order."
+    rules_for_this_job = [
+        f"Full-footprint plates were sorted by {stack_axis} from top to bottom.",
+        "Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation.",
+        "Ejector-stack plates were detected as centered long narrower plates near the rails; thinner = ejector_plate, thicker/lower = bottom_ejector_plate.",
+        "Round guide hardware was separated by diameter and length.",
+        "Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) were treated as strong anchors and applied before geometry-only rules.",
+    ]
+    if has_latch_lock:
+        parting = (
+            "Primary parting line between a_plate and b_plate from the full-footprint stack order. "
+            "Latch-lock/PLC/safety-strap hardware detected: this is a plate-sequenced/latch-lock standard base with "
+            "secondary opening/parting lines at the latch attachment points (not a plain A/B/support stack)."
+        )
+        rules_for_this_job.append(
+            "Latch-lock/PLC/safety-strap tokens were detected (PLC, LATCH-LOCK, SAFETY-STRAP/SAFTEY-STRAP). "
+            "This base is plate-sequenced; latch locks mark secondary parting/opening lines and do not set guide "
+            "direction. Leader-pin position and any reversed/seated leader pins were not allowed to flip the "
+            "A/B plate assignment established by shop-name tokens and the full-footprint stack order."
+        )
+
     return {
         "job_analysis": {
             "stack_axis": stack_axis,
             "parting_line": parting,
-            "rules_for_this_job": [
-                f"Full-footprint plates were sorted by {stack_axis} from top to bottom.",
-                "Rails were detected as long narrow side blocks below the support plate.",
-                "Ejector-stack plates were detected as centered long narrower plates near the rails.",
-                "Round guide hardware was separated by diameter and length.",
-            ],
+            "sequenced_latch_lock_base": has_latch_lock,
+            "rules_for_this_job": rules_for_this_job,
         },
         "classifications": classifications,
     }

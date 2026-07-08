@@ -83,8 +83,10 @@ support_plate
 bottom_clamp_plate
 rail
 ejector_plate
-ejector_retainer_plate
+bottom_ejector_plate
+ejector_retainer_plate (deprecated, legacy corrections only)
 ejector_backup_plate
+latch_lock
 leader_pin
 leader_pin_bushing
 guided_ejector_bushing
@@ -113,9 +115,12 @@ This is safer than fine-tuning right away.
 Do not put these only in chat. They belong in the classifier rules, knowledge file, and corrected examples.
 
 - Use `A Plate` / `B Plate`, not cavity/core, for CMS outputs.
-- Exact shop tokens can override generic geometry when they agree: `A-PLATE`, `B-PLATE`, `SC-RETAINER`, `SC-BACKUP`, `EJ-RET`, `EJ-BACKUP`, `RAIL`, `LDR-PIN`, `LBB`.
-- Latch lock parts (`PLC75`, `LATCH-LOCK`, `SAFETY-STRAP`) mean the base may be a sequenced/latch-lock standard base, not a plain A/B/support stack.
-- Latches help identify secondary opening/parting lines and which plates move together.
+- Exact shop tokens are strong anchor evidence, not weak notes -- they override generic geometry when a component name carries one: `A-PLATE`, `B-PLATE`, `SC-RETAINER`, `SC-BACKUP`, `EJ-RET`, `EJ-BACKUP`, `RAIL`, `LDR-PIN`, `LBB`. Only fall back to pure geometry when names are generic, stale, or missing.
+- In the ejector assembly, the thinner plate is always `Ejector Plate` and the thicker/lower plate is `Bottom Ejector Plate`. Never call the thinner plate `Ejector Retainer Plate`.
+- Ejector-stack and pin-plate rows must never be mapped or merged into the `A Plate` quote row.
+- Decide the bottom of the stack from rails/ejector-stack plates first. Leader pins/bushings only decide orientation when rails/ejector plates are missing. Do not let leader-pin direction (including reversed/seated pins on SC bases) flip a clear rail/ejector stack or a strong `A-PLATE`/`B-PLATE` token.
+- Latch lock parts (`PLC75`, `LATCH-LOCK`, `SAFETY-STRAP`, also seen misspelled `SAFTEY-STRAP`) mean the base may be a sequenced/latch-lock standard base, not a plain A/B/support stack.
+- Latches help identify secondary opening/parting lines and which plates move together. Leader pins set guide direction; latches do not.
 - Leader pins and bushings help identify guide direction, but multiple guide sets can exist. Do not flip the B Plate away from a strong `B-PLATE` token just because SC plates are present.
 - For T001015-style bases, the correct pattern is:
 
