@@ -1,0 +1,1844 @@
+{
+  "job_analysis": {
+    "stack_axis": "CenterX",
+    "parting_line": "Primary parting line between a_plate and b_plate from the full-footprint stack order. Latch-lock/PLC/safety-strap hardware detected: this is a plate-sequenced/latch-lock standard base with secondary opening/parting lines at the latch attachment points (not a plain A/B/support stack).",
+    "sequenced_latch_lock_base": true,
+    "rules_for_this_job": [
+      "Full-footprint plates were sorted by CenterX from top to bottom.",
+      "Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation.",
+      "Ejector-stack plates were detected as centered long narrower plates near the rails; thinner = ejector_plate, thicker/lower = bottom_ejector_plate.",
+      "Round guide hardware was separated by diameter and length.",
+      "Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) were treated as strong anchors and applied before geometry-only rules.",
+      "Latch-lock/PLC/safety-strap tokens were detected (PLC, LATCH-LOCK, SAFETY-STRAP/SAFTEY-STRAP). This base is plate-sequenced; latch locks mark secondary parting/opening lines and do not set guide direction. Leader-pin position and any reversed/seated leader pins were not allowed to flip the A/B plate assignment established by shop-name tokens and the full-footprint stack order."
+    ]
+  },
+  "classifications": [
+    {
+      "index": "1",
+      "role": "a_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token A-PLATE, confirmed as a full-footprint mold plate.",
+      "quote": true
+    },
+    {
+      "index": "2",
+      "role": "b_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token B-PLATE, confirmed as a full-footprint mold plate.",
+      "quote": true
+    },
+    {
+      "index": "3",
+      "role": "sc_backup_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token SC-BACKUP-PLATE in a special standard mold-base stack.",
+      "quote": true
+    },
+    {
+      "index": "4",
+      "role": "bottom_clamp_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token CLAMP-PLATE on the ejector/clamp side.",
+      "quote": true
+    },
+    {
+      "index": "5",
+      "role": "sc_retainer_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token SC-RETAINER-PLATE in a special standard mold-base stack.",
+      "quote": true
+    },
+    {
+      "index": "6",
+      "role": "bottom_ejector_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token EJ-BACKUP-PLATE; thicker/lower backing plate in ejector stack. CMS naming: Bottom Ejector Plate (never Ejector Retainer Plate).",
+      "quote": true
+    },
+    {
+      "index": "7",
+      "role": "rail",
+      "confidence": "HIGH",
+      "reason": "Strong shop token RAIL; long side rail/support block.",
+      "quote": true
+    },
+    {
+      "index": "8",
+      "role": "rail",
+      "confidence": "HIGH",
+      "reason": "Strong shop token RAIL; long side rail/support block.",
+      "quote": true
+    },
+    {
+      "index": "9",
+      "role": "ejector_plate",
+      "confidence": "HIGH",
+      "reason": "Strong shop token EJ-RET-PLATE; thinner plate in ejector stack. CMS naming: Ejector Plate.",
+      "quote": true
+    },
+    {
+      "index": "10",
+      "role": "leader_pin",
+      "confidence": "HIGH",
+      "reason": "Primary leader-pin set: center position matches shoulder bushings that sit on the B plate.",
+      "quote": false
+    },
+    {
+      "index": "11",
+      "role": "leader_pin",
+      "confidence": "HIGH",
+      "reason": "Primary leader-pin set: center position matches shoulder bushings that sit on the B plate.",
+      "quote": false
+    },
+    {
+      "index": "12",
+      "role": "leader_pin",
+      "confidence": "HIGH",
+      "reason": "Primary leader-pin set: center position matches shoulder bushings that sit on the B plate.",
+      "quote": false
+    },
+    {
+      "index": "13",
+      "role": "leader_pin",
+      "confidence": "HIGH",
+      "reason": "Primary leader-pin set: center position matches shoulder bushings that sit on the B plate.",
+      "quote": false
+    },
+    {
+      "index": "14",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "15",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "16",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "17",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "18",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "19",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "20",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "21",
+      "role": "leader_pin_bushing",
+      "confidence": "HIGH",
+      "reason": "Strong shop token LBB; leader pin bushing.",
+      "quote": false
+    },
+    {
+      "index": "22",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "23",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "24",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "25",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "26",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "27",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "28",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "29",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "30",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "31",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "32",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "33",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "34",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "35",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "36",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "37",
+      "role": "return_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long 1-inch-class round pin; likely return/ejector return pin.",
+      "quote": false
+    },
+    {
+      "index": "38",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "39",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "40",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "41",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "42",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "43",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "44",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "45",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "46",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "47",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "48",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "49",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "50",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "51",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "52",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "53",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "54",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "55",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "56",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "57",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "58",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "59",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "60",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "61",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "62",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "63",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "64",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "65",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "66",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "67",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "68",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "69",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "70",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "71",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "72",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Inside mold stack but not enough geometry to name confidently.",
+      "quote": false
+    },
+    {
+      "index": "73",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Inside mold stack but not enough geometry to name confidently.",
+      "quote": false
+    },
+    {
+      "index": "74",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "75",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "76",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "77",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "78",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "79",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "80",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "81",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "82",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "83",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "84",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "85",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "86",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "87",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "88",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "89",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "90",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "91",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "92",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "93",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "94",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "95",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "96",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "97",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "98",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "99",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "100",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "101",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "102",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "103",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "104",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "105",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "106",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "107",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "108",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "109",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "110",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "111",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "112",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "113",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "114",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "115",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "116",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "117",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "118",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "119",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "120",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "121",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "122",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "123",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "124",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "125",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "126",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "127",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "128",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "129",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "130",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "131",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "132",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "133",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "134",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "135",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "136",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "137",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "138",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "139",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "140",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "141",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "142",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "143",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "144",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "145",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "146",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "147",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "148",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "149",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "150",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "151",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "152",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "153",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "154",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "155",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "156",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "157",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "158",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "159",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "160",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "161",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "162",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "163",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "164",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "165",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "166",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "167",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "168",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "169",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "170",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "171",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "172",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "173",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "174",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "175",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "176",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "177",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "178",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "179",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "180",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "181",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "182",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "183",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "184",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "185",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "186",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "187",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "188",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "189",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "190",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "191",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "192",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "193",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "194",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "195",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "196",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "197",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "198",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "199",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "200",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "201",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "202",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "203",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "204",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "205",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "206",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "207",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "208",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "209",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "210",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "211",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "212",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "213",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "214",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "215",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "216",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "217",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "218",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "219",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "220",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "221",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "222",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "223",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "224",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "225",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "226",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "227",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "228",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "229",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "230",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "231",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "232",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "233",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "234",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "235",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "236",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "237",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "238",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "239",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "240",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "241",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "242",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "243",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "244",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "245",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "246",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "247",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "248",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "249",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "250",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "251",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "252",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "253",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "254",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "255",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "256",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "257",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "258",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "259",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "260",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    },
+    {
+      "index": "261",
+      "role": "latch_lock",
+      "confidence": "HIGH",
+      "reason": "Strong shop token (PLC/LATCH-LOCK/SAFETY-STRAP); plate-sequenced latch-lock hardware marking a secondary parting/opening line. Does not set guide direction and must not flip A/B plate assignment.",
+      "quote": false
+    }
+  ]
+}

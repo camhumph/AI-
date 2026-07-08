@@ -1,0 +1,5 @@
+# Regenerated automatically by the app -- no need to commit.
+data/vba_bridge/
+data/pricing_config.json
+__pycache__/
+*.pyc
