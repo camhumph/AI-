@@ -32,7 +32,21 @@ from email.utils import parseaddr
 
 # ===================== SETTINGS =====================
 GMAIL_ADDRESS      = "cms1engineering@gmail.com"  # mailbox quotes arrive in
-APP_PASSWORD       = "fipw wryb aktk vtmu"        # 16-char Gmail app password
+# SECURITY: the old app password was committed to GitHub and must be REVOKED
+# (myaccount.google.com/apppasswords). Save the NEW app password, alone on one
+# line, in the file below (same file the VBA macro reads).
+APP_PASSWORD_FILE  = r"C:\CMS_Local_Workspace\gmail_app_password.txt"
+
+
+def _read_app_password():
+    try:
+        with open(APP_PASSWORD_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+APP_PASSWORD       = _read_app_password()         # 16-char Gmail app password
 SUBJECT_KEYWORD    = ""                           # "" = list ALL unopened (forwards/RFQs have no fixed word)
 SEARCH_UNREAD_ONLY = True                         # prefer unread, fall back to read if none
 MARK_AS_READ       = False                        # mark the picked email read after pulling it
