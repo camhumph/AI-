@@ -44,10 +44,13 @@ export default function Sidebar() {
       </nav>
 
       <div className="mx-3 mb-4 rounded-xl border border-ink-700/60 bg-ink-850/70 p-3.5">
-        <div className="text-[11px] font-medium uppercase tracking-wider text-ink-400">AI Bridge</div>
+        <div className="flex items-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-accent-green shadow-[0_0_6px] shadow-accent-green/60" />
+          <span className="text-[11px] font-medium uppercase tracking-wider text-ink-400">Module6121 Bridge</span>
+        </div>
         <p className="mt-1.5 text-xs leading-relaxed text-ink-300">
-          Every classified job auto-exports resolved part names for
-          <span className="font-semibold text-ink-100"> Module6121</span> to read.
+          The macro calls this app live on <span className="font-semibold text-ink-100">127.0.0.1</span> --
+          local machine only, never the network.
         </p>
       </div>
     </aside>

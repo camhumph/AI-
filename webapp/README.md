@@ -1,74 +1,100 @@
 # CMS AI Quoting Web App
 
-A full-stack quoting console for the CMS mold-geometry AI pipeline:
+A full-stack quoting console for the CMS mold-geometry AI pipeline, wired
+**live into Module6121** (the SolidWorks quoting macro at the repo root):
 
-- Browse/upload CAD job folders and (re)run the AI classifier
-  (`geometry_classifier/qwen_classify_xt_csv.py`) on them.
+- **Module6121 integration (seamless, local-only):** right after the macro
+  writes `XT_Export_CAD_Dimensions.csv`, it POSTs the CSV path to this app at
+  `http://127.0.0.1:8000/api/vba/classify`. The app runs the AI classifier
+  and returns one resolved role per CAD part
+  (`A Plate`, `B Plate`, `SC Retainer Plate`, `Bottom Ejector Plate`, rails,
+  leader pins, latch locks...). The macro applies those roles to its standard
+  plate list before filling the quote workbook and steel sheet. Every macro
+  run also auto-registers the job here, so it appears in the dashboard
+  instantly.
+- **BMS protection:** BMS / pot-block bases NEVER touch the AI. The macro
+  guards them (`RunAiBridgeClassification` exits for non-standard bases) and
+  the app refuses to classify any job marked `base_type=bms` -- their proven
+  BOM-driven flow is untouched. BMS jobs still register in the dashboard,
+  clearly badged.
+- Browse/upload CAD job folders and (re)run the AI classifier on standard
+  bases from the UI.
 - See every part of a quote in one place: rendered JPEG views, an STL 3D
   viewer, a grouped/priced parts table, and any documents (quote sheet,
   steel sheet, PDFs) for that job.
-- A configurable pricing engine that computes a total quote price per job.
+- A pricing engine with a total quote price per job. Hardware roles price
+  from the shop's real `Purchased Components Prices.csv` (same file the
+  macro reads); plate rates are editable placeholders in Settings.
 - An email inbox (IMAP) with a reply composer (SMTP) and a "Quote This"
   button that jumps straight into the matching job.
-- A "Module6121 AI bridge" that exports AI-resolved part names/roles to a
-  flat CSV/JSON every time a job is classified or viewed, for your VBA macro
-  to read.
 
 ```
 webapp/
-  backend/     FastAPI app (Python)
-  frontend/    Vite + React + TypeScript + Tailwind UI
-  vba/         Paste-in VBA helper module for Module6121 integration
+  backend/                  FastAPI app (Python)
+  frontend/                 Vite + React + TypeScript + Tailwind UI
+  START_CMS_QUOTING_APP.bat one-click local-only start for the shop PC
 ```
 
-## Important: Module6121.bas
+## Local-only hosting (off the network)
 
-This app can **export** AI-resolved part names/prices for a VBA macro to
-consume (see "Module6121 bridge" below and `vba/AI_Bridge_Import.bas`), but
-it does not modify your actual `Module6121.bas` because that file has not
-made it into this repo/environment yet (file uploads in this chat don't land
-in the cloud agent's filesystem). To get the AI wired directly into your real
-macro's Subs/named ranges:
+This app is designed to run **on the same PC as SolidWorks/Module6121 and
+bind to 127.0.0.1 only** -- it is never exposed to the network or internet.
+`START_CMS_QUOTING_APP.bat` starts it that way, and the macro's
+`AI_BRIDGE_URL` constant points at `http://127.0.0.1:8000`.
 
-- Paste the contents of `Module6121.bas` into the chat, **or**
-- Add it to this git repo (e.g. `vba/Module6121.bas`) and push it.
+## Running
 
-Once I can see the actual cell references / named ranges Module6121 uses to
-place part names, I can wire `webapp/vba/AI_Bridge_Import.bas`'s
-`WriteRowToQuote` routine directly into it instead of leaving it as a
-documented placeholder.
+### One-click on the shop PC (production, local-only)
 
-## Running locally
+First-time setup:
 
-### 1. Backend (FastAPI)
+```bat
+cd webapp\backend  && pip install -r requirements.txt
+cd webapp\frontend && npm install && npm run build
+```
+
+Then just double-click `webapp\START_CMS_QUOTING_APP.bat`. One process on
+`127.0.0.1:8000` serves both the UI and the API (the backend serves the
+built frontend automatically when `frontend/dist` exists).
+
+### Development mode
 
 ```bash
 cd webapp/backend
-pip install -r requirements.txt   # fastapi, uvicorn, python-multipart, pydantic
+pip install -r requirements.txt
 python3 seed_demo_data.py         # optional: seeds a real T001015 demo job
-python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
-### 2. Frontend (Vite + React)
-
-```bash
 cd webapp/frontend
 npm install
-npm run dev -- --host
+npm run dev                        # http://localhost:5173, proxies /api to :8000
 ```
 
-Open the printed URL (defaults to `http://localhost:5173`). The dev server
-proxies `/api/*` to `http://localhost:8000`.
+## How the Module6121 integration works
 
-### Production build
+Inside `Module6121.bas` (repo root):
 
-```bash
-cd webapp/frontend
-npm run build     # outputs frontend/dist
+| Piece | What it does |
+|---|---|
+| `RunAiBridgeClassification` | Called in `ProcessOneJob` and `RunActiveAssembly` right after `DetectBaseTypeIsStandard`. Skips + logs for BMS/pot-block bases. POSTs the CAD CSV path to `/api/vba/classify`; falls back to a bridge file in `C:\CMS_Local_Workspace\AI_Bridge\` when the app isn't running; if neither exists, the macro's own geometry rules run alone (nothing breaks). |
+| `BuildStdFromAiBridge` | New first-priority source in `ClassifyStandardBasePlates`: applies the AI's per-part roles (>= 3 plates required, else geometry fallback). Logs every AI-assigned plate with confidence. |
+| `AiPlateNameForRole` | Maps AI role keys to the macro's plate names and existing quote rows -- `bottom_ejector_plate` lands on the same PIN row the thick ejector plate always used, `ejector_plate` keeps the EJECTOR row. Nothing about the quote workbook layout changes. |
+| Latch locks | `latch_lock` roles are logged as secondary-parting-line markers and never flip A/B or take a leader-pin price. |
+
+The response CSV format (also written to `data/vba_bridge/<job>_part_names.csv`):
+
+```
+Index,Component,Role,ResolvedName,Confidence,Quote,Price,SecondaryPartingLine
 ```
 
-Serve `frontend/dist` with any static host, or add a `StaticFiles` mount to
-`backend/app/main.py` to serve it directly from FastAPI.
+**Deploying the macro changes:** only `Module6121.bas` (repo root) carries the
+new integration. `Module6121.swb` / `Module6121.swp` are still the OLD
+compiled/source copies -- SolidWorks can't be run in this environment to
+rebuild them. On the shop PC: open the SolidWorks VBA editor, remove the old
+module, import the updated `Module6121.bas`, and re-save the `.swb`/`.swp`
+(the same way previous macro updates were deployed). `CMS_Launcher.vbs` runs
+the `.swb` first, so this step is required before the launcher picks up the
+AI bridge.
 
 ## Configuration (environment variables)
 
@@ -107,49 +133,61 @@ copy) to browse real jobs instead of the seeded demo.
 
 ## Pricing
 
-`backend/app/pricing.py` ships **placeholder** rates -- there is no real CMS
-price book in this repo. Edit rates from the Settings page in the UI (they
-persist to `CMS_PRICING_CONFIG`), or replace `DEFAULT_RATES` directly. Each
-role has a pricing mode:
+Hardware roles (leader pins, bushings, latch locks/straps, support pillars)
+price from the shop's real **`Purchased Components Prices.csv`** at the repo
+root -- the same file Module6121 reads (override the path with
+`CMS_PURCHASED_PRICES_CSV`). Only rows with a non-zero `UnitPrice` are used.
+
+Plate rates are still **placeholders** (no plate price book exists in this
+repo). Edit them from the Settings page (persisted to `CMS_PRICING_CONFIG`).
+Pricing modes per role:
 
 - `flat` -- fixed price per unit (hardware, latch locks, pins)
 - `per_cuin` -- rate x (Thickness x Width x Length), a rough material-volume
   proxy for plates
 - `per_inch` -- rate x Length, for rails
 
-Note: latch-lock/PLC/safety-strap hardware currently classifies with
-`quote=False` by default (dozens of individual fasteners inside one latch
-assembly would otherwise wildly inflate the placeholder total). Flip that in
+Note: latch-lock/PLC/safety-strap hardware classifies with `quote=False` by
+default (dozens of individual fasteners inside one latch assembly would
+otherwise wildly inflate the total). Flip that in
 `geometry_classifier/qwen_classify_xt_csv.py` if you'd rather quote it, ideally
 per-assembly rather than per-fastener.
 
-## Module6121 bridge
+## SECURITY: Gmail app password (action required)
 
-Every time a job's quote sheet is requested (`GET /api/jobs/{id}/quote-sheet`,
-which the Quote Detail page calls on load), the backend writes:
+The previous versions of `Module6121.bas` / `cms_gmail_search.py` uploaded to
+GitHub contained a **hardcoded Gmail app password**. Even though it has been
+scrubbed from the current files, it is still visible in the repository's git
+history, so you must:
 
-```
-<CMS_VBA_BRIDGE_DIR>/<JobID>_part_names.csv
-<CMS_VBA_BRIDGE_DIR>/<JobID>_part_names.json
-```
+1. **Revoke it now** at myaccount.google.com/apppasswords
+   (account `cms1engineering@gmail.com`).
+2. Create a new app password and save it -- alone on one line -- in
+   `C:\CMS_Local_Workspace\gmail_app_password.txt` on the shop PC.
+   Both the macro and `cms_gmail_search.py` now read it from that file.
 
-CSV columns: `Index, Component, Role, ResolvedName, Quote, Price, SecondaryPartingLine`.
-
-See `vba/AI_Bridge_Import.bas` for a ready-to-paste VBA subroutine
-(`CMS_AI_ImportPartNames`) that reads this CSV and either writes it to an
-`AI_Import` worksheet (works out of the box) or can be wired into your real
-Module6121 quote-population logic (needs your actual macro -- see above).
+Also, the macro's automatic proposal email is now gated by
+`PROPOSAL_EMAIL_MODE` in `Module6121.bas` (`"PROMPT"` by default -- it asks
+before sending; set `"OFF"` to only write the preview file, `"AUTO"` for the
+old fire-and-forget behavior).
 
 ## Known limitations / honesty notes
 
 - **Email** only activates once IMAP/SMTP secrets are set; there is no fake
   inbox data -- it fails closed with a clear "connect your email" state.
-- **Pricing** is placeholder math, not CMS's real price book.
+- **Plate pricing** is placeholder math (hardware pricing is real, from the
+  shop CSV).
 - **"Quote This" from an email** uses a simple job-token regex
   (`[A-Z]{1,2}\d{4,6}`, e.g. `J8420`, `T001015`, `C18606`) matched against
   known job IDs in the subject/attachment names. It's a heuristic, not
   guaranteed matching.
 - **No STL files ship in this repo** (none exist in the source workspace);
   upload one from the Quote Detail page's "3D Model" tab to see the viewer.
-- **Module6121.bas integration is a documented placeholder** until the real
-  macro file is shared (see above).
+- **The VBA changes are untestable here** (no SolidWorks/Windows/Excel in
+  this environment). The macro edits are conservative -- every AI call is
+  wrapped in error handlers that fall back to the existing geometry rules --
+  but the first run on the shop PC should be watched with the log open.
+- **AI for BMS bases is intentionally off.** If you later want the AI
+  trained on BMS/pot-block bases, the path is: collect corrected BMS
+  examples via the same CORRECT_ME workflow, add pot/holder roles to the
+  classifier, and only then relax the guards (macro + backend both).

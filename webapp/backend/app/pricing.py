@@ -54,16 +54,56 @@ def _safe_float(value, default=0.0):
         return default
 
 
+# Map hardware roles to Component names in the shop's real
+# "Purchased Components Prices.csv" (the same file Module6121 reads).
+# When that CSV has a non-zero UnitPrice for the component, it overrides the
+# placeholder flat rate for the role.
+PURCHASED_CSV_ROLE_MAP = {
+    "leader_pin": "Leader Pin",
+    "leader_pin_bushing": "Bushing",
+    "guided_ejector_bushing": "Ejector Bushing",
+    "latch_lock": "Safety Strap",
+    "support_pillar": "Support Pillar",
+}
+
+
+def _purchased_csv_prices() -> dict:
+    """Component name -> first non-zero UnitPrice from the shop price CSV."""
+    import csv as _csv
+
+    prices = {}
+    path = config.PURCHASED_PRICES_CSV
+    if not path.exists():
+        return prices
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig", errors="replace") as f:
+            for row in _csv.DictReader(l for l in f if not l.lstrip().startswith("#")):
+                comp = (row.get("Component") or "").strip()
+                price = _safe_float(row.get("UnitPrice"))
+                if comp and price > 0 and comp not in prices:
+                    prices[comp] = price
+    except Exception:
+        pass
+    return prices
+
+
 def load_rates() -> dict:
+    rates = dict(DEFAULT_RATES)
+
+    # Real shop hardware prices beat placeholder flat rates.
+    shop_prices = _purchased_csv_prices()
+    for role, comp in PURCHASED_CSV_ROLE_MAP.items():
+        if comp in shop_prices and role in rates:
+            rates[role] = {**rates[role], "mode": "flat", "rate": shop_prices[comp]}
+
+    # User-edited rates (Settings page) beat everything.
     if config.PRICING_CONFIG_PATH.exists():
         try:
             saved = json.loads(config.PRICING_CONFIG_PATH.read_text(encoding="utf-8"))
-            merged = dict(DEFAULT_RATES)
-            merged.update(saved)
-            return merged
+            rates.update(saved)
         except Exception:
             pass
-    return dict(DEFAULT_RATES)
+    return rates
 
 
 def save_rates(rates: dict) -> dict:

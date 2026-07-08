@@ -61,7 +61,11 @@ export default function QuotesPage() {
                     <div className="text-sm font-semibold text-ink-100">{job.display_name}</div>
                     <div className="text-xs text-ink-400">{job.job_id}</div>
                   </div>
-                  {job.sequenced_latch_lock_base && <Badge tone="brand">Latch-Lock</Badge>}
+                  {job.base_type === "bms" ? (
+                    <Badge tone="warning">BMS</Badge>
+                  ) : (
+                    job.sequenced_latch_lock_base && <Badge tone="brand">Latch-Lock</Badge>
+                  )}
                 </div>
                 {job.customer && <div className="mb-3 text-xs text-ink-400">{job.customer}</div>}
                 <div className="flex items-center gap-4 text-xs text-ink-400">
@@ -76,8 +80,10 @@ export default function QuotesPage() {
                   </span>
                 </div>
                 <div className="mt-3">
-                  {job.has_classification ? (
-                    <Badge tone="success">Classified</Badge>
+                  {job.base_type === "bms" ? (
+                    <Badge>BOM-driven (Module6121) -- AI off</Badge>
+                  ) : job.has_classification ? (
+                    <Badge tone="success">AI Classified</Badge>
                   ) : job.has_raw_csv ? (
                     <Badge tone="warning">Ready to classify</Badge>
                   ) : (

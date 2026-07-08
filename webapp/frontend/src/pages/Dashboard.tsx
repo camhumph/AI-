@@ -15,8 +15,8 @@ export default function Dashboard() {
   }, []);
 
   const totalParts = jobs?.reduce((s, j) => s + j.part_count, 0) ?? 0;
-  const totalImages = jobs?.reduce((s, j) => s + j.image_count, 0) ?? 0;
   const sequenced = jobs?.filter((j) => j.sequenced_latch_lock_base).length ?? 0;
+  const bmsCount = jobs?.filter((j) => j.base_type === "bms").length ?? 0;
 
   return (
     <Layout
@@ -32,13 +32,18 @@ export default function Dashboard() {
     >
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Active Jobs" value={jobs?.length ?? "--"} sub="Quote-ready folders" accent="brand" />
-        <StatCard label="Classified Parts" value={totalParts.toLocaleString()} sub="Across all jobs" accent="teal" />
-        <StatCard label="Rendered Views" value={totalImages} sub="JPEG assembly renders" accent="amber" />
+        <StatCard label="AI-Classified Parts" value={totalParts.toLocaleString()} sub="Across standard bases" accent="teal" />
         <StatCard
-          label="Plate-Sequenced Bases"
+          label="Latch-Lock Bases"
           value={sequenced}
-          sub="Latch-lock / secondary parting lines"
+          sub="Plate-sequenced / secondary parting lines"
           accent="rose"
+        />
+        <StatCard
+          label="BMS Bases"
+          value={bmsCount}
+          sub="BOM-driven by Module6121 (AI off)"
+          accent="amber"
         />
       </div>
 
@@ -65,7 +70,11 @@ export default function Dashboard() {
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-ink-100">{job.display_name}</span>
-                      {job.sequenced_latch_lock_base && <Badge tone="brand">Latch-Lock Base</Badge>}
+                      {job.base_type === "bms" ? (
+                        <Badge tone="warning">BMS</Badge>
+                      ) : (
+                        job.sequenced_latch_lock_base && <Badge tone="brand">Latch-Lock Base</Badge>
+                      )}
                     </div>
                     <div className="mt-1 flex items-center gap-3 text-xs text-ink-400">
                       <span className="flex items-center gap-1">

@@ -108,6 +108,7 @@ def list_jobs() -> list:
                 "display_name": meta.get("display_name", job_dir.name),
                 "customer": meta.get("customer", ""),
                 "notes": meta.get("notes", ""),
+                "base_type": meta.get("base_type", "standard"),
                 "has_raw_csv": has_raw,
                 "has_classification": classification is not None,
                 "part_count": part_count,
@@ -153,6 +154,7 @@ def get_job(job_id: str) -> dict:
         "display_name": meta.get("display_name", job_dir.name),
         "customer": meta.get("customer", ""),
         "notes": meta.get("notes", ""),
+        "base_type": meta.get("base_type", "standard"),
         "job_analysis": classification.get("job_analysis", {}),
         "parts": rows,
         "images": _list_assets(job_dir, "images", IMAGE_EXTS),
@@ -176,15 +178,39 @@ def create_job(job_id: str, display_name: str = "", customer: str = "") -> dict:
     (job_dir / "images").mkdir(exist_ok=True)
     (job_dir / "models").mkdir(exist_ok=True)
     (job_dir / "documents").mkdir(exist_ok=True)
-    meta = {
-        "display_name": display_name or job_id,
-        "customer": customer,
-        "notes": "",
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    if not (job_dir / "meta.json").exists():
+        meta = {
+            "display_name": display_name or job_id,
+            "customer": customer,
+            "notes": "",
+            "base_type": "standard",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return get_job(job_id)
+
+
+def update_meta(job_id: str, **fields) -> None:
+    job_dir = _job_dir(job_id)
+    if not job_dir.exists():
+        return
+    meta = _read_meta(job_dir)
+    meta.update(fields)
+    meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+
+def import_raw_csv(job_id: str, csv_path: str) -> bool:
+    """Copy a local XT_Export_CAD_Dimensions.csv (e.g. from the SolidWorks
+    macro's job folder) into this job. Returns False when unreadable."""
+    src = Path(csv_path)
+    if not src.exists() or not src.is_file():
+        return False
+    job_dir = _job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "XT_Export_CAD_Dimensions.csv").write_bytes(src.read_bytes())
+    return True
 
 
 def save_upload(job_id: str, subfolder: str, filename: str, data: bytes) -> dict:

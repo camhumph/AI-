@@ -33,6 +33,16 @@ PRICING_CONFIG_PATH = Path(
     os.environ.get("CMS_PRICING_CONFIG", DATA_DIR / "pricing_config.json")
 )
 
+# The shop's real purchased-component price list (same CSV Module6121 reads).
+# Hardware roles (leader pins, bushings, latch locks/straps...) price from
+# this file when a usable UnitPrice exists.
+PURCHASED_PRICES_CSV = Path(
+    os.environ.get(
+        "CMS_PURCHASED_PRICES_CSV",
+        BACKEND_DIR.parent.parent / "Purchased Components Prices.csv",
+    )
+)
+
 # --- Email (IMAP/SMTP) ---------------------------------------------------
 # These are intentionally read from the environment only (Cursor Cloud
 # Agent Secrets, or a real .env on the CMS machine). Nothing email-related

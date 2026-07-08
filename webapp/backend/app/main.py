@@ -1,15 +1,19 @@
 import mimetypes
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import config, email_service, jobs, pricing, vba_bridge
 
 app = FastAPI(title="CMS AI Quoting")
 
+# Local-only tool: the server binds 127.0.0.1 (see run instructions/README);
+# CORS stays open for the localhost Vite dev server on another port.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -65,6 +69,15 @@ def api_get_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/classify")
 def api_classify_job(job_id: str, body: ClassifyBody):
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    if job.get("base_type") == "bms":
+        raise HTTPException(
+            status_code=409,
+            detail="This is a BMS / pot-block base. Its quote is BOM-driven by "
+            "Module6121 and the AI classifier is intentionally disabled for it.",
+        )
     try:
         return jobs.classify_job(job_id, body.mode)
     except FileNotFoundError as e:
@@ -118,6 +131,52 @@ def api_put_pricing(rates: dict):
 # --------------------------------------------------------------------------
 # Module6121 / VBA bridge
 # --------------------------------------------------------------------------
+class VbaClassifyBody(BaseModel):
+    job_id: str
+    csv_path: str
+    base_type: str = "standard"  # "standard" | "bms"
+
+
+@app.post("/api/vba/classify", response_class=PlainTextResponse)
+def api_vba_classify(body: VbaClassifyBody):
+    """Called by Module6121 right after it writes XT_Export_CAD_Dimensions.csv.
+
+    Registers/updates the job (so it appears in the dashboard immediately),
+    and for STANDARD bases runs the AI classifier and returns the bridge CSV
+    (Index,Component,Role,ResolvedName,Confidence,Quote,Price,SecondaryPartingLine)
+    the macro parses to name plates.
+
+    BMS / pot-block bases are NEVER classified: the macro's BOM-driven flow
+    owns them. They are only registered (marked base_type=bms) for visibility.
+    """
+    job_id = body.job_id.strip() or "ACTIVE"
+    jobs.create_job(job_id, display_name=job_id)
+    imported = jobs.import_raw_csv(job_id, body.csv_path)
+
+    base_type = "bms" if body.base_type.strip().lower() in ("bms", "pot", "pot_block") else "standard"
+    jobs.update_meta(job_id, base_type=base_type)
+
+    if base_type == "bms":
+        return "BMS_REGISTERED: BOM-driven flow retained; AI classification skipped."
+
+    if not imported:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV not readable at '{body.csv_path}'. The macro and this app "
+            "must run on the same machine (or share the path).",
+        )
+
+    try:
+        job = jobs.classify_job(job_id, mode="rules")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Classification failed: {e}")
+
+    sheet = pricing.build_quote_sheet(job)
+    vba_bridge.write_bridge_files(job_id, sheet, job.get("job_analysis", {}))
+    csv_file = config.VBA_BRIDGE_DIR / f"{job_id}_part_names.csv"
+    return csv_file.read_text(encoding="utf-8")
+
+
 @app.get("/api/bridge/{job_id}")
 def api_bridge_json(job_id: str):
     payload = vba_bridge.read_bridge_json(job_id)
@@ -202,3 +261,19 @@ def api_email_reply(message_id: str, body: ReplyBody):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not send reply: {e}")
     return {"sent": True}
+
+
+# --------------------------------------------------------------------------
+# Built frontend (single local process: 127.0.0.1:8000 serves UI + API).
+# Falls back gracefully when webapp/frontend/dist has not been built yet.
+# --------------------------------------------------------------------------
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        candidate = _FRONTEND_DIST / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_FRONTEND_DIST / "index.html")

@@ -109,15 +109,27 @@ export default function QuoteDetailPage() {
           <Link to="/quotes">
             <Button variant="ghost"><ChevronLeft className="h-4 w-4" /> Quotes</Button>
           </Link>
-          <Button variant="secondary" onClick={() => classify("rules")} disabled={busy || !job.has_raw_csv}>
-            <RefreshCw className={busy ? "h-4 w-4 animate-spin" : "h-4 w-4"} /> Re-run AI
-          </Button>
+          {job.base_type !== "bms" && (
+            <Button variant="secondary" onClick={() => classify("rules")} disabled={busy || !job.has_raw_csv}>
+              <RefreshCw className={busy ? "h-4 w-4 animate-spin" : "h-4 w-4"} /> Re-run AI
+            </Button>
+          )}
         </div>
       }
     >
       {error && (
         <div className="mb-4 rounded-xl border border-accent-rose/30 bg-accent-rose/10 px-4 py-2.5 text-sm text-accent-rose">
           {error}
+        </div>
+      )}
+
+      {job.base_type === "bms" && (
+        <div className="mb-4 flex items-center gap-3 rounded-xl border border-accent-amber/30 bg-accent-amber/10 px-4 py-3">
+          <span className="text-sm font-semibold text-accent-amber">BMS / Pot-Block Base</span>
+          <span className="text-xs text-ink-300">
+            This quote is BOM-driven by Module6121 -- the AI classifier is intentionally
+            disabled so it can never disturb the working BMS flow.
+          </span>
         </div>
       )}
 
@@ -157,13 +169,25 @@ export default function QuoteDetailPage() {
         <Card className="p-5 sm:col-span-2">
           <div className="mb-2 flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-brand-400" />
-            <div className="text-xs font-medium uppercase tracking-wider text-ink-400">AI Job Analysis</div>
+            <div className="text-xs font-medium uppercase tracking-wider text-ink-400">
+              {job.base_type === "bms" ? "Job Status" : "AI Job Analysis"}
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2 text-xs text-ink-300">
-            {analysis.stack_axis && <Badge>Stack axis: {analysis.stack_axis}</Badge>}
-            {analysis.sequenced_latch_lock_base && <Badge tone="brand">Plate-sequenced / latch-lock base</Badge>}
-          </div>
-          <p className="mt-2 text-xs leading-relaxed text-ink-400">{analysis.parting_line}</p>
+          {job.base_type === "bms" ? (
+            <p className="text-xs leading-relaxed text-ink-400">
+              BMS / pot-block base registered by Module6121. Plate identification and the
+              quote fill come from the customer BOM inside the macro; this page only
+              tracks the job's files and documents.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-2 text-xs text-ink-300">
+                {analysis.stack_axis && <Badge>Stack axis: {analysis.stack_axis}</Badge>}
+                {analysis.sequenced_latch_lock_base && <Badge tone="brand">Plate-sequenced / latch-lock base</Badge>}
+              </div>
+              <p className="mt-2 text-xs leading-relaxed text-ink-400">{analysis.parting_line}</p>
+            </>
+          )}
         </Card>
       </div>
 
@@ -207,8 +231,9 @@ export default function QuoteDetailPage() {
           <Card className="p-5">
             <h3 className="mb-3 text-sm font-semibold text-ink-100">Module6121 AI Bridge</h3>
             <p className="mb-3 text-xs leading-relaxed text-ink-400">
-              These exports carry AI-resolved part names/roles for your VBA macro to read and
-              fill into the quoting workbook -- no re-classification needed on the macro side.
+              {job.base_type === "bms"
+                ? "BMS bases skip the AI bridge entirely -- Module6121's BOM-driven flow owns the plate names and quote rows."
+                : "Module6121 calls this app live at 127.0.0.1 right after it exports the CAD CSV; the AI-resolved part names below are what the macro receives and fills into the quote workbook. You can also download the same export here."}
             </p>
             <div className="flex flex-wrap gap-2">
               <a href={api.bridgeCsvUrl(job.job_id)} download>

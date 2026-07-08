@@ -5,6 +5,7 @@ export interface JobSummary {
   display_name: string;
   customer: string;
   notes: string;
+  base_type: "standard" | "bms";
   has_raw_csv: boolean;
   has_classification: boolean;
   part_count: number;
@@ -49,6 +50,7 @@ export interface JobDetail {
   display_name: string;
   customer: string;
   notes: string;
+  base_type: "standard" | "bms";
   job_analysis: JobAnalysis;
   parts: PartRow[];
   images: AssetRef[];

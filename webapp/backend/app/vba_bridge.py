@@ -54,6 +54,7 @@ def write_bridge_files(job_id: str, quote_sheet: dict, job_analysis: dict) -> di
                 "Component": item.get("component"),
                 "Role": role,
                 "ResolvedName": _resolved_name(role, role_counts),
+                "Confidence": (item.get("confidence") or "MEDIUM").upper(),
                 "Quote": "TRUE" if item.get("quote") else "FALSE",
                 "Price": item.get("price", 0.0),
                 "SecondaryPartingLine": "TRUE"
@@ -66,8 +67,8 @@ def write_bridge_files(job_id: str, quote_sheet: dict, job_analysis: dict) -> di
         writer = csv.DictWriter(
             f,
             fieldnames=[
-                "Index", "Component", "Role", "ResolvedName", "Quote", "Price",
-                "SecondaryPartingLine",
+                "Index", "Component", "Role", "ResolvedName", "Confidence",
+                "Quote", "Price", "SecondaryPartingLine",
             ],
         )
         writer.writeheader()
