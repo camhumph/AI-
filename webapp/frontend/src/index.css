@@ -3,16 +3,16 @@
 @theme {
   --font-sans: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
 
-  --color-ink-950: #f4f4f5;
-  --color-ink-900: #ececed;
-  --color-ink-850: #e4e4e6;
-  --color-ink-800: #d4d4d8;
-  --color-ink-700: #b8b8be;
-  --color-ink-600: #8e8e96;
-  --color-ink-500: #6b6b73;
-  --color-ink-400: #4a4a52;
-  --color-ink-300: #2e2e34;
-  --color-ink-200: #1a1a1f;
+  --color-ink-950: #e8e8ea;
+  --color-ink-900: #dedee1;
+  --color-ink-850: #d4d4d8;
+  --color-ink-800: #c4c4c9;
+  --color-ink-700: #a8a8b0;
+  --color-ink-600: #7e7e88;
+  --color-ink-500: #5c5c66;
+  --color-ink-400: #3a3a42;
+  --color-ink-300: #242428;
+  --color-ink-200: #141418;
   --color-ink-100: #0a0a0c;
 
   --color-brand-500: #0a0a0c;
@@ -30,7 +30,7 @@ html, body, #root {
 }
 
 body {
-  background: linear-gradient(180deg, #f8f8f9 0%, #ececed 40%, #e2e2e5 100%);
+  background: linear-gradient(180deg, #e4e4e7 0%, #d8d8dc 45%, #ceced3 100%);
   color: #0a0a0c;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
@@ -48,13 +48,13 @@ h1, h2, h3 {
 }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #e4e4e6; }
-::-webkit-scrollbar-thumb { background: #b8b8be; }
+::-webkit-scrollbar-track { background: #d4d4d8; }
+::-webkit-scrollbar-thumb { background: #a8a8b0; border-radius: 3px; }
 
 .glass-panel {
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(10, 10, 12, 0.1);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 8px 32px rgba(10, 10, 12, 0.06);
+  background: rgba(222, 222, 225, 0.88);
+  border: 1px solid rgba(10, 10, 12, 0.08);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 8px 32px rgba(10, 10, 12, 0.08);
   backdrop-filter: blur(12px);
 }
 
@@ -65,5 +65,27 @@ h1, h2, h3 {
   font-weight: 700;
   letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: #6b6b73;
+  color: #5c5c66;
+}
+
+.inbox-row {
+  transition: background 0.12s ease;
+}
+
+.inbox-row:hover {
+  background: rgba(196, 196, 201, 0.55);
+}
+
+.inbox-row-selected {
+  background: rgba(186, 186, 192, 0.75);
+}
+
+.inbox-unread .inbox-sender,
+.inbox-unread .inbox-subject {
+  font-weight: 600;
+  color: #0a0a0c;
+}
+
+.compose-shadow {
+  box-shadow: 0 12px 48px rgba(10, 10, 12, 0.18);
 }

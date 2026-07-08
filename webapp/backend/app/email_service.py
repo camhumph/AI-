@@ -65,10 +65,58 @@ def guess_job_tokens(*texts) -> list:
     return sorted(tokens)
 
 
-def list_messages(limit: int = 30) -> list:
+def _parse_flags(fetch_line: bytes | tuple) -> dict:
+    seen = flagged = False
+    raw = b""
+    if isinstance(fetch_line, tuple):
+        raw = fetch_line[0] if isinstance(fetch_line[0], bytes) else b""
+    elif isinstance(fetch_line, bytes):
+        raw = fetch_line
+    text = raw.decode("utf-8", errors="replace").upper()
+    seen = "\\SEEN" in text
+    flagged = "\\FLAGGED" in text
+    return {"seen": seen, "starred": flagged}
+
+
+def _snippet_from_msg(msg: email.message.Message, max_len: int = 120) -> str:
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            if part.get_filename():
+                continue
+            if part.get_content_type() == "text/plain":
+                body = (part.get_payload(decode=True) or b"").decode(
+                    part.get_content_charset() or "utf-8", errors="replace"
+                )
+                break
+    else:
+        body = (msg.get_payload(decode=True) or b"").decode(
+            msg.get_content_charset() or "utf-8", errors="replace"
+        )
+    body = re.sub(r"\s+", " ", body).strip()
+    return body[:max_len] + ("…" if len(body) > max_len else "")
+
+
+def _extract_name_addr(from_hdr: str) -> tuple[str, str]:
+    m = re.match(r"^(.*?)\s*<([^>]+)>$", (from_hdr or "").strip())
+    if m:
+        return m.group(1).strip('" '), m.group(2).strip()
+    return from_hdr, from_hdr
+
+
+def list_messages(limit: int = 50, query: str = "", folder: str | None = None) -> list:
     imap = _connect()
     try:
-        status, data = imap.search(None, "ALL")
+        if folder and folder != config.IMAP_FOLDER:
+            imap.select(folder)
+        criteria = "ALL"
+        q = (query or "").strip()
+        if q:
+            safe = q.replace('"', "")
+            criteria = f'(OR SUBJECT "{safe}" FROM "{safe}" BODY "{safe}")'
+        status, data = imap.search(None, criteria)
         if status != "OK":
             return []
         ids = data[0].split()
@@ -76,25 +124,50 @@ def list_messages(limit: int = 30) -> list:
         messages = []
         for msg_id in ids:
             status, msg_data = imap.fetch(
-                msg_id, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+                msg_id,
+                "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)] BODY.PEEK[TEXT]<0.400>)",
             )
-            if status != "OK" or not msg_data or not msg_data[0]:
+            if status != "OK" or not msg_data:
                 continue
-            raw_headers = msg_data[0][1]
-            msg = email.message_from_bytes(raw_headers)
+            flags = {"seen": False, "starred": False}
+            header_bytes = b""
+            snippet_bytes = b""
+            for item in msg_data:
+                if not isinstance(item, tuple):
+                    continue
+                meta = item[0].decode("utf-8", errors="replace") if item[0] else ""
+                if "FLAGS" in meta.upper():
+                    flags = _parse_flags(item)
+                if b"HEADER" in (item[0] or b""):
+                    header_bytes = item[1] or b""
+                elif item[1] and not header_bytes:
+                    snippet_bytes = item[1] or b""
+                elif item[1] and header_bytes and not snippet_bytes:
+                    snippet_bytes = item[1] or b""
+            if not header_bytes and msg_data and isinstance(msg_data[0], tuple):
+                header_bytes = msg_data[0][1] or b""
+            msg = email.message_from_bytes(header_bytes)
             subject = _decode(msg.get("Subject"))
             from_ = _decode(msg.get("From"))
+            name, addr = _extract_name_addr(from_)
             date_hdr = msg.get("Date")
             try:
                 date_iso = parsedate_to_datetime(date_hdr).isoformat() if date_hdr else ""
             except Exception:
                 date_iso = date_hdr or ""
+            snippet = re.sub(r"\s+", " ", snippet_bytes.decode("utf-8", errors="replace")).strip()
+            snippet = snippet[:120] + ("…" if len(snippet) > 120 else "")
             messages.append(
                 {
                     "id": msg_id.decode(),
                     "from": from_,
+                    "from_name": name or addr,
+                    "from_addr": addr,
                     "subject": subject,
                     "date": date_iso,
+                    "snippet": snippet,
+                    "seen": flags["seen"],
+                    "starred": flags["starred"],
                     "job_tokens": guess_job_tokens(subject),
                 }
             )
@@ -153,10 +226,19 @@ def get_message(message_id: str) -> dict:
             subject, " ".join(a["filename"] for a in attachments)
         )
 
+        flags = {"seen": False, "starred": False}
+        try:
+            st, fd = imap.fetch(message_id.encode(), "(FLAGS)")
+            if st == "OK" and fd:
+                flags = _parse_flags(fd[0])
+        except Exception:
+            pass
+
         return {
             "id": message_id,
             "from": from_,
             "to": to,
+            "cc": _decode(msg.get("Cc")),
             "subject": subject,
             "date": date_hdr,
             "message_id_header": message_id_hdr,
@@ -164,12 +246,101 @@ def get_message(message_id: str) -> dict:
             "body_html": body_html,
             "attachments": attachments,
             "job_tokens": job_tokens,
+            "seen": flags["seen"],
+            "starred": flags["starred"],
         }
     finally:
         try:
             imap.logout()
         except Exception:
             pass
+
+
+def _msg_id_bytes(message_id: str) -> bytes:
+    return message_id.encode() if isinstance(message_id, str) else message_id
+
+
+def mark_read(message_id: str, read: bool = True) -> None:
+    imap = _connect()
+    try:
+        flag = "\\Seen" if read else "-FLAGS"
+        if read:
+            imap.store(_msg_id_bytes(message_id), "+FLAGS", "\\Seen")
+        else:
+            imap.store(_msg_id_bytes(message_id), "-FLAGS", "\\Seen")
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def toggle_star(message_id: str, starred: bool) -> None:
+    imap = _connect()
+    try:
+        if starred:
+            imap.store(_msg_id_bytes(message_id), "+FLAGS", "\\Flagged")
+        else:
+            imap.store(_msg_id_bytes(message_id), "-FLAGS", "\\Flagged")
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def delete_message(message_id: str, permanent: bool = False) -> None:
+    imap = _connect()
+    try:
+        mid = _msg_id_bytes(message_id)
+        if not permanent:
+            for trash in ("[Gmail]/Trash", "Trash", "[Google Mail]/Trash"):
+                try:
+                    imap.copy(mid, trash)
+                    break
+                except Exception:
+                    continue
+        imap.store(mid, "+FLAGS", "\\Deleted")
+        imap.expunge()
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def archive_message(message_id: str) -> None:
+    imap = _connect()
+    try:
+        mid = _msg_id_bytes(message_id)
+        try:
+            imap.store(mid, "-X-GM-LABELS", r"(\Inbox)")
+        except Exception:
+            for archive in ("[Gmail]/All Mail", "All Mail"):
+                try:
+                    imap.copy(mid, archive)
+                    break
+                except Exception:
+                    continue
+            imap.store(mid, "+FLAGS", "\\Deleted")
+            imap.expunge()
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
+def _smtp_send(msg: EmailMessage) -> None:
+    if not config.SMTP_CONFIGURED:
+        raise EmailNotConfigured(
+            "SMTP is not configured. Open Settings in the webapp and save your "
+            "Gmail app password there."
+        )
+    with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as smtp:
+        smtp.starttls()
+        smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
+        smtp.send_message(msg)
 
 
 def send_reply(to_addr: str, subject: str, body: str, in_reply_to: str = "") -> None:
@@ -186,11 +357,98 @@ def send_reply(to_addr: str, subject: str, body: str, in_reply_to: str = "") -> 
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = in_reply_to
     msg.set_content(body)
+    _smtp_send(msg)
 
-    with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as smtp:
-        smtp.starttls()
-        smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
-        smtp.send_message(msg)
+
+def send_reply_all(
+    to_addrs: list[str],
+    cc_addrs: list[str],
+    subject: str,
+    body: str,
+    in_reply_to: str = "",
+) -> None:
+    msg = EmailMessage()
+    msg["From"] = config.SMTP_FROM
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
+    msg.set_content(body)
+    _smtp_send(msg)
+
+
+def send_compose(
+    to_addrs: list[str],
+    subject: str,
+    body: str,
+    cc_addrs: list[str] | None = None,
+) -> None:
+    msg = EmailMessage()
+    msg["From"] = config.SMTP_FROM
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg["Subject"] = subject
+    msg.set_content(body)
+    _smtp_send(msg)
+
+
+def send_forward(to_addr: str, subject: str, body: str, original: email.message.Message) -> None:
+    fwd_subject = subject if subject.lower().startswith("fwd:") else f"Fwd: {subject}"
+    orig_text, orig_html = "", ""
+    if original.is_multipart():
+        for part in original.walk():
+            ctype = part.get_content_type()
+            if ctype == "text/plain" and not orig_text:
+                orig_text = part.get_payload(decode=True).decode(
+                    part.get_content_charset() or "utf-8", errors="replace"
+                )
+            elif ctype == "text/html" and not orig_html:
+                orig_html = part.get_payload(decode=True).decode(
+                    part.get_content_charset() or "utf-8", errors="replace"
+                )
+    else:
+        text = (original.get_payload(decode=True) or b"").decode(
+            original.get_content_charset() or "utf-8", errors="replace"
+        )
+        if original.get_content_type() == "text/html":
+            orig_html = text
+        else:
+            orig_text = text
+
+    msg = EmailMessage()
+    msg["From"] = config.SMTP_FROM
+    msg["To"] = to_addr
+    msg["Subject"] = fwd_subject
+    if body.strip():
+        combined = f"{body.strip()}\n\n---------- Forwarded message ----------\n{orig_text}"
+    else:
+        combined = f"---------- Forwarded message ----------\n{orig_text}"
+    if orig_html:
+        msg.set_content(combined)
+        msg.add_alternative(orig_html, subtype="html")
+    else:
+        msg.set_content(combined)
+    _smtp_send(msg)
+
+
+def forward_message(message_id: str, to_addr: str, body: str = "") -> None:
+    imap = _connect()
+    try:
+        status, msg_data = imap.fetch(_msg_id_bytes(message_id), "(RFC822)")
+        if status != "OK" or not msg_data or not msg_data[0]:
+            raise ValueError("Message not found")
+        original = email.message_from_bytes(msg_data[0][1])
+        subject = _decode(original.get("Subject"))
+        send_forward(to_addr, subject, body, original)
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
 
 
 def _clean_job_token(token: str) -> str:

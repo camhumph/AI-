@@ -261,3 +261,35 @@ def poll_completion(quote_id: str) -> dict:
             status["local_folder"] = str(local)
 
     return status
+
+
+def list_active_quotes() -> list[dict]:
+    _ensure_status_dir()
+    active_phases = {"queued", "starting", "launching", "running"}
+    out: list[dict] = []
+    for path in sorted(STATUS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        phase = data.get("phase", "")
+        if phase in active_phases:
+            out.append(poll_completion(data.get("quote_id") or path.stem))
+    return out[:20]
+
+
+def list_active_quotes() -> list[dict]:
+    _ensure_status_dir()
+    active_phases = {"queued", "starting", "launching", "running"}
+    out: list[dict] = []
+    for path in sorted(STATUS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        phase = data.get("phase", "")
+        if phase in active_phases or phase == "completed":
+            if phase == "completed" and data.get("dismissed"):
+                continue
+            out.append(poll_completion(data.get("quote_id") or path.stem))
+    return out[:20]

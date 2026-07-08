@@ -1,16 +1,15 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { FileStack, Image as ImageIcon, Box, Plus, Search, FolderOpen, ChevronRight, ChevronUp } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, EmptyState, Spinner } from "../components/ui";
-import { api, type JobSummary, type WorkspaceBrowse, type QuoteRunStatus } from "../api/client";
-import QuoteProgressModal from "../components/QuoteProgressModal";
+import { api, type JobSummary, type WorkspaceBrowse } from "../api/client";
+import { useQuoteJobs } from "../context/QuoteJobsContext";
 
 export default function QuotesPage() {
   const [jobs, setJobs] = useState<JobSummary[] | null>(null);
   const [query, setQuery] = useState("");
   const [showCreate, setShowCreate] = useState(false);
-  const navigate = useNavigate();
 
   const refresh = () => api.listJobs().then(setJobs).catch(() => setJobs([]));
   useEffect(() => {
@@ -78,29 +77,17 @@ export default function QuotesPage() {
       {showCreate && (
         <FolderPickerModal
           onClose={() => setShowCreate(false)}
-          onImported={(jobId) => {
-            setShowCreate(false);
-            refresh();
-            navigate(`/quotes/${jobId}`);
-          }}
         />
       )}
     </Layout>
   );
 }
 
-function FolderPickerModal({
-  onClose,
-  onImported,
-}: {
-  onClose: () => void;
-  onImported: (jobId: string) => void;
-}) {
+function FolderPickerModal({ onClose }: { onClose: () => void }) {
   const [browse, setBrowse] = useState<WorkspaceBrowse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [quoteProgress, setQuoteProgress] = useState<QuoteRunStatus | null>(null);
-  const [activeQuoteId, setActiveQuoteId] = useState<string | null>(null);
+  const { startQuote } = useQuoteJobs();
 
   const load = (path = "") => {
     setError("");
@@ -114,41 +101,25 @@ function FolderPickerModal({
   const importFolder = async (folderPath: string) => {
     setBusy(true);
     setError("");
-    setQuoteProgress({ phase: "queued", message: "Starting full quote..." });
     try {
       const result = await api.importFromFolder(folderPath, true);
       const qid = result.quote_id || result.job_id;
-      setActiveQuoteId(qid);
-      setQuoteProgress({ phase: "running", message: "SolidWorks + Module6121 running...", job_id: result.job_id });
+      const label = folderPath.split(/[/\\]/).pop() || "Folder quote";
+      startQuote(qid, label, {
+        phase: "running",
+        message: "Running in background — SolidWorks + Module6121",
+        job_id: result.job_id,
+      });
+      onClose();
     } catch (e) {
       setError((e as Error).message);
-      setQuoteProgress(null);
     } finally {
       setBusy(false);
     }
   };
 
-  useEffect(() => {
-    if (!activeQuoteId) return;
-    const iv = setInterval(async () => {
-      try {
-        const st = await api.quoteStatus(activeQuoteId);
-        setQuoteProgress(st);
-        if (st.phase === "completed" && st.job_id) {
-          clearInterval(iv);
-          setActiveQuoteId(null);
-          onImported(st.job_id);
-        }
-      } catch { /* poll */ }
-    }, 3000);
-    return () => clearInterval(iv);
-  }, [activeQuoteId, onImported]);
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-100/40 p-4 backdrop-blur-sm">
-      {quoteProgress && activeQuoteId && (
-        <QuoteProgressModal status={quoteProgress} onClose={() => { setActiveQuoteId(null); setQuoteProgress(null); }} />
-      )}
       <Card className="flex max-h-[80vh] w-full max-w-2xl flex-col">
         <div className="flex items-center justify-between border-b border-ink-700 px-6 py-4">
           <div>

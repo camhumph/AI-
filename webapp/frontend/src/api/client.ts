@@ -109,8 +109,13 @@ export interface WorkspaceBrowse {
 export interface EmailSummary {
   id: string;
   from: string;
+  from_name?: string;
+  from_addr?: string;
   subject: string;
   date: string;
+  snippet?: string;
+  seen?: boolean;
+  starred?: boolean;
   job_tokens: string[];
   matched_jobs: string[];
 }
@@ -155,6 +160,7 @@ export interface QuoteEmailResult {
 
 export interface EmailDetail extends EmailSummary {
   to: string;
+  cc?: string;
   body_text: string;
   body_html: string;
   message_id_header: string;
@@ -192,6 +198,7 @@ export const api = {
       body: JSON.stringify({ folder_path, run_quote }),
     }),
   quoteStatus: (quoteId: string) => req<QuoteRunStatus>(`/quote/status/${encodeURIComponent(quoteId)}`),
+  activeQuotes: () => req<QuoteRunStatus[]>("/quote/active"),
   getJob: (jobId: string) => req<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`),
   createJob: (job_id: string, display_name: string, customer: string) =>
     req<JobDetail>("/jobs", { method: "POST", body: JSON.stringify({ job_id, display_name, customer }) }),
@@ -228,7 +235,7 @@ export const api = {
   putEmailSettings: (settings: Partial<EmailSettings> & { imap_password?: string; smtp_password?: string }) =>
     req<EmailSettings>("/settings/email", { method: "PUT", body: JSON.stringify(settings) }),
   testEmail: () => req<{ ok: boolean; message: string }>("/settings/email/test", { method: "POST" }),
-  listEmails: () => req<EmailSummary[]>("/email/messages"),
+  listEmails: (q = "") => req<EmailSummary[]>(`/email/messages${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   getEmail: (id: string) => req<EmailDetail>(`/email/messages/${encodeURIComponent(id)}`),
   quoteEmail: (id: string, launchMacro = true) =>
     req<QuoteEmailResult>(`/email/messages/${encodeURIComponent(id)}/quote`, {
@@ -240,6 +247,42 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ to, subject, body, in_reply_to }),
     }),
+  replyAllEmail: (
+    id: string,
+    to_addrs: string[],
+    cc_addrs: string[],
+    subject: string,
+    body: string,
+    in_reply_to = ""
+  ) =>
+    req(`/email/messages/${encodeURIComponent(id)}/reply-all`, {
+      method: "POST",
+      body: JSON.stringify({ to_addrs, cc_addrs, subject, body, in_reply_to }),
+    }),
+  forwardEmail: (id: string, to: string, body = "") =>
+    req(`/email/messages/${encodeURIComponent(id)}/forward`, {
+      method: "POST",
+      body: JSON.stringify({ to, body }),
+    }),
+  composeEmail: (to_addrs: string[], subject: string, body: string, cc_addrs: string[] = []) =>
+    req("/email/compose", {
+      method: "POST",
+      body: JSON.stringify({ to_addrs, cc_addrs, subject, body }),
+    }),
+  markEmailRead: (id: string, read: boolean) =>
+    req(`/email/messages/${encodeURIComponent(id)}/read`, {
+      method: "PATCH",
+      body: JSON.stringify({ read }),
+    }),
+  starEmail: (id: string, starred: boolean) =>
+    req(`/email/messages/${encodeURIComponent(id)}/star`, {
+      method: "PATCH",
+      body: JSON.stringify({ starred }),
+    }),
+  deleteEmail: (id: string, permanent = false) =>
+    req(`/email/messages/${encodeURIComponent(id)}?permanent=${permanent}`, { method: "DELETE" }),
+  archiveEmail: (id: string) =>
+    req(`/email/messages/${encodeURIComponent(id)}/archive`, { method: "POST" }),
 
   trainingStatus: () => req<{ jobs_processed?: number; jobs_ok?: number; output_dir?: string }>("/training/status"),
   runTraining: (jobsRoot?: string) =>

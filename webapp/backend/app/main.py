@@ -211,6 +211,34 @@ class ReplyBody(BaseModel):
     in_reply_to: Optional[str] = ""
 
 
+class ReplyAllBody(BaseModel):
+    to_addrs: list[str]
+    cc_addrs: list[str] = []
+    subject: str
+    body: str
+    in_reply_to: Optional[str] = ""
+
+
+class ComposeBody(BaseModel):
+    to_addrs: list[str]
+    cc_addrs: list[str] = []
+    subject: str
+    body: str
+
+
+class ForwardBody(BaseModel):
+    to: str
+    body: str = ""
+
+
+class MarkReadBody(BaseModel):
+    read: bool = True
+
+
+class StarBody(BaseModel):
+    starred: bool = True
+
+
 class EmailSettingsBody(BaseModel):
     imap_host: Optional[str] = "imap.gmail.com"
     imap_port: Optional[int] = 993
@@ -298,6 +326,11 @@ def api_quote_status(quote_id: str):
     return status
 
 
+@app.get("/api/quote/active")
+def api_quote_active():
+    return quote_pipeline.list_active_quotes()
+
+
 @app.get("/api/email/status")
 def api_email_status():
     view = credentials.public_view()
@@ -311,9 +344,9 @@ def api_email_status():
 
 
 @app.get("/api/email/messages")
-def api_email_messages(limit: int = 30):
+def api_email_messages(limit: int = 50, q: str = ""):
     try:
-        messages = email_service.list_messages(limit)
+        messages = email_service.list_messages(limit, query=q)
     except email_service.EmailNotConfigured as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -350,6 +383,87 @@ def api_email_reply(message_id: str, body: ReplyBody):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not send reply: {e}")
     return {"sent": True}
+
+
+@app.post("/api/email/messages/{message_id}/reply-all")
+def api_email_reply_all(message_id: str, body: ReplyAllBody):
+    try:
+        email_service.send_reply_all(
+            body.to_addrs, body.cc_addrs, body.subject, body.body, body.in_reply_to
+        )
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not send reply: {e}")
+    return {"sent": True}
+
+
+@app.post("/api/email/messages/{message_id}/forward")
+def api_email_forward(message_id: str, body: ForwardBody):
+    try:
+        email_service.forward_message(message_id, body.to, body.body)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not forward: {e}")
+    return {"sent": True}
+
+
+@app.post("/api/email/compose")
+def api_email_compose(body: ComposeBody):
+    try:
+        email_service.send_compose(body.to_addrs, body.subject, body.body, body.cc_addrs)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not send email: {e}")
+    return {"sent": True}
+
+
+@app.patch("/api/email/messages/{message_id}/read")
+def api_email_mark_read(message_id: str, body: MarkReadBody):
+    try:
+        email_service.mark_read(message_id, body.read)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not update message: {e}")
+    return {"ok": True, "read": body.read}
+
+
+@app.patch("/api/email/messages/{message_id}/star")
+def api_email_star(message_id: str, body: StarBody):
+    try:
+        email_service.toggle_star(message_id, body.starred)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not update message: {e}")
+    return {"ok": True, "starred": body.starred}
+
+
+@app.delete("/api/email/messages/{message_id}")
+def api_email_delete(message_id: str, permanent: bool = False):
+    try:
+        email_service.delete_message(message_id, permanent=permanent)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not delete message: {e}")
+    return {"deleted": True}
+
+
+@app.post("/api/email/messages/{message_id}/archive")
+def api_email_archive(message_id: str):
+    try:
+        email_service.archive_message(message_id)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not archive message: {e}")
+    return {"archived": True}
 
 
 @app.post("/api/email/messages/{message_id}/quote")

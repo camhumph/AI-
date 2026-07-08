@@ -11,7 +11,7 @@ const NAV = [
 
 export default function Sidebar() {
   return (
-    <aside className="hidden md:flex md:w-56 shrink-0 flex-col border-r border-ink-700/20 bg-white/50 backdrop-blur-md">
+    <aside className="hidden md:flex md:w-56 shrink-0 flex-col border-r border-ink-700/30 bg-ink-850/70 backdrop-blur-md">
       <div className="px-6 py-8">
         <div className="text-[9px] font-bold uppercase tracking-[0.4em] text-ink-500">CMS</div>
         <div className="mt-1 text-base font-semibold uppercase tracking-[0.2em] text-ink-100">Quoting</div>
@@ -27,8 +27,8 @@ export default function Sidebar() {
               clsx(
                 "relative flex items-center gap-3 border-l-2 px-6 py-3 text-[10px] font-bold uppercase tracking-[0.16em] transition-colors",
                 isActive
-                  ? "border-ink-100 bg-white/80 text-ink-100 shadow-sm"
-                  : "border-transparent text-ink-500 hover:border-ink-700/40 hover:text-ink-300"
+                  ? "border-ink-200 bg-ink-800/50 text-ink-100 shadow-sm"
+                  : "border-transparent text-ink-500 hover:border-ink-700/50 hover:text-ink-300"
               )
             }
           >
