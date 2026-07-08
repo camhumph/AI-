@@ -73,10 +73,14 @@ For ai = 0 To WScript.Arguments.Count - 1
     If LCase(WScript.Arguments(ai)) = "/usemail" Then gUseExistingEmail = True
 Next
 
-' First screen: show the job picker (select-all list of unopened emails) and quit.
-' The picker then runs this launcher again with /usemail for each chosen job.
+' Email quoting is done in the CMS AI Quoting webapp inbox (http://127.0.0.1:8000).
+' Click the big blue Quote button there — this launcher only runs when the
+' webapp (or an old /usemail handoff) starts it with /usemail.
 If Not gUseExistingEmail Then
-    LaunchJobPicker
+    Dim shellOpen
+    Set shellOpen = CreateObject("WScript.Shell")
+    LogStep "Opening CMS AI Quoting webapp inbox (quote emails there, not here)"
+    shellOpen.Run "http://127.0.0.1:8000/email", 1, False
     WScript.Quit
 End If
 

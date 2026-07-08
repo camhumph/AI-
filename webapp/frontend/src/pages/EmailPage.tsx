@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Mail, Paperclip, Reply, Sparkles, RefreshCw, Send, AlertCircle } from "lucide-react";
+import { Mail, Paperclip, Reply, RefreshCw, Send, AlertCircle, Trash2 } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, Spinner, EmptyState } from "../components/ui";
 import { api, type EmailSummary, type EmailDetail } from "../api/client";
@@ -14,6 +14,8 @@ export default function EmailPage() {
   const [replying, setReplying] = useState(false);
   const [replyBody, setReplyBody] = useState("");
   const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [quoting, setQuoting] = useState(false);
+  const [quoteError, setQuoteError] = useState("");
   const navigate = useNavigate();
 
   const refresh = () => {
@@ -29,16 +31,23 @@ export default function EmailPage() {
   useEffect(() => {
     if (!selectedId) return;
     setDetail(null);
+    setQuoteError("");
     api.getEmail(selectedId).then(setDetail).catch((e) => setLoadError(e.message));
     setReplying(false);
     setSendState("idle");
   }, [selectedId]);
 
-  const quoteThis = (jobTokenOrNone?: string) => {
-    if (jobTokenOrNone) {
-      navigate(`/quotes/${jobTokenOrNone}`);
-    } else {
-      navigate("/quotes");
+  const quoteThis = async () => {
+    if (!detail) return;
+    setQuoting(true);
+    setQuoteError("");
+    try {
+      const result = await api.quoteEmail(detail.id, true);
+      navigate(`/quotes/${encodeURIComponent(result.job_id)}`);
+    } catch (e) {
+      setQuoteError(e instanceof Error ? e.message : "Could not start quote");
+    } finally {
+      setQuoting(false);
     }
   };
 
@@ -61,10 +70,10 @@ export default function EmailPage() {
         <EmptyState
           icon={<Mail className="h-8 w-8" />}
           title="Connect your email to get started"
-          description="Set CMS_IMAP_HOST, CMS_IMAP_USER, and CMS_IMAP_PASSWORD (an app password works for Gmail/Outlook/Office365) as secrets in the Cursor Dashboard, then reload this page. Add CMS_SMTP_* variables too if you want to send replies from here."
+          description="Open Settings and enter your Gmail address and app password. Nothing is stored in gmail_app_password.txt — credentials stay in the webapp on this PC only."
           action={
-            <Button variant="secondary" onClick={() => window.location.reload()}>
-              <RefreshCw className="h-4 w-4" /> Reload
+            <Button variant="secondary" onClick={() => navigate("/settings")}>
+              Open Settings
             </Button>
           }
         />
@@ -125,26 +134,43 @@ export default function EmailPage() {
             <div className="p-6"><Spinner label="Loading message..." /></div>
           ) : (
             <div className="flex flex-1 flex-col overflow-hidden">
+              {/* Gmail-style action bar */}
+              <div className="flex items-center gap-1 border-b border-ink-700/60 bg-ink-850/40 px-3 py-2">
+                <button
+                  onClick={() => setReplying((r) => !r)}
+                  className="rounded-lg p-2 text-ink-400 transition hover:bg-ink-800 hover:text-ink-100"
+                  title="Reply"
+                >
+                  <Reply className="h-4 w-4" />
+                </button>
+                <button
+                  className="rounded-lg p-2 text-ink-500 cursor-not-allowed"
+                  title="Delete (use Gmail)"
+                  disabled
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+                <div className="ml-2 flex-1" />
+                <button
+                  onClick={quoteThis}
+                  disabled={quoting}
+                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-600/40 transition hover:bg-blue-500 disabled:opacity-60"
+                >
+                  {quoting ? "Starting quote..." : "Quote"}
+                </button>
+              </div>
+
               <div className="border-b border-ink-700/60 px-6 py-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <h2 className="truncate text-base font-semibold text-ink-100">{detail.subject || "(no subject)"}</h2>
-                    <p className="mt-1 text-xs text-ink-400">
-                      From <span className="text-ink-200">{detail.from}</span> &middot; {formatDate(detail.date)}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    <Button variant="secondary" onClick={() => setReplying((r) => !r)}>
-                      <Reply className="h-4 w-4" /> Reply
-                    </Button>
-                    <Button onClick={() => quoteThis(detail.matched_jobs[0])}>
-                      <Sparkles className="h-4 w-4" /> Quote This
-                    </Button>
-                  </div>
-                </div>
+                <h2 className="truncate text-base font-semibold text-ink-100">{detail.subject || "(no subject)"}</h2>
+                <p className="mt-1 text-xs text-ink-400">
+                  From <span className="text-ink-200">{detail.from}</span> &middot; {formatDate(detail.date)}
+                </p>
+                {quoteError && (
+                  <p className="mt-2 text-xs text-accent-rose">{quoteError}</p>
+                )}
                 {detail.matched_jobs.length > 0 && (
                   <p className="mt-2 text-xs text-ink-400">
-                    Detected job reference{detail.matched_jobs.length > 1 ? "s" : ""}:{" "}
+                    Known job{detail.matched_jobs.length > 1 ? "s" : ""}:{" "}
                     {detail.matched_jobs.map((j) => (
                       <Badge key={j} tone="brand">{j}</Badge>
                     ))}

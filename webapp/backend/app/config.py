@@ -44,24 +44,37 @@ PURCHASED_PRICES_CSV = Path(
 )
 
 # --- Email (IMAP/SMTP) ---------------------------------------------------
-# These are intentionally read from the environment only (Cursor Cloud
-# Agent Secrets, or a real .env on the CMS machine). Nothing email-related
-# is ever hardcoded or committed.
-IMAP_HOST = os.environ.get("CMS_IMAP_HOST", "")
-IMAP_PORT = int(os.environ.get("CMS_IMAP_PORT", "993"))
-IMAP_USER = os.environ.get("CMS_IMAP_USER", "")
-IMAP_PASSWORD = os.environ.get("CMS_IMAP_PASSWORD", "")
-IMAP_FOLDER = os.environ.get("CMS_IMAP_FOLDER", "INBOX")
-IMAP_USE_SSL = os.environ.get("CMS_IMAP_SSL", "true").lower() != "false"
+# Loaded from webapp/backend/data/email_credentials.json (Settings page) with
+# optional CMS_* environment overrides. Never hardcoded or committed.
+def _email_settings():
+    from . import credentials
 
-SMTP_HOST = os.environ.get("CMS_SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("CMS_SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("CMS_SMTP_USER", "")
-SMTP_PASSWORD = os.environ.get("CMS_SMTP_PASSWORD", "")
-SMTP_FROM = os.environ.get("CMS_SMTP_FROM", SMTP_USER)
+    cred = credentials.load()
+    return cred
 
-EMAIL_CONFIGURED = bool(IMAP_HOST and IMAP_USER and IMAP_PASSWORD)
-SMTP_CONFIGURED = bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
+
+def reload_email_settings():
+    """Re-read credentials after Settings save (called from main.py)."""
+    global IMAP_HOST, IMAP_PORT, IMAP_USER, IMAP_PASSWORD, IMAP_FOLDER, IMAP_USE_SSL
+    global SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
+    global EMAIL_CONFIGURED, SMTP_CONFIGURED
+    cred = _email_settings()
+    IMAP_HOST = cred.get("imap_host", "")
+    IMAP_PORT = int(cred.get("imap_port") or 993)
+    IMAP_USER = cred.get("imap_user", "")
+    IMAP_PASSWORD = cred.get("imap_password", "")
+    IMAP_FOLDER = cred.get("imap_folder", "INBOX")
+    IMAP_USE_SSL = bool(cred.get("imap_ssl", True))
+    SMTP_HOST = cred.get("smtp_host", "")
+    SMTP_PORT = int(cred.get("smtp_port") or 587)
+    SMTP_USER = cred.get("smtp_user", "")
+    SMTP_PASSWORD = cred.get("smtp_password", "")
+    SMTP_FROM = cred.get("smtp_from") or SMTP_USER
+    EMAIL_CONFIGURED = bool(IMAP_HOST and IMAP_USER and IMAP_PASSWORD)
+    SMTP_CONFIGURED = bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
+
+
+reload_email_settings()
 
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 VBA_BRIDGE_DIR.mkdir(parents=True, exist_ok=True)

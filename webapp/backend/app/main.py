@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, email_service, jobs, pricing, vba_bridge
+from . import config, credentials, email_service, jobs, pricing, vba_bridge
 
 app = FastAPI(title="CMS AI Quoting")
 
@@ -211,13 +211,46 @@ class ReplyBody(BaseModel):
     in_reply_to: Optional[str] = ""
 
 
+class EmailSettingsBody(BaseModel):
+    imap_host: Optional[str] = "imap.gmail.com"
+    imap_port: Optional[int] = 993
+    imap_user: Optional[str] = ""
+    imap_password: Optional[str] = ""  # blank = keep existing
+    imap_folder: Optional[str] = "INBOX"
+    imap_ssl: Optional[bool] = True
+    smtp_host: Optional[str] = "smtp.gmail.com"
+    smtp_port: Optional[int] = 587
+    smtp_user: Optional[str] = ""
+    smtp_password: Optional[str] = ""  # blank = keep existing
+    smtp_from: Optional[str] = ""
+    gmail_address: Optional[str] = "cms1engineering@gmail.com"
+
+
+class QuoteEmailBody(BaseModel):
+    launch_macro: bool = True
+
+
+@app.get("/api/settings/email")
+def api_get_email_settings():
+    return credentials.public_view()
+
+
+@app.put("/api/settings/email")
+def api_put_email_settings(body: EmailSettingsBody):
+    saved = credentials.save(body.model_dump(exclude_none=True))
+    config.reload_email_settings()
+    return saved
+
+
 @app.get("/api/email/status")
 def api_email_status():
+    view = credentials.public_view()
     return {
-        "configured": config.EMAIL_CONFIGURED,
-        "smtp_configured": config.SMTP_CONFIGURED,
-        "imap_host": config.IMAP_HOST or None,
-        "imap_user": config.IMAP_USER or None,
+        "configured": view["configured"],
+        "smtp_configured": view["smtp_configured"],
+        "imap_host": view["imap_host"] or None,
+        "imap_user": view["imap_user"] or None,
+        "credentials_path": view["credentials_path"],
     }
 
 
@@ -263,9 +296,55 @@ def api_email_reply(message_id: str, body: ReplyBody):
     return {"sent": True}
 
 
+@app.post("/api/email/messages/{message_id}/quote")
+def api_quote_email(message_id: str, body: QuoteEmailBody = QuoteEmailBody()):
+    """One-click Quote: pull attachments, write cms_email.txt, start launcher."""
+    try:
+        return email_service.quote_from_message(message_id, launch_macro=body.launch_macro)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not start quote: {e}")
+
+
+@app.get("/api/training/status")
+def api_training_status():
+    from geometry_classifier import train_from_quote_sheets  # type: ignore
+
+    return train_from_quote_sheets.status()
+
+
+class TrainingRunBody(BaseModel):
+    manifest_path: Optional[str] = None
+    jobs_root: Optional[str] = None
+    scan: bool = True
+
+
+@app.post("/api/training/run")
+def api_training_run(body: TrainingRunBody):
+    """Reverse-train the classifier from historical quote + steel sheets."""
+    import sys
+
+    classifier_dir = config.GEOMETRY_CLASSIFIER_DIR
+    if str(classifier_dir) not in sys.path:
+        sys.path.insert(0, str(classifier_dir.parent))
+    try:
+        from geometry_classifier import train_from_quote_sheets  # type: ignore
+
+        result = train_from_quote_sheets.run_training(
+            manifest_path=body.manifest_path,
+            jobs_root=body.jobs_root or str(config.JOBS_ROOT),
+            scan=body.scan,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --------------------------------------------------------------------------
 # Built frontend (single local process: 127.0.0.1:8000 serves UI + API).
-# Falls back gracefully when webapp/frontend/dist has not been built yet.
 # --------------------------------------------------------------------------
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _FRONTEND_DIST.exists():

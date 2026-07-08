@@ -166,13 +166,11 @@ Private Const FILL_J000_STEEL_SHEET As Boolean = True
 Private Const DOWNLOADS_FOLDER As String = "C:\Users\lenovo\Downloads"
 ' Trusted location where the PDFs and Excel/xlsm templates now live.
 Private Const TRUSTED_FOLDER As String = "C:\Users\lenovo\Documents\Trust"
-' Gmail SMTP for the proposal email-back (same app password as the picker script).
-' SECURITY: the app password is no longer hardcoded here (the old one was
-' committed to GitHub and must be revoked at myaccount.google.com/apppasswords).
-' Put the NEW app password, alone on one line, in:
-'   C:\CMS_Local_Workspace\gmail_app_password.txt
+' Gmail SMTP for the proposal email-back.
+' SECURITY: credentials live in the webapp Settings page JSON file (never
+' gmail_app_password.txt). Revoke any password ever committed to GitHub.
 Private Const GMAIL_ADDRESS As String = "cms1engineering@gmail.com"
-Private Const GMAIL_APP_PASSWORD_FILE As String = "C:\CMS_Local_Workspace\gmail_app_password.txt"
+Private Const EMAIL_CREDENTIALS_FILE As String = "C:\CMS_Local_Workspace\cms_data\email_credentials.json"
 ' Proposal email behavior: "AUTO" sends with no prompt (old behavior),
 ' "PROMPT" asks before sending, "OFF" only writes the preview file.
 Private Const PROPOSAL_EMAIL_MODE As String = "PROMPT"
@@ -9194,18 +9192,30 @@ Private Sub WriteProposalPreviewFile(ByVal total As Double, ByVal wasSent As Boo
     ts.Close
 End Sub
 
-' Read the Gmail app password from its local file (never hardcoded/committed).
+' Read the Gmail app password from the webapp Settings JSON (never hardcoded).
+Private Function JsonStringField(ByVal jsonText As String, ByVal fieldName As String) As String
+    JsonStringField = ""
+    On Error Resume Next
+    Dim re As Object, matches As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = """" & fieldName & """\s*:\s*""([^""]*)"""
+    Set matches = re.Execute(jsonText)
+    If matches.Count > 0 Then JsonStringField = matches(0).SubMatches(0)
+End Function
+
 Private Function GmailAppPassword() As String
     GmailAppPassword = ""
     On Error Resume Next
-    Dim fso As Object, ts As Object
+    Dim fso As Object, ts As Object, jsonText As String
     Set fso = CreateObject("Scripting.FileSystemObject")
-    If Not fso.FileExists(GMAIL_APP_PASSWORD_FILE) Then Exit Function
-    Set ts = fso.OpenTextFile(GMAIL_APP_PASSWORD_FILE, 1)
-    GmailAppPassword = Trim(ts.ReadAll)
+    If Not fso.FileExists(EMAIL_CREDENTIALS_FILE) Then Exit Function
+    Set ts = fso.OpenTextFile(EMAIL_CREDENTIALS_FILE, 1)
+    jsonText = ts.ReadAll
     ts.Close
-    GmailAppPassword = Replace(GmailAppPassword, vbCr, "")
-    GmailAppPassword = Replace(GmailAppPassword, vbLf, "")
+    GmailAppPassword = JsonStringField(jsonText, "smtp_password")
+    If GmailAppPassword = "" Then GmailAppPassword = JsonStringField(jsonText, "imap_password")
 End Function
 
 ' Send an HTML email through Gmail SMTP using CDO. Tries SSL 465, then STARTTLS 587.
@@ -9214,8 +9224,8 @@ Private Function SendViaCdo(ByVal toAddr As String, ByVal subj As String, ByVal 
     Dim appPw As String
     appPw = GmailAppPassword()
     If appPw = "" Then
-        LogLine "CDO send skipped: no app password file at " & GMAIL_APP_PASSWORD_FILE & _
-                " (revoke the old leaked password and save the new one there)."
+        LogLine "CDO send skipped: no email credentials at " & EMAIL_CREDENTIALS_FILE & _
+                " (open http://127.0.0.1:8000/settings and save your Gmail app password)."
         Exit Function
     End If
 

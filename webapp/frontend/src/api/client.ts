@@ -87,6 +87,34 @@ export interface EmailSummary {
   matched_jobs: string[];
 }
 
+export interface EmailSettings {
+  imap_host: string;
+  imap_port: number;
+  imap_user: string;
+  imap_password_set: boolean;
+  imap_folder: string;
+  imap_ssl: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_user: string;
+  smtp_password_set: boolean;
+  smtp_from: string;
+  gmail_address: string;
+  configured: boolean;
+  smtp_configured: boolean;
+  credentials_path: string;
+}
+
+export interface QuoteEmailResult {
+  job_id: string;
+  subject: string;
+  cust_job: string;
+  attachments_saved: number;
+  attach_dir: string;
+  launcher_started: boolean;
+  email_handoff: string;
+}
+
 export interface EmailDetail extends EmailSummary {
   to: string;
   body_text: string;
@@ -151,11 +179,26 @@ export const api = {
     req<{ configured: boolean; smtp_configured: boolean; imap_host: string | null; imap_user: string | null }>(
       "/email/status"
     ),
+  getEmailSettings: () => req<EmailSettings>("/settings/email"),
+  putEmailSettings: (settings: Partial<EmailSettings> & { imap_password?: string; smtp_password?: string }) =>
+    req<EmailSettings>("/settings/email", { method: "PUT", body: JSON.stringify(settings) }),
   listEmails: () => req<EmailSummary[]>("/email/messages"),
   getEmail: (id: string) => req<EmailDetail>(`/email/messages/${encodeURIComponent(id)}`),
+  quoteEmail: (id: string, launchMacro = true) =>
+    req<QuoteEmailResult>(`/email/messages/${encodeURIComponent(id)}/quote`, {
+      method: "POST",
+      body: JSON.stringify({ launch_macro: launchMacro }),
+    }),
   replyEmail: (id: string, to: string, subject: string, body: string, in_reply_to = "") =>
     req(`/email/messages/${encodeURIComponent(id)}/reply`, {
       method: "POST",
       body: JSON.stringify({ to, subject, body, in_reply_to }),
+    }),
+
+  trainingStatus: () => req<{ jobs_processed?: number; jobs_ok?: number; output_dir?: string }>("/training/status"),
+  runTraining: (jobsRoot?: string) =>
+    req<{ jobs_processed: number; jobs_ok: number; results: unknown[] }>("/training/run", {
+      method: "POST",
+      body: JSON.stringify({ jobs_root: jobsRoot || null, scan: true }),
     }),
 };

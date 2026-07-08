@@ -31,16 +31,47 @@ from email.header import decode_header
 from email.utils import parseaddr
 
 # ===================== SETTINGS =====================
-GMAIL_ADDRESS      = "cms1engineering@gmail.com"  # mailbox quotes arrive in
-# SECURITY: the old app password was committed to GitHub and must be REVOKED
-# (myaccount.google.com/apppasswords). Save the NEW app password, alone on one
-# line, in the file below (same file the VBA macro reads).
-APP_PASSWORD_FILE  = r"C:\CMS_Local_Workspace\gmail_app_password.txt"
+GMAIL_ADDRESS      = "cms1engineering@gmail.com"  # default; overridden by credentials file
+# Credentials are saved in the webapp Settings page (never gmail_app_password.txt).
+# Same JSON file Module6121.bas reads for SMTP.
+def _credentials_paths():
+    paths = []
+    data_dir = os.environ.get("CMS_DATA_DIR", r"C:\CMS_Local_Workspace\cms_data")
+    paths.append(os.path.join(data_dir, "email_credentials.json"))
+    paths.append(r"C:\CMS_Local_Workspace\cms_data\email_credentials.json")
+    here = os.path.dirname(os.path.abspath(__file__))
+    paths.append(os.path.join(here, "webapp", "backend", "data", "email_credentials.json"))
+    return paths
+
+
+def _load_email_credentials():
+  cred = {}
+  for path in _credentials_paths():
+    try:
+      with open(path, "r", encoding="utf-8") as f:
+        data = __import__("json").load(f)
+      if isinstance(data, dict):
+        cred = data
+        break
+    except Exception:
+      pass
+  global GMAIL_ADDRESS
+  if cred.get("gmail_address"):
+    GMAIL_ADDRESS = cred["gmail_address"]
+  elif cred.get("imap_user"):
+    GMAIL_ADDRESS = cred["imap_user"]
+  return cred
 
 
 def _read_app_password():
+    cred = _load_email_credentials()
+    pw = (cred.get("imap_password") or cred.get("smtp_password") or "").strip()
+    if pw:
+        return pw
+    # Legacy fallback only if the old file still exists (migrate via Settings page).
+    legacy = r"C:\CMS_Local_Workspace\gmail_app_password.txt"
     try:
-        with open(APP_PASSWORD_FILE, "r", encoding="utf-8") as f:
+        with open(legacy, "r", encoding="utf-8") as f:
             return f.read().strip()
     except OSError:
         return ""
@@ -619,21 +650,20 @@ def pick_unopened():
 
 
 def launch_full_flow():
-    """User ran this script directly -> start CMS_Launcher.vbs (the whole job)."""
+    """User ran this script directly -> open the webapp inbox (no Tk picker)."""
+    log("redirecting user to webapp inbox")
+    print("Email quoting is now done in the CMS AI Quoting webapp.")
+    print("Open http://127.0.0.1:8000/email and click the blue Quote button.")
+    try:
+        import webbrowser
+        webbrowser.open("http://127.0.0.1:8000/email")
+    except Exception:
+        pass
     here = os.path.dirname(os.path.abspath(__file__))
-    vbs = os.path.join(here, "CMS_Launcher.vbs")
-    if os.path.exists(vbs):
-        log("launched full flow via CMS_Launcher.vbs")
-        print("Starting the full quote launcher (Gmail -> proposal -> SolidWorks)...")
-        try:
-            subprocess.Popen(["wscript", vbs])
-        except Exception as e:
-            print("Could not start the launcher automatically:", e)
-            print("Double-click CMS_Launcher.vbs to run the full job.")
-    else:
-        print("This script only does the Gmail search step.")
-        print("To fill the proposal and run SolidWorks, run CMS_Launcher.vbs")
-        print("(keep it in the same folder as this script).")
+    bat = os.path.join(here, "webapp", "START_CMS_QUOTING_APP.bat")
+    if os.path.exists(bat):
+        print("If the site cannot be reached, double-click:")
+        print(" ", bat)
 
 
 def main():

@@ -162,14 +162,38 @@ history, so you must:
 
 1. **Revoke it now** at myaccount.google.com/apppasswords
    (account `cms1engineering@gmail.com`).
-2. Create a new app password and save it -- alone on one line -- in
-   `C:\CMS_Local_Workspace\gmail_app_password.txt` on the shop PC.
-   Both the macro and `cms_gmail_search.py` now read it from that file.
+2. Create a new app password and enter it in the webapp **Settings** page
+   (`http://127.0.0.1:8000/settings`). It is saved locally to
+   `C:\CMS_Local_Workspace\cms_data\email_credentials.json` — **not**
+   `gmail_app_password.txt`. Module6121 and the inbox both read that file.
 
 Also, the macro's automatic proposal email is now gated by
 `PROPOSAL_EMAIL_MODE` in `Module6121.bas` (`"PROMPT"` by default -- it asks
 before sending; set `"OFF"` to only write the preview file, `"AUTO"` for the
 old fire-and-forget behavior).
+
+## Email quoting (no more Tk picker)
+
+Double-clicking `CMS_Launcher.vbs` or `RUN_CMS_LAUNCHER.bat` now opens the
+webapp inbox instead of the old "select emails to quote" popup. Click the big
+blue **Quote** button on any message to download attachments, write
+`cms_email.txt`, and start the SolidWorks flow.
+
+If you see "This site can't be reached", double-click
+`webapp\START_CMS_QUOTING_APP.bat` and wait for the window to say the server
+is ready (the browser opens automatically — do not open it before that).
+
+## AI training from quote + steel sheets
+
+Settings → **Run Training Scan** (or CLI):
+
+```cmd
+python geometry_classifier\train_from_quote_sheets.py --jobs-root "C:\path\to\completed\jobs"
+```
+
+Each job folder should contain `XT_Export_CAD_Dimensions.csv` plus the
+finished quote/steel Excel. The script matches steel-sheet plate names back to
+CAD components and writes `geometry_classifier\outputs\training\*_CORRECT_ME.csv`.
 
 ## Known limitations / honesty notes
 

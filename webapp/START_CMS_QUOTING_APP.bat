@@ -13,12 +13,51 @@ rem ============================================================
 cd /d "%~dp0backend"
 
 rem Bridge exports go where Module6121's offline fallback also looks
-rem (AI_BRIDGE_FILE_DIR in the macro), so the two always stay in sync.
 set CMS_VBA_BRIDGE_DIR=C:\CMS_Local_Workspace\AI_Bridge
+
+rem Email credentials + pricing config (Settings page writes here)
+set CMS_DATA_DIR=C:\CMS_Local_Workspace\cms_data
 
 rem Point the app at the real job folders on this machine (uncomment to use):
 rem set CMS_JOBS_ROOT=C:\CMS_Local_Workspace\AI_Jobs
 
+echo.
+echo CMS AI Quoting - checking Python...
+where python >nul 2>&1
+if errorlevel 1 (
+  where py >nul 2>&1
+  if errorlevel 1 (
+    echo ERROR: Python not found. Install Python 3.12+ and run:
+    echo   pip install -r requirements.txt
+    pause
+    exit /b 1
+  )
+  set PYTHON=py -3
+) else (
+  set PYTHON=python
+)
+
+echo Installing backend dependencies if needed...
+%PYTHON% -m pip install -q -r requirements.txt
+if errorlevel 1 (
+  echo ERROR: pip install failed. Run manually: pip install -r requirements.txt
+  pause
+  exit /b 1
+)
+
+if not exist "..\frontend\dist\index.html" (
+  echo.
+  echo WARNING: Frontend not built yet. Run once:
+  echo   cd webapp\frontend
+  echo   npm install ^&^& npm run build
+  echo.
+  echo The API will still work at http://127.0.0.1:8000/api/health
+  echo.
+)
+
 echo Starting CMS AI Quoting on http://127.0.0.1:8000 (local machine only)...
-start "" http://127.0.0.1:8000
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+echo The browser opens automatically once the server is ready.
+echo Press Ctrl+C in this window to stop the server.
+echo.
+%PYTHON% start_cms.py
+if errorlevel 1 pause
