@@ -1,0 +1,13 @@
+path: C:/CMS_AI/datasets/major8_full_views
+train: images/train
+val: images/val
+
+names:
+  0: top_clamp_plate
+  1: bottom_clamp_plate
+  2: a_cavity_plate
+  3: b_core_plate
+  4: support_plate
+  5: rail
+  6: ejector_plate
+  7: pin_plate

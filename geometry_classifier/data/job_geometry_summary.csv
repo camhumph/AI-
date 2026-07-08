@@ -1,0 +1,156 @@
+Job,SourcePath,row_count,base_width,base_length,full_plate_count,rail_count,ejector_stack_count,round_part_count,likely_standard_non_bms
+C18441,C:\CMS_Local_Workspace\C18441\XT_Export_CAD_Dimensions.csv,56,18.0,19.0,2,0,2,19,False
+C18452,C:\CMS_Local_Workspace\C18452\XT_Export_CAD_Dimensions.csv,108,9.879,11.875,5,2,2,84,True
+C18458,C:\CMS_Local_Workspace\C18458\XT_Export_CAD_Dimensions.csv,62,18.5,20.5,2,0,2,19,False
+C18459,C:\CMS_Local_Workspace\C18459\XT_Export_CAD_Dimensions.csv,62,18.5,20.5,2,0,2,19,False
+C18467,C:\CMS_Local_Workspace\C18467\XT_Export_CAD_Dimensions.csv,242,19.5,29.526,5,2,2,189,True
+C18488,C:\CMS_Local_Workspace\C18488\XT_Export_CAD_Dimensions.csv,44,15.875,18.0,2,0,2,15,False
+C18499,C:\CMS_Local_Workspace\C18499\XT_Export_CAD_Dimensions.csv,84,10.88,12.0,5,2,2,68,True
+C18500,C:\CMS_Local_Workspace\C18500\XT_Export_CAD_Dimensions.csv,39,9.875,11.875,5,0,0,33,True
+C18523,C:\CMS_Local_Workspace\C18523\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,14,False
+C18593,C:\CMS_Local_Workspace\C18593\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,13,False
+C18594,C:\CMS_Local_Workspace\C18594\XT_Export_CAD_Dimensions.csv,37,11.894,18.875,2,0,0,16,False
+C18596,C:\CMS_Local_Workspace\C18596\XT_Export_CAD_Dimensions.csv,23,15.875,18.0,2,0,2,13,False
+C18597,C:\CMS_Local_Workspace\C18597\XT_Export_CAD_Dimensions.csv,23,15.875,18.0,2,0,2,13,False
+C18598,C:\CMS_Local_Workspace\C18598\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18599,C:\CMS_Local_Workspace\C18599\XT_Export_CAD_Dimensions.csv,44,16.75,20.0,2,0,2,13,False
+C18600,C:\CMS_Local_Workspace\C18600\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18602,C:\CMS_Local_Workspace\C18602\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18603,C:\CMS_Local_Workspace\C18603\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,14,False
+C18604,C:\CMS_Local_Workspace\C18604\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18605,C:\CMS_Local_Workspace\C18605\XT_Export_CAD_Dimensions.csv,43,11.894,18.874,2,0,0,12,False
+C18606,C:\CMS_Local_Workspace\C18606\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18607,C:\CMS_Local_Workspace\C18607\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18608,C:\CMS_Local_Workspace\C18608\XT_Export_CAD_Dimensions.csv,37,11.894,18.875,2,0,0,16,False
+C18610,C:\CMS_Local_Workspace\C18610\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18611,C:\CMS_Local_Workspace\C18611\XT_Export_CAD_Dimensions.csv,23,15.875,18.0,2,0,2,14,False
+C18613,C:\CMS_Local_Workspace\C18613\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18614,C:\CMS_Local_Workspace\C18614\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,15,False
+C18615,C:\CMS_Local_Workspace\C18615\XT_Export_CAD_Dimensions.csv,44,15.875,18.0,2,0,2,13,False
+C18616,C:\CMS_Local_Workspace\C18616\XT_Export_CAD_Dimensions.csv,52,15.875,16.0,2,0,2,15,False
+C18618,C:\CMS_Local_Workspace\C18618\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,14,False
+C18619,C:\CMS_Local_Workspace\C18619\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18620,C:\CMS_Local_Workspace\C18620\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,13,False
+C18621,C:\CMS_Local_Workspace\C18621\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18623,C:\CMS_Local_Workspace\C18623\XT_Export_CAD_Dimensions.csv,55,15.875,20.0,2,0,2,21,False
+C18624,C:\CMS_Local_Workspace\C18624\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18625,C:\CMS_Local_Workspace\C18625\XT_Export_CAD_Dimensions.csv,29,15.875,20.0,2,0,2,11,False
+C18626,C:\CMS_Local_Workspace\C18626\XT_Export_CAD_Dimensions.csv,43,11.894,18.874,2,0,0,12,False
+C18627,C:\CMS_Local_Workspace\C18627\XT_Export_CAD_Dimensions.csv,24,15.875,20.0,2,0,2,12,False
+C18628,C:\CMS_Local_Workspace\C18628\XT_Export_CAD_Dimensions.csv,24,15.875,20.0,2,0,2,12,False
+C18629,C:\CMS_Local_Workspace\C18629\XT_Export_CAD_Dimensions.csv,24,15.875,20.0,2,0,2,12,False
+C18630,C:\CMS_Local_Workspace\C18630\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18631,C:\CMS_Local_Workspace\C18631\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18632,C:\CMS_Local_Workspace\C18632\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18633,C:\CMS_Local_Workspace\C18633\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18634,C:\CMS_Local_Workspace\C18634\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18635,C:\CMS_Local_Workspace\C18635\XT_Export_CAD_Dimensions.csv,44,15.875,18.375,2,0,2,12,False
+CMS_ACTIVE_QUOTE_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_145953,C:\CMS_Local_Workspace\CMS_ACTIVE_QUOTE_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_145953\XT_Export_CAD_Dimensions.csv,397,17.883,35.5,5,2,2,271,True
+CMS_ACTIVE_RUN_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_135013,C:\CMS_Local_Workspace\CMS_ACTIVE_RUN_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_135013\XT_Export_CAD_Dimensions.csv,397,17.883,35.5,5,2,2,271,True
+CMS_ACTIVE_RUN_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_135911,C:\CMS_Local_Workspace\CMS_ACTIVE_RUN_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_135911\XT_Export_CAD_Dimensions.csv,397,17.883,35.5,5,2,2,271,True
+CMS_ACTIVE_RUN_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_140730,C:\CMS_Local_Workspace\CMS_ACTIVE_RUN_8418 2 cavity funnel with water and baffle change 7-3-13_20260707_140730\XT_Export_CAD_Dimensions.csv,397,17.883,35.5,5,2,2,271,True
+CMS_ACTIVE_RUN_Mold_frame_export-M6445-Zappa_Shim_mold-20260401_20260707_133921,C:\CMS_Local_Workspace\CMS_ACTIVE_RUN_Mold_frame_export-M6445-Zappa_Shim_mold-20260401_20260707_133921\XT_Export_CAD_Dimensions.csv,123,15.875,20.0,4,0,2,116,True
+J8410,C:\CMS_Local_Workspace\J8410\J8410 pdfs\XT_Export_CAD_Dimensions.csv,54,18.0,19.0,2,0,2,17,False
+J8411,C:\CMS_Local_Workspace\J8411\J8411 pdfs\XT_Export_CAD_Dimensions.csv,1,2.5,4.375,1,0,0,0,False
+J8415,C:\CMS_Local_Workspace\J8415\J8415 pdfs\XT_Export_CAD_Dimensions.csv,54,18.0,19.0,2,0,2,17,False
+J8416,C:\CMS_Local_Workspace\J8416\J8416 pdfs\XT_Export_CAD_Dimensions.csv,54,18.0,19.0,2,0,2,17,False
+J8417,C:\CMS_Local_Workspace\J8417\J8417 pdfs\XT_Export_CAD_Dimensions.csv,54,18.0,19.0,2,0,2,17,False
+J8423,C:\CMS_Local_Workspace\J8423\XT_Export_CAD_Dimensions.csv,21,15.875,18.0,2,0,2,12,False
+J8424,C:\CMS_Local_Workspace\J8424\J8424 pdfs\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8424,C:\CMS_Local_Workspace\J8424\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8425,C:\CMS_Local_Workspace\J8425\J8425 pdfs\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8425,C:\CMS_Local_Workspace\J8425\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8426,C:\CMS_Local_Workspace\J8426\J8426 pdfs\XT_Export_CAD_Dimensions.csv,21,15.875,18.0,2,0,2,12,False
+J8427,C:\CMS_Local_Workspace\J8427\J8427 pdfs\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8427,C:\CMS_Local_Workspace\J8427\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8428,C:\CMS_Local_Workspace\J8428\J8428 pdfs\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8428,C:\CMS_Local_Workspace\J8428\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8429,C:\CMS_Local_Workspace\J8429\J8429 pdfs\XT_Export_CAD_Dimensions.csv,21,15.875,18.0,2,0,2,12,False
+J8430,C:\CMS_Local_Workspace\J8430\J8430 pdfs\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8430,C:\CMS_Local_Workspace\J8430\XT_Export_CAD_Dimensions.csv,14,15.875,18.0,2,0,2,6,False
+J8432,C:\CMS_Local_Workspace\J8432\J8432 pdfs\XT_Export_CAD_Dimensions.csv,44,16.75,20.0,2,0,2,15,False
+J8433,C:\CMS_Local_Workspace\J8433\J8433 pdfs\XT_Export_CAD_Dimensions.csv,44,16.75,20.0,2,0,2,15,False
+J8433,C:\CMS_Local_Workspace\J8433\XT_Export_CAD_Dimensions.csv,44,16.75,20.0,2,0,2,15,False
+J8436,C:\CMS_Local_Workspace\J8436\XT_Export_CAD_Dimensions.csv,37,15.875,18.375,2,0,2,2,False
+J8437,C:\CMS_Local_Workspace\J8437\J8437 pdfs\XT_Export_CAD_Dimensions.csv,34,15.875,18.375,2,0,2,2,False
+J8437,C:\CMS_Local_Workspace\J8437\XT_Export_CAD_Dimensions.csv,34,15.875,18.375,2,0,2,2,False
+J8438,C:\CMS_Local_Workspace\J8438\J8438 pdfs\XT_Export_CAD_Dimensions.csv,39,15.875,18.375,2,0,2,2,False
+J8439,C:\CMS_Local_Workspace\J8439\J8439 pdfs\XT_Export_CAD_Dimensions.csv,21,16.0,20.0,2,0,2,10,False
+J8440,C:\CMS_Local_Workspace\J8440\J8440 pdfs\XT_Export_CAD_Dimensions.csv,22,16.0,20.0,2,0,2,11,False
+J8442,C:\CMS_Local_Workspace\J8442\J8442 pdfs\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8442,C:\CMS_Local_Workspace\J8442\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8443,C:\CMS_Local_Workspace\J8443\J8443 pdfs\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8443,C:\CMS_Local_Workspace\J8443\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8444,C:\CMS_Local_Workspace\J8444\J8444 pdfs\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8444,C:\CMS_Local_Workspace\J8444\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8445,C:\CMS_Local_Workspace\J8445\J8445 pdfs\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8445,C:\CMS_Local_Workspace\J8445\XT_Export_CAD_Dimensions.csv,30,15.875,20.0,2,0,2,5,False
+J8448,C:\CMS_Local_Workspace\J8448\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8449,C:\CMS_Local_Workspace\J8449\XT_Export_CAD_Dimensions.csv,2,1.182,3.08,2,0,0,0,False
+J8450,C:\CMS_Local_Workspace\J8450\J8450 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8451,C:\CMS_Local_Workspace\J8451\J8451 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8452,C:\CMS_Local_Workspace\J8452\J8452 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8453,C:\CMS_Local_Workspace\J8453\J8453 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8454,C:\CMS_Local_Workspace\J8454\J8454 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8455,C:\CMS_Local_Workspace\J8455\J8455 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8456,C:\CMS_Local_Workspace\J8456\J8456 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8457,C:\CMS_Local_Workspace\J8457\J8457 pdfs\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8458,C:\CMS_Local_Workspace\J8458\J8458 pdfs\XT_Export_CAD_Dimensions.csv,38,18.75,22.75,2,0,2,11,False
+J8465,C:\CMS_Local_Workspace\J8465\J8465 pdfs\XT_Export_CAD_Dimensions.csv,21,15.875,18.0,2,0,2,12,False
+J8466,C:\CMS_Local_Workspace\J8466\J8466 pdfs\XT_Export_CAD_Dimensions.csv,45,15.875,20.0,2,0,2,13,False
+J8467,C:\CMS_Local_Workspace\J8467\J8467 pdfs\XT_Export_CAD_Dimensions.csv,45,15.875,20.0,2,0,2,13,False
+J8468,C:\CMS_Local_Workspace\J8468\J8468 pdfs\XT_Export_CAD_Dimensions.csv,45,15.875,20.0,2,0,2,13,False
+J8469,C:\CMS_Local_Workspace\J8469\J8469 pdfs\XT_Export_CAD_Dimensions.csv,45,15.875,20.0,2,0,2,13,False
+J8475,C:\CMS_Local_Workspace\J8475\J8475 pdfs\XT_Export_CAD_Dimensions.csv,37,17.0,20.0,2,0,2,9,False
+J8476,C:\CMS_Local_Workspace\J8476\J8476 pdfs\XT_Export_CAD_Dimensions.csv,37,17.0,20.0,2,0,2,9,False
+C18454,C:\CMS_Local_Workspace\Matching\C18454\XT_Export_CAD_Dimensions.csv,68,15.875,20.0,2,0,2,30,False
+C18467,C:\CMS_Local_Workspace\Matching\C18467\XT_Export_CAD_Dimensions.csv,242,19.5,29.526,5,2,2,189,True
+C18499,C:\CMS_Local_Workspace\Matching\C18499\XT_Export_CAD_Dimensions.csv,84,10.88,12.0,5,2,2,68,True
+C18523,C:\CMS_Local_Workspace\Matching\C18523\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,14,False
+C18593,C:\CMS_Local_Workspace\Matching\C18593\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,13,False
+C18594,C:\CMS_Local_Workspace\Matching\C18594\XT_Export_CAD_Dimensions.csv,37,11.894,18.875,2,0,0,16,False
+C18595,C:\CMS_Local_Workspace\Matching\C18595\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18596,C:\CMS_Local_Workspace\Matching\C18596\XT_Export_CAD_Dimensions.csv,23,15.875,18.0,2,0,2,13,False
+C18597,C:\CMS_Local_Workspace\Matching\C18597\XT_Export_CAD_Dimensions.csv,23,15.875,18.0,2,0,2,13,False
+C18598,C:\CMS_Local_Workspace\Matching\C18598\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18599,C:\CMS_Local_Workspace\Matching\C18599\XT_Export_CAD_Dimensions.csv,43,11.894,18.874,2,0,0,12,False
+C18600,C:\CMS_Local_Workspace\Matching\C18600\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18601,C:\CMS_Local_Workspace\Matching\C18601\XT_Export_CAD_Dimensions.csv,43,11.894,18.874,2,0,0,12,False
+C18602,C:\CMS_Local_Workspace\Matching\C18602\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18603,C:\CMS_Local_Workspace\Matching\C18603\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18604,C:\CMS_Local_Workspace\Matching\C18604\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18605,C:\CMS_Local_Workspace\Matching\C18605\XT_Export_CAD_Dimensions.csv,43,11.894,18.874,2,0,0,12,False
+C18606,C:\CMS_Local_Workspace\Matching\C18606\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18607,C:\CMS_Local_Workspace\Matching\C18607\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18608,C:\CMS_Local_Workspace\Matching\C18608\XT_Export_CAD_Dimensions.csv,37,11.894,18.875,2,0,0,16,False
+C18610,C:\CMS_Local_Workspace\Matching\C18610\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18611,C:\CMS_Local_Workspace\Matching\C18611\XT_Export_CAD_Dimensions.csv,23,15.875,18.0,2,0,2,14,False
+C18613,C:\CMS_Local_Workspace\Matching\C18613\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18614,C:\CMS_Local_Workspace\Matching\C18614\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,15,False
+C18615,C:\CMS_Local_Workspace\Matching\C18615\XT_Export_CAD_Dimensions.csv,44,15.875,18.0,2,0,2,13,False
+C18616,C:\CMS_Local_Workspace\Matching\C18616\XT_Export_CAD_Dimensions.csv,52,15.875,16.0,2,0,2,15,False
+C18618,C:\CMS_Local_Workspace\Matching\C18618\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,14,False
+C18619,C:\CMS_Local_Workspace\Matching\C18619\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18620,C:\CMS_Local_Workspace\Matching\C18620\XT_Export_CAD_Dimensions.csv,27,15.875,18.0,2,0,2,13,False
+C18621,C:\CMS_Local_Workspace\Matching\C18621\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18622,C:\CMS_Local_Workspace\Matching\C18622\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18623,C:\CMS_Local_Workspace\Matching\C18623\XT_Export_CAD_Dimensions.csv,55,15.875,20.0,2,0,2,21,False
+C18624,C:\CMS_Local_Workspace\Matching\C18624\XT_Export_CAD_Dimensions.csv,72,11.5,16.0,7,0,0,52,True
+C18625,C:\CMS_Local_Workspace\Matching\C18625\XT_Export_CAD_Dimensions.csv,29,15.875,20.0,2,0,2,11,False
+C18626,C:\CMS_Local_Workspace\Matching\C18626\XT_Export_CAD_Dimensions.csv,43,11.894,18.874,2,0,0,12,False
+C18627,C:\CMS_Local_Workspace\Matching\C18627\XT_Export_CAD_Dimensions.csv,24,15.875,20.0,2,0,2,12,False
+C18628,C:\CMS_Local_Workspace\Matching\C18628\XT_Export_CAD_Dimensions.csv,24,15.875,20.0,2,0,2,12,False
+C18629,C:\CMS_Local_Workspace\Matching\C18629\XT_Export_CAD_Dimensions.csv,24,15.875,20.0,2,0,2,12,False
+C18630,C:\CMS_Local_Workspace\Matching\C18630\XT_Export_CAD_Dimensions.csv,51,15.875,18.0,2,0,2,21,False
+C18631,C:\CMS_Local_Workspace\Matching\C18631\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18632,C:\CMS_Local_Workspace\Matching\C18632\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18633,C:\CMS_Local_Workspace\Matching\C18633\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18634,C:\CMS_Local_Workspace\Matching\C18634\XT_Export_CAD_Dimensions.csv,52,15.875,20.0,2,4,0,18,False
+C18635,C:\CMS_Local_Workspace\Matching\C18635\XT_Export_CAD_Dimensions.csv,44,15.875,18.375,2,0,2,12,False
+J8448,C:\CMS_Local_Workspace\Matching\J8448\XT_Export_CAD_Dimensions.csv,42,15.875,18.0,2,0,2,13,False
+J8449,C:\CMS_Local_Workspace\Matching\J8449\XT_Export_CAD_Dimensions.csv,41,15.875,18.0,2,0,2,12,False
+J8454,C:\CMS_Local_Workspace\Matching\J8454\XT_Export_CAD_Dimensions.csv,34,15.875,18.0,2,0,2,6,False
+J8455,C:\CMS_Local_Workspace\Matching\J8455\XT_Export_CAD_Dimensions.csv,41,15.875,18.0,2,0,2,12,False
+J8456,C:\CMS_Local_Workspace\Matching\J8456\XT_Export_CAD_Dimensions.csv,41,15.875,18.0,2,0,2,12,False
+J8457,C:\CMS_Local_Workspace\Matching\J8457\XT_Export_CAD_Dimensions.csv,41,15.875,18.0,2,0,2,12,False
+J8458,C:\CMS_Local_Workspace\Matching\J8458\XT_Export_CAD_Dimensions.csv,38,18.75,22.75,2,0,2,11,False

@@ -1,0 +1,183 @@
+Index,Component,Role,Confidence,Quote,Thickness,Width,Length,CenterX,CenterY,CenterZ,Reason
+1,2223488_B-PLATE-1,top_clamp_plate,MEDIUM,True,4.875,25,35,0,0,-2.439,Two-half mold pattern: opposite full-footprint clamp plate.
+2,2223488_CLAMP-PLATE-1,bottom_clamp_plate,HIGH,True,1.375,25,35,0,0,-10.065,Two-half mold pattern: lower full-footprint plate along stack axis is BCP.
+3,2223488_RAIL-TOP-1,ignore,LOW,False,4.375,4.5,35,0,10.313,-7.127,Outside main standard-base classification rules.
+4,2223488_RAIL-BOTTOM-1,ignore,LOW,False,4,4.5,35,0,-10.5,-7.127,Outside main standard-base classification rules.
+5,2223488_EJ-BACKUP-PLATE-1,ejector_plate,MEDIUM,True,1.125,16,30,0,0,-8.627,Centered long narrow ejector-stack plate.
+6,2223488_EJ-RET-PLATE_2-1,pin_plate,MEDIUM,True,0.625,16,30,0,0,-7.752,Centered long narrow ejector-stack plate above/between rails.
+7,PILLAR_D3-X-4-5_T_PCS-5,hardware_other,LOW,False,3,3,4.5,-2.5,2.125,-7.127,Round hardware but role is not certain from dimensions alone.
+8,PILLAR_D3-X-4-5_T_PCS-8,hardware_other,LOW,False,3,3,4.5,-12,0,-7.127,Round hardware but role is not certain from dimensions alone.
+9,PILLAR_D3-X-4-5_T_PCS-4,hardware_other,LOW,False,3,3,4.5,12,0,-7.127,Round hardware but role is not certain from dimensions alone.
+10,PILLAR_D3-X-4-5_T_PCS-7,hardware_other,LOW,False,3,3,4.5,2.5,2.125,-7.127,Round hardware but role is not certain from dimensions alone.
+11,PILLAR_D3-X-4-5_T_PCS-6,hardware_other,LOW,False,3,3,4.5,-6.75,0,-7.127,Round hardware but role is not certain from dimensions alone.
+12,PILLAR_D3-X-4-5_T_PCS-1,hardware_other,LOW,False,3,3,4.5,2.5,-2.125,-7.127,Round hardware but role is not certain from dimensions alone.
+13,PILLAR_D3-X-4-5_T_PCS-2,hardware_other,LOW,False,3,3,4.5,-2.5,-2.125,-7.127,Round hardware but role is not certain from dimensions alone.
+14,PILLAR_D3-X-4-5_T_PCS-3,hardware_other,LOW,False,3,3,4.5,6.75,0,-7.127,Round hardware but role is not certain from dimensions alone.
+15,LBB_2ID-X-4_7-8_DME-2,hardware_other,LOW,False,2.677,2.677,4.875,15.25,10.25,-2.439,Round hardware but role is not certain from dimensions alone.
+16,LBB_2ID-X-4_7-8_DME-4,hardware_other,LOW,False,2.677,2.677,4.875,-15,10.25,-2.439,Round hardware but role is not certain from dimensions alone.
+17,LBB_2ID-X-4_7-8_DME-3,hardware_other,LOW,False,2.677,2.677,4.875,-15.25,-10.25,-2.439,Round hardware but role is not certain from dimensions alone.
+18,LBB_2ID-X-4_7-8_DME-1,hardware_other,LOW,False,2.677,2.677,4.875,15.25,-10.25,-2.439,Round hardware but role is not certain from dimensions alone.
+19,LDR-PIN_2OD-X-6-3-4_PCS-4,hardware_other,LOW,False,2.24,2.24,6.75,15.25,-10.25,1.002,Round hardware but role is not certain from dimensions alone.
+20,LDR-PIN_2OD-X-6-3-4_PCS-1,hardware_other,LOW,False,2.24,2.24,6.75,-15.25,-10.25,1.002,Round hardware but role is not certain from dimensions alone.
+21,LDR-PIN_2OD-X-6-3-4_PCS-2,hardware_other,LOW,False,2.24,2.24,6.75,-15,10.25,1.002,Round hardware but role is not certain from dimensions alone.
+22,LDR-PIN_2OD-X-6-3-4_PCS-3,hardware_other,LOW,False,2.24,2.24,6.75,15.25,10.25,1.002,Round hardware but role is not certain from dimensions alone.
+23,PILLAR_D2-X-4-5_T_PCS-8,hardware_other,LOW,False,2,2,4.5,-12.75,3.25,-7.127,Round hardware but role is not certain from dimensions alone.
+24,PILLAR_D2-X-4-5_T_PCS-11,hardware_other,LOW,False,2,2,4.5,12.75,3.25,-7.127,Round hardware but role is not certain from dimensions alone.
+25,PILLAR_D2-X-4-5_T_PCS-7,hardware_other,LOW,False,2,2,4.5,-4.5,-6.25,-7.127,Round hardware but role is not certain from dimensions alone.
+26,PILLAR_D2-X-4-5_T_PCS-13,hardware_other,LOW,False,2,2,4.5,4.5,6.25,-7.127,Round hardware but role is not certain from dimensions alone.
+27,PILLAR_D2-X-4-5_T_PCS-12,hardware_other,LOW,False,2,2,4.5,12.75,-3.25,-7.127,Round hardware but role is not certain from dimensions alone.
+28,PILLAR_D2-X-4-5_T_PCS-14,hardware_other,LOW,False,2,2,4.5,-4.5,6.25,-7.127,Round hardware but role is not certain from dimensions alone.
+29,PILLAR_D2-X-4-5_T_PCS-2,hardware_other,LOW,False,2,2,4.5,8.75,4.5,-7.127,Round hardware but role is not certain from dimensions alone.
+30,PILLAR_D2-X-4-5_T_PCS-5,hardware_other,LOW,False,2,2,4.5,-8.75,4.5,-7.127,Round hardware but role is not certain from dimensions alone.
+31,PILLAR_D2-X-4-5_T_PCS-1,hardware_other,LOW,False,2,2,4.5,0,-5,-7.127,Round hardware but role is not certain from dimensions alone.
+32,PILLAR_D2-X-4-5_T_PCS-3,hardware_other,LOW,False,2,2,4.5,-8.75,-4.5,-7.127,Round hardware but role is not certain from dimensions alone.
+33,PILLAR_D2-X-4-5_T_PCS-4,hardware_other,LOW,False,2,2,4.5,-12.75,-3.25,-7.127,Round hardware but role is not certain from dimensions alone.
+34,PILLAR_D2-X-4-5_T_PCS-6,hardware_other,LOW,False,2,2,4.5,8.75,-4.5,-7.127,Round hardware but role is not certain from dimensions alone.
+35,PILLAR_D2-X-4-5_T_PCS-9,hardware_other,LOW,False,2,2,4.5,4.5,-6.25,-7.127,Round hardware but role is not certain from dimensions alone.
+36,PILLAR_D2-X-4-5_T_PCS-10,hardware_other,LOW,False,2,2,4.5,0,5,-7.127,Round hardware but role is not certain from dimensions alone.
+37,EJ_LDR_PIN_D-1-X-6-25_PCS-3,leader_pin,MEDIUM,False,1.24,1.24,6.25,-12.5,7.25,-7.611,Long round guide pin matched to short bushing at the same center position plane.
+38,EJ_LDR_PIN_D-1-X-6-25_PCS-4,leader_pin,MEDIUM,False,1.24,1.24,6.25,12.5,-7.25,-7.611,Long round guide pin matched to short bushing at the same center position plane.
+39,EJ_LDR_PIN_D-1-X-6-25_PCS-1,leader_pin,MEDIUM,False,1.24,1.24,6.25,-12.5,-7.25,-7.611,Long round guide pin matched to short bushing at the same center position plane.
+40,EJ_LDR_PIN_D-1-X-6-25_PCS-2,leader_pin,MEDIUM,False,1.24,1.24,6.25,12.5,7.25,-7.611,Long round guide pin matched to short bushing at the same center position plane.
+41,2223488_RETURN-PIN-2,return_pin,MEDIUM,False,1,1,8.065,14.375,4.5,-4.032,Long 1-inch-class round pin; likely return/ejector return pin.
+42,2223488_RETURN-PIN-3,return_pin,MEDIUM,False,1,1,8.065,-14.375,-4.5,-4.032,Long 1-inch-class round pin; likely return/ejector return pin.
+43,2223488_RETURN-PIN-4,return_pin,MEDIUM,False,1,1,8.065,14.375,-4.5,-4.032,Long 1-inch-class round pin; likely return/ejector return pin.
+44,2223488_RETURN-PIN-1,return_pin,MEDIUM,False,1,1,8.065,-14.25,4.5,-4.032,Long 1-inch-class round pin; likely return/ejector return pin.
+45,UNC-SHCS-5-8-X-7000-2,hardware_other,LOW,False,0.938,0.938,7.625,-12,-10.313,-6.877,Round hardware but role is not certain from dimensions alone.
+46,UNC-SHCS-5-8-X-7000-3,hardware_other,LOW,False,0.938,0.938,7.625,12,10.313,-6.877,Round hardware but role is not certain from dimensions alone.
+47,UNC-SHCS-5-8-X-7000-1,hardware_other,LOW,False,0.938,0.938,7.625,12,-10.313,-6.877,Round hardware but role is not certain from dimensions alone.
+48,UNC-SHCS-5-8-X-7000-4,hardware_other,LOW,False,0.938,0.938,7.625,-12,10.313,-6.877,Round hardware but role is not certain from dimensions alone.
+49,UNC-SHCS-5-8-X-6500-4,hardware_other,LOW,False,0.938,0.938,7.125,3,-10.313,-7.127,Round hardware but role is not certain from dimensions alone.
+50,UNC-SHCS-5-8-X-6500-2,hardware_other,LOW,False,0.938,0.938,7.125,-3,10.313,-7.127,Round hardware but role is not certain from dimensions alone.
+51,UNC-SHCS-5-8-X-6500-3,hardware_other,LOW,False,0.938,0.938,7.125,3,10.313,-7.127,Round hardware but role is not certain from dimensions alone.
+52,UNC-SHCS-5-8-X-6500-1,hardware_other,LOW,False,0.938,0.938,7.125,-3,-10.313,-7.127,Round hardware but role is not certain from dimensions alone.
+53,GEB_1ID-X-1-3-8OD_DME-3,leader_pin_bushing,MEDIUM,False,1.552,1.552,1.75,-12.5,-7.25,-8.309,Short bushing matched to a long guide pin at the same center position plane.
+54,GEB_1ID-X-1-3-8OD_DME-4,leader_pin_bushing,MEDIUM,False,1.552,1.552,1.75,-12.5,7.25,-8.309,Short bushing matched to a long guide pin at the same center position plane.
+55,GEB_1ID-X-1-3-8OD_DME-2,leader_pin_bushing,MEDIUM,False,1.552,1.552,1.75,12.5,7.25,-8.309,Short bushing matched to a long guide pin at the same center position plane.
+56,GEB_1ID-X-1-3-8OD_DME-1,leader_pin_bushing,MEDIUM,False,1.552,1.552,1.75,12.5,-7.25,-8.309,Short bushing matched to a long guide pin at the same center position plane.
+57,2223488_TIE-STRAP-1,insert_or_core_detail,LOW,False,0.5,1.5,4.5,-17.75,7,-0.75,Smaller block inside cavity/core area; not a standard full plate.
+58,PH62L15-6,insert_or_core_detail,LOW,False,0.875,1.01,2.422,3.543,4.331,-9.531,Smaller block inside cavity/core area; not a standard full plate.
+59,PH62L15-7,insert_or_core_detail,LOW,False,0.875,1.01,2.422,-3.543,4.331,-9.531,Smaller block inside cavity/core area; not a standard full plate.
+60,PH62L15-5,ignore,LOW,False,0.875,1.01,2.422,6.299,-6.693,-9.531,Outside main standard-base classification rules.
+61,PH62L15-2,insert_or_core_detail,LOW,False,0.875,1.01,2.422,-6.299,6.693,-9.531,Smaller block inside cavity/core area; not a standard full plate.
+62,PH62L15-8,insert_or_core_detail,LOW,False,0.875,1.01,2.422,6.299,6.693,-9.531,Smaller block inside cavity/core area; not a standard full plate.
+63,PH62L15-1,ignore,LOW,False,0.875,1.01,2.422,3.543,-4.331,-9.531,Outside main standard-base classification rules.
+64,PH62L15-4,ignore,LOW,False,0.875,1.01,2.422,-6.299,-6.693,-9.531,Outside main standard-base classification rules.
+65,PH62L15-3,ignore,LOW,False,0.875,1.01,2.422,-3.543,-4.331,-9.531,Outside main standard-base classification rules.
+66,GL150X250_ASM-3-1/GL150X250_MALE-1,hardware_other,LOW,False,1,1.35,1.5,-16.74,0,-0.048,Inside mold stack but not enough geometry to name confidently.
+67,GL150X250_ASM-2-1/GL150X250_MALE-1,ignore,LOW,False,1,1.35,1.5,4,-11.74,-0.048,Outside main standard-base classification rules.
+68,GL150X250_ASM-1-1/GL150X250_MALE-1,insert_or_core_detail,LOW,False,1,1.35,1.5,0,11.74,-0.048,Smaller block inside cavity/core area; not a standard full plate.
+69,GL150X250_ASM-1/GL150X250_MALE-1,hardware_other,LOW,False,1,1.35,1.5,16.74,0,-0.048,Inside mold stack but not enough geometry to name confidently.
+70,UNC-SHCS-5-8-X-1500-2,hardware_other,LOW,False,0.938,0.938,2.125,-6.75,0,-9.627,Round hardware but role is not certain from dimensions alone.
+71,UNC-SHCS-5-8-X-1500-3,hardware_other,LOW,False,0.938,0.938,2.125,-12,0,-9.627,Round hardware but role is not certain from dimensions alone.
+72,UNC-SHCS-5-8-X-1500-1,hardware_other,LOW,False,0.938,0.938,2.125,12,0,-9.627,Round hardware but role is not certain from dimensions alone.
+73,UNC-SHCS-5-8-X-1500-4,hardware_other,LOW,False,0.938,0.938,2.125,6.75,0,-9.627,Round hardware but role is not certain from dimensions alone.
+74,UNC-SHCS-1-2-X-2000-1,hardware_other,LOW,False,0.75,0.75,2.5,-7,10.313,-9.439,Round hardware but role is not certain from dimensions alone.
+75,UNC-SHCS-1-2-X-2000-3,hardware_other,LOW,False,0.75,0.75,2.5,7,10.313,-9.439,Round hardware but role is not certain from dimensions alone.
+76,UNC-SHCS-1-2-X-2000-2,hardware_other,LOW,False,0.75,0.75,2.5,7,-10.313,-9.439,Round hardware but role is not certain from dimensions alone.
+77,UNC-SHCS-1-2-X-2000-4,hardware_other,LOW,False,0.75,0.75,2.5,-7,-10.313,-9.439,Round hardware but role is not certain from dimensions alone.
+78,ELGIN_TOSHIBA-350T-KEY-1,hardware_other,LOW,False,0.75,0.781,2,-6.89,10,4.377,Round hardware but role is not certain from dimensions alone.
+79,GL150X250_ASM-1/GL150X250_LH-1,hardware_other,LOW,False,0.75,0.75,1.5,16.74,-0.875,-0.377,Round hardware but role is not certain from dimensions alone.
+80,GL150X250_ASM-2-1/GL150X250_LH-1,hardware_other,LOW,False,0.75,0.75,1.5,3.125,-11.74,-0.377,Round hardware but role is not certain from dimensions alone.
+81,GL150X250_ASM-3-1/GL150X250_LH-1,hardware_other,LOW,False,0.75,0.75,1.5,-16.74,0.875,-0.377,Round hardware but role is not certain from dimensions alone.
+82,GL150X250_ASM-1-1/GL150X250_LH-1,hardware_other,LOW,False,0.75,0.75,1.5,0.875,11.74,-0.377,Round hardware but role is not certain from dimensions alone.
+83,GL150X250_ASM-1/GL150X250_RH-1,hardware_other,LOW,False,0.75,0.75,1.5,16.74,0.875,-0.377,Round hardware but role is not certain from dimensions alone.
+84,GL150X250_ASM-2-1/GL150X250_RH-1,hardware_other,LOW,False,0.75,0.75,1.5,4.875,-11.74,-0.377,Round hardware but role is not certain from dimensions alone.
+85,GL150X250_ASM-1-1/GL150X250_RH-1,hardware_other,LOW,False,0.75,0.75,1.5,-0.875,11.74,-0.377,Round hardware but role is not certain from dimensions alone.
+86,GL150X250_ASM-3-1/GL150X250_RH-1,hardware_other,LOW,False,0.75,0.75,1.5,-16.74,-0.875,-0.377,Round hardware but role is not certain from dimensions alone.
+87,UNF-SHCS-3-8-X-1500-5,hardware_other,LOW,False,0.562,0.562,1.875,12.75,-3.25,-9.752,Round hardware but role is not certain from dimensions alone.
+88,UNF-SHCS-3-8-X-1500-10,hardware_other,LOW,False,0.562,0.562,1.875,-8.75,-4.5,-9.752,Round hardware but role is not certain from dimensions alone.
+89,UNF-SHCS-3-8-X-1500-8,hardware_other,LOW,False,0.562,0.562,1.875,0,-5,-9.752,Round hardware but role is not certain from dimensions alone.
+90,UNF-SHCS-3-8-X-1500-11,hardware_other,LOW,False,0.562,0.562,1.875,4.5,6.25,-9.752,Round hardware but role is not certain from dimensions alone.
+91,UNF-SHCS-3-8-X-1500-12,hardware_other,LOW,False,0.562,0.562,1.875,8.75,4.5,-9.752,Round hardware but role is not certain from dimensions alone.
+92,UNF-SHCS-3-8-X-1500-4,hardware_other,LOW,False,0.562,0.562,1.875,-12.75,3.25,-9.752,Round hardware but role is not certain from dimensions alone.
+93,UNF-SHCS-3-8-X-1500-2,hardware_other,LOW,False,0.562,0.562,1.875,-4.5,6.25,-9.752,Round hardware but role is not certain from dimensions alone.
+94,UNF-SHCS-3-8-X-1500-7,hardware_other,LOW,False,0.562,0.562,1.875,-4.5,-6.25,-9.752,Round hardware but role is not certain from dimensions alone.
+95,UNF-SHCS-3-8-X-1500-3,hardware_other,LOW,False,0.562,0.562,1.875,12.75,3.25,-9.752,Round hardware but role is not certain from dimensions alone.
+96,UNF-SHCS-3-8-X-1500-14,hardware_other,LOW,False,0.562,0.562,1.875,-8.75,4.5,-9.752,Round hardware but role is not certain from dimensions alone.
+97,UNF-SHCS-3-8-X-1500-13,hardware_other,LOW,False,0.562,0.562,1.875,0,5,-9.752,Round hardware but role is not certain from dimensions alone.
+98,UNF-SHCS-3-8-X-1500-1,hardware_other,LOW,False,0.562,0.562,1.875,4.5,-6.25,-9.752,Round hardware but role is not certain from dimensions alone.
+99,UNF-SHCS-3-8-X-1500-6,hardware_other,LOW,False,0.562,0.562,1.875,-12.75,-3.25,-9.752,Round hardware but role is not certain from dimensions alone.
+100,UNF-SHCS-3-8-X-1500-9,hardware_other,LOW,False,0.562,0.562,1.875,8.75,-4.5,-9.752,Round hardware but role is not certain from dimensions alone.
+101,UNF-SHCS-3-8-X-1250-12,hardware_other,LOW,False,0.562,0.562,1.625,-9.5,-7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+102,UNF-SHCS-3-8-X-1250-20,hardware_other,LOW,False,0.562,0.562,1.625,-3,7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+103,UNF-SHCS-3-8-X-1250-2,hardware_other,LOW,False,0.562,0.562,1.625,-9.5,7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+104,UNF-SHCS-3-8-X-1250-9,hardware_other,LOW,False,0.562,0.562,1.625,-5.5,-2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+105,UNF-SHCS-3-8-X-1250-16,hardware_other,LOW,False,0.562,0.562,1.625,-14.5,-2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+106,UNF-SHCS-3-8-X-1250-14,hardware_other,LOW,False,0.562,0.562,1.625,0,2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+107,UNF-SHCS-3-8-X-1250-19,hardware_other,LOW,False,0.562,0.562,1.625,3,-7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+108,UNF-SHCS-3-8-X-1250-11,hardware_other,LOW,False,0.562,0.562,1.625,-3,-7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+109,UNF-SHCS-3-8-X-1250-8,hardware_other,LOW,False,0.562,0.562,1.625,-14.5,2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+110,UNF-SHCS-3-8-X-1250-18,hardware_other,LOW,False,0.562,0.562,1.625,9.5,-7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+111,UNF-SHCS-3-8-X-1250-13,hardware_other,LOW,False,0.562,0.562,1.625,14.5,-2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+112,UNF-SHCS-3-8-X-1250-4,hardware_other,LOW,False,0.562,0.562,1.625,-9.5,0,-8.315,Round hardware but role is not certain from dimensions alone.
+113,UNF-SHCS-3-8-X-1250-3,hardware_other,LOW,False,0.562,0.562,1.625,9.5,7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+114,UNF-SHCS-3-8-X-1250-17,hardware_other,LOW,False,0.562,0.562,1.625,14.5,2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+115,UNF-SHCS-3-8-X-1250-1,hardware_other,LOW,False,0.562,0.562,1.625,5.5,-2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+116,UNF-SHCS-3-8-X-1250-5,hardware_other,LOW,False,0.562,0.562,1.625,9.5,0,-8.315,Round hardware but role is not certain from dimensions alone.
+117,UNF-SHCS-3-8-X-1250-6,hardware_other,LOW,False,0.562,0.562,1.625,-5.5,2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+118,UNF-SHCS-3-8-X-1250-7,hardware_other,LOW,False,0.562,0.562,1.625,5.5,2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+119,UNF-SHCS-3-8-X-1250-10,hardware_other,LOW,False,0.562,0.562,1.625,3,7.5,-8.315,Round hardware but role is not certain from dimensions alone.
+120,UNF-SHCS-3-8-X-1250-15,hardware_other,LOW,False,0.562,0.562,1.625,0,-2.5,-8.315,Round hardware but role is not certain from dimensions alone.
+121,GL150X250_ASM-2-1/UNF-SHCS-1-4-X-1500-1,hardware_other,LOW,False,0.375,0.375,1.75,4,-11.3,0.183,Round hardware but role is not certain from dimensions alone.
+122,GL150X250_ASM-3-1/UNF-SHCS-1-4-X-1500-1,hardware_other,LOW,False,0.375,0.375,1.75,-17.18,0,0.183,Round hardware but role is not certain from dimensions alone.
+123,GL150X250_ASM-3-1/UNF-SHCS-1-4-X-1500-2,hardware_other,LOW,False,0.375,0.375,1.75,-16.3,0,0.183,Round hardware but role is not certain from dimensions alone.
+124,GL150X250_ASM-1/UNF-SHCS-1-4-X-1500-2,hardware_other,LOW,False,0.375,0.375,1.75,16.3,0,0.183,Round hardware but role is not certain from dimensions alone.
+125,GL150X250_ASM-1/UNF-SHCS-1-4-X-1500-1,hardware_other,LOW,False,0.375,0.375,1.75,17.18,0,0.183,Round hardware but role is not certain from dimensions alone.
+126,GL150X250_ASM-2-1/UNF-SHCS-1-4-X-1500-2,hardware_other,LOW,False,0.375,0.375,1.75,4,-12.18,0.183,Round hardware but role is not certain from dimensions alone.
+127,GL150X250_ASM-1-1/UNF-SHCS-1-4-X-1500-1,hardware_other,LOW,False,0.375,0.375,1.75,0,11.3,0.183,Round hardware but role is not certain from dimensions alone.
+128,GL150X250_ASM-1-1/UNF-SHCS-1-4-X-1500-2,hardware_other,LOW,False,0.375,0.375,1.75,0,12.18,0.183,Round hardware but role is not certain from dimensions alone.
+129,TLP75-21,hardware_other,LOW,False,0.188,1,1,-2,5,-9.283,Round hardware but role is not certain from dimensions alone.
+130,TLP75-18,hardware_other,LOW,False,0.188,1,1,6,-5,-9.283,Round hardware but role is not certain from dimensions alone.
+131,TLP75-16,hardware_other,LOW,False,0.188,1,1,-11,5,-9.283,Round hardware but role is not certain from dimensions alone.
+132,TLP75-9,hardware_other,LOW,False,0.188,1,1,-4.5,0,-9.283,Round hardware but role is not certain from dimensions alone.
+133,TLP75-15,hardware_other,LOW,False,0.188,1,1,-6,-5,-9.283,Round hardware but role is not certain from dimensions alone.
+134,TLP75-5,hardware_other,LOW,False,0.188,1,1,-14.375,-4.5,-9.283,Round hardware but role is not certain from dimensions alone.
+135,TLP75-17,hardware_other,LOW,False,0.188,1,1,2,5,-9.283,Round hardware but role is not certain from dimensions alone.
+136,TLP75-4,hardware_other,LOW,False,0.188,1,1,-14.25,0,-9.283,Round hardware but role is not certain from dimensions alone.
+137,TLP75-2,hardware_other,LOW,False,0.188,1,1,2,-5,-9.283,Round hardware but role is not certain from dimensions alone.
+138,TLP75-1,hardware_other,LOW,False,0.188,1,1,11,-5,-9.283,Round hardware but role is not certain from dimensions alone.
+139,TLP75-3,hardware_other,LOW,False,0.188,1,1,14.375,-4.5,-9.283,Round hardware but role is not certain from dimensions alone.
+140,TLP75-14,hardware_other,LOW,False,0.188,1,1,-11,-5,-9.283,Round hardware but role is not certain from dimensions alone.
+141,TLP75-12,hardware_other,LOW,False,0.188,1,1,14.25,0,-9.283,Round hardware but role is not certain from dimensions alone.
+142,TLP75-8,hardware_other,LOW,False,0.188,1,1,-14.25,4.5,-9.283,Round hardware but role is not certain from dimensions alone.
+143,TLP75-11,hardware_other,LOW,False,0.188,1,1,-2,-5,-9.283,Round hardware but role is not certain from dimensions alone.
+144,TLP75-13,hardware_other,LOW,False,0.188,1,1,14.375,4.5,-9.283,Round hardware but role is not certain from dimensions alone.
+145,TLP75-10,hardware_other,LOW,False,0.188,1,1,0,0,-9.283,Round hardware but role is not certain from dimensions alone.
+146,TLP75-7,hardware_other,LOW,False,0.188,1,1,11,5,-9.283,Round hardware but role is not certain from dimensions alone.
+147,TLP75-19,hardware_other,LOW,False,0.188,1,1,6,5,-9.283,Round hardware but role is not certain from dimensions alone.
+148,TLP75-6,hardware_other,LOW,False,0.188,1,1,-6,5,-9.283,Round hardware but role is not certain from dimensions alone.
+149,TLP75-20,hardware_other,LOW,False,0.188,1,1,4.5,0,-9.283,Round hardware but role is not certain from dimensions alone.
+150,GL150X250_ASM-1-1/UNF-SHCS-1-4-X-0875-3,hardware_other,LOW,False,0.375,0.375,1.125,0.875,11.3,-0.596,Round hardware but role is not certain from dimensions alone.
+151,GL150X250_ASM-2-1/UNF-SHCS-1-4-X-0875-4,hardware_other,LOW,False,0.375,0.375,1.125,4.875,-12.18,-0.596,Round hardware but role is not certain from dimensions alone.
+152,GL150X250_ASM-1/UNF-SHCS-1-4-X-0875-1,hardware_other,LOW,False,0.375,0.375,1.125,16.3,0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+153,GL150X250_ASM-2-1/UNF-SHCS-1-4-X-0875-3,hardware_other,LOW,False,0.375,0.375,1.125,3.125,-12.18,-0.596,Round hardware but role is not certain from dimensions alone.
+154,GL150X250_ASM-1/UNF-SHCS-1-4-X-0875-2,hardware_other,LOW,False,0.375,0.375,1.125,17.18,0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+155,GL150X250_ASM-1/UNF-SHCS-1-4-X-0875-3,hardware_other,LOW,False,0.375,0.375,1.125,16.3,-0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+156,GL150X250_ASM-2-1/UNF-SHCS-1-4-X-0875-2,hardware_other,LOW,False,0.375,0.375,1.125,4.875,-11.3,-0.596,Round hardware but role is not certain from dimensions alone.
+157,GL150X250_ASM-1-1/UNF-SHCS-1-4-X-0875-1,hardware_other,LOW,False,0.375,0.375,1.125,-0.875,11.3,-0.596,Round hardware but role is not certain from dimensions alone.
+158,GL150X250_ASM-3-1/UNF-SHCS-1-4-X-0875-1,hardware_other,LOW,False,0.375,0.375,1.125,-17.18,-0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+159,GL150X250_ASM-3-1/UNF-SHCS-1-4-X-0875-2,hardware_other,LOW,False,0.375,0.375,1.125,-16.3,0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+160,GL150X250_ASM-3-1/UNF-SHCS-1-4-X-0875-4,hardware_other,LOW,False,0.375,0.375,1.125,-17.18,0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+161,GL150X250_ASM-3-1/UNF-SHCS-1-4-X-0875-3,hardware_other,LOW,False,0.375,0.375,1.125,-16.3,-0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+162,GL150X250_ASM-1-1/UNF-SHCS-1-4-X-0875-2,hardware_other,LOW,False,0.375,0.375,1.125,-0.875,12.18,-0.596,Round hardware but role is not certain from dimensions alone.
+163,GL150X250_ASM-1-1/UNF-SHCS-1-4-X-0875-4,hardware_other,LOW,False,0.375,0.375,1.125,0.875,12.18,-0.596,Round hardware but role is not certain from dimensions alone.
+164,GL150X250_ASM-1/UNF-SHCS-1-4-X-0875-4,hardware_other,LOW,False,0.375,0.375,1.125,17.18,-0.875,-0.596,Round hardware but role is not certain from dimensions alone.
+165,GL150X250_ASM-2-1/UNF-SHCS-1-4-X-0875-1,hardware_other,LOW,False,0.375,0.375,1.125,3.125,-11.3,-0.596,Round hardware but role is not certain from dimensions alone.
+166,UNC-FHCS-1-4-X-0500-4,hardware_other,LOW,False,0.48,0.48,0.5,-14.25,0,-9.486,Round hardware but role is not certain from dimensions alone.
+167,UNC-FHCS-1-4-X-0500-5,hardware_other,LOW,False,0.48,0.48,0.5,11,-5,-9.486,Round hardware but role is not certain from dimensions alone.
+168,UNC-FHCS-1-4-X-0500-2,hardware_other,LOW,False,0.48,0.48,0.5,6,-5,-9.486,Round hardware but role is not certain from dimensions alone.
+169,UNC-FHCS-1-4-X-0500-6,hardware_other,LOW,False,0.48,0.48,0.5,2,-5,-9.486,Round hardware but role is not certain from dimensions alone.
+170,UNC-FHCS-1-4-X-0500-1,hardware_other,LOW,False,0.48,0.48,0.5,2,5,-9.486,Round hardware but role is not certain from dimensions alone.
+171,UNC-FHCS-1-4-X-0500-14,hardware_other,LOW,False,0.48,0.48,0.5,-11,-5,-9.486,Round hardware but role is not certain from dimensions alone.
+172,UNC-FHCS-1-4-X-0500-15,hardware_other,LOW,False,0.48,0.48,0.5,-2,-5,-9.486,Round hardware but role is not certain from dimensions alone.
+173,UNC-FHCS-1-4-X-0500-17,hardware_other,LOW,False,0.48,0.48,0.5,11,5,-9.486,Round hardware but role is not certain from dimensions alone.
+174,UNC-FHCS-1-4-X-0500-16,hardware_other,LOW,False,0.48,0.48,0.5,-11,5,-9.486,Round hardware but role is not certain from dimensions alone.
+175,UNC-FHCS-1-4-X-0500-10,hardware_other,LOW,False,0.48,0.48,0.5,14.25,0,-9.486,Round hardware but role is not certain from dimensions alone.
+176,UNC-FHCS-1-4-X-0500-12,hardware_other,LOW,False,0.48,0.48,0.5,-6,5,-9.486,Round hardware but role is not certain from dimensions alone.
+177,UNC-FHCS-1-4-X-0500-9,hardware_other,LOW,False,0.48,0.48,0.5,-2,5,-9.486,Round hardware but role is not certain from dimensions alone.
+178,UNC-FHCS-1-4-X-0500-8,hardware_other,LOW,False,0.48,0.48,0.5,-6,-5,-9.486,Round hardware but role is not certain from dimensions alone.
+179,UNC-FHCS-1-4-X-0500-11,hardware_other,LOW,False,0.48,0.48,0.5,4.5,0,-9.486,Round hardware but role is not certain from dimensions alone.
+180,UNC-FHCS-1-4-X-0500-13,hardware_other,LOW,False,0.48,0.48,0.5,-4.5,0,-9.486,Round hardware but role is not certain from dimensions alone.
+181,UNC-FHCS-1-4-X-0500-7,hardware_other,LOW,False,0.48,0.48,0.5,0,0,-9.486,Round hardware but role is not certain from dimensions alone.
+182,UNC-FHCS-1-4-X-0500-3,hardware_other,LOW,False,0.48,0.48,0.5,6,5,-9.486,Round hardware but role is not certain from dimensions alone.

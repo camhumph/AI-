@@ -1,0 +1,29 @@
+path: C:/CMS_AI/datasets/right_view_only
+train: images/train
+val: images/val
+
+names:
+  0: mold_body
+  1: top_clamp_plate
+  2: bottom_clamp_plate
+  3: a_cavity_plate
+  4: b_core_plate
+  5: support_plate
+  6: rail
+  7: id_holder
+  8: od_holder
+  9: id_pot
+  10: od_pot
+  11: parting_line
+  12: stripper_plate
+  13: ejector_plate
+  14: pin_plate
+  15: pullcore_cam
+  16: pullcore_key
+  17: pyropel
+  18: leader_pin
+  19: bushing
+  20: hardware_other
+  21: insert
+  22: manifold_plate
+  23: unknown_review

@@ -1,0 +1,45 @@
+CMS AI FULL ASSEMBLY VIEW NOTES
+================================
+Job: 857400162-C18627.sldasm
+Image: C:\CMS_AI\datasets\cms_molds\label_queue\images\857400162-C18627.sldasm_FULL_BACK.jpg
+ViewType: back
+PartCount: 24
+
+IMPORTANT:
+This is NOT a YOLO label file.
+Use this image for manual LabelImg labeling if needed.
+
+Detected key roles:
+TCP index: 9
+BCP index: 3
+ID Holder index: 2
+OD Holder index: 8
+ID Pot index: 15
+OD Pot index: 13
+
+Parts:
+Index | Use | Class | Confidence | T | W | L | CenterX | CenterY | CenterZ | Component
+1 | 1 | leader_pin | 0.550 | 0.625 | 0.625 | 16.219 | -0.672 | 6.341 | -0.845 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-11-1
+2 | 1 | id_holder | 0.990 | 6.750 | 6.938 | 14.875 | 0.000 | -3.469 | -1.225 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-21-1
+3 | 1 | bottom_clamp_plate | 0.990 | 1.375 | 15.875 | 20.000 | 0.000 | 8.372 | -0.100 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-18-1
+4 | 0 | hardware_other | 0.250 | 1.000 | 1.281 | 1.625 | -0.188 | 6.373 | -1.219 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-17-1
+5 | 0 | bushing | 0.500 | 0.947 | 1.000 | 2.875 | -1.603 | -4.096 | -0.155 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-20-1
+6 | 0 | hardware_other | 0.250 | 0.250 | 11.750 | 14.875 | 0.000 | 7.560 | -3.725 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-23-1
+7 | 0 | hardware_other | 0.250 | 1.875 | 2.500 | 4.750 | -1.678 | -4.227 | -0.225 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-25-1
+8 | 1 | od_holder | 0.990 | 6.750 | 7.415 | 14.875 | 0.000 | 3.734 | -1.225 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-26-1
+9 | 1 | top_clamp_plate | 0.990 | 1.375 | 15.875 | 20.000 | 0.000 | -7.875 | -0.100 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-27-1
+10 | 0 | bushing | 0.500 | 0.947 | 1.000 | 2.875 | 3.058 | 3.977 | -0.155 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-15-1
+11 | 0 | hardware_other | 0.250 | 2.247 | 2.247 | 2.255 | -5.188 | 6.807 | -6.475 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-12-1
+12 | 0 | hardware_other | 0.250 | 0.875 | 2.616 | 3.668 | 3.425 | 4.644 | -4.163 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-13-1
+13 | 1 | od_pot | 0.990 | 5.000 | 6.500 | 7.408 | 0.000 | 3.731 | -7.100 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-28-1
+14 | 0 | hardware_other | 0.250 | 1.000 | 2.750 | 3.938 | -0.188 | 5.441 | -1.533 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-2-1
+15 | 1 | id_pot | 0.990 | 5.000 | 6.500 | 6.938 | 0.000 | -3.469 | -7.100 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-3-1
+16 | 0 | hardware_other | 0.250 | 1.875 | 2.500 | 4.750 | 3.134 | 4.108 | -0.225 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-4-1
+17 | 0 | hardware_other | 0.250 | 0.250 | 11.688 | 14.813 | 0.000 | -7.063 | -3.725 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-5-1
+18 | 1 | leader_pin | 0.550 | 1.240 | 1.240 | 9.250 | -6.438 | -2.313 | -3.475 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-9-1
+19 | 0 | hardware_other | 0.250 | 0.875 | 2.616 | 3.668 | -1.997 | -4.747 | -4.163 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-10-1
+20 | 0 | bushing | 0.500 | 0.813 | 0.813 | 1.000 | -6.938 | 6.341 | -0.845 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-7-1
+21 | 1 | leader_pin | 0.550 | 1.240 | 1.240 | 9.250 | 6.438 | -2.313 | 0.900 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-9-4
+22 | 0 | bushing | 0.500 | 0.813 | 0.813 | 1.000 | 6.938 | 6.341 | -0.845 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-7-2
+23 | 1 | leader_pin | 0.550 | 1.240 | 1.240 | 9.250 | -6.438 | -2.313 | 0.900 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-9-2
+24 | 1 | leader_pin | 0.550 | 1.240 | 1.240 | 9.250 | 6.438 | -2.313 | -3.350 | 857400162_BASE_FINAL_1-2-2026.sldasm-Part-9-3
