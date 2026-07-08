@@ -18,6 +18,9 @@ set CMS_VBA_BRIDGE_DIR=C:\CMS_Local_Workspace\AI_Bridge
 rem Email credentials + pricing config (Settings page writes here)
 set CMS_DATA_DIR=C:\CMS_Local_Workspace\cms_data
 
+rem Folder browser for C-number quote jobs
+set CMS_WORKSPACE_ROOT=C:\CMS_Local_Workspace
+
 rem Point the app at the real job folders on this machine (uncomment to use):
 rem set CMS_JOBS_ROOT=C:\CMS_Local_Workspace\AI_Jobs
 

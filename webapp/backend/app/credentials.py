@@ -96,6 +96,9 @@ def load() -> dict[str, Any]:
             data[key] = val
     if not data.get("smtp_from"):
         data["smtp_from"] = data.get("smtp_user") or data.get("gmail_address", "")
+    # Treat gmail_address as imap_user when user only filled the address field.
+    if data.get("gmail_address") and not data.get("imap_user"):
+        data["imap_user"] = data["gmail_address"]
     return data
 
 
@@ -108,8 +111,17 @@ def save(updates: dict[str, Any]) -> dict[str, Any]:
         if key.endswith("_password") and (val is None or val == ""):
             continue  # blank password = keep existing
         current[key] = val
+
+    # Auto-sync Gmail fields so one app password configures both IMAP and SMTP.
+    if current.get("gmail_address") and not current.get("imap_user"):
+        current["imap_user"] = current["gmail_address"]
+    if current.get("imap_user") and not current.get("smtp_user"):
+        current["smtp_user"] = current["imap_user"]
+    if current.get("imap_password") and not current.get("smtp_password"):
+        current["smtp_password"] = current["imap_password"]
     if not current.get("smtp_from"):
         current["smtp_from"] = current.get("smtp_user") or current.get("gmail_address", "")
+
     CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
     CREDENTIALS_PATH.write_text(json.dumps(current, indent=2), encoding="utf-8")
     return public_view(current)

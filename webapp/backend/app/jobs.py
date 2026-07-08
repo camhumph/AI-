@@ -213,6 +213,143 @@ def import_raw_csv(job_id: str, csv_path: str) -> bool:
     return True
 
 
+def _extract_c_number(name: str) -> str | None:
+    import re
+
+    m = re.search(r"\bC(\d{4,6})\b", name, re.I)
+    return f"C{m.group(1)}" if m else None
+
+
+def _workspace_roots() -> list[Path]:
+    from . import config as cfg
+
+    roots = [cfg.WORKSPACE_ROOT, cfg.JOBS_ROOT]
+    roots.extend(Path(p) for p in cfg.WORKSPACE_EXTRA_ROOTS)
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = str(r)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def browse_workspace(path: str = "") -> dict:
+    """List subfolders/files under a workspace path for the folder picker."""
+    from . import config as cfg
+
+    base = Path(path) if path else cfg.WORKSPACE_ROOT
+    if not base.exists() or not base.is_dir():
+        # Fall back to first existing root
+        for root in _workspace_roots():
+            if root.exists():
+                base = root
+                break
+        else:
+            return {"path": str(base), "exists": False, "entries": [], "roots": [str(r) for r in _workspace_roots()]}
+
+    entries = []
+    try:
+        for child in sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            if child.name.startswith("."):
+                continue
+            c_num = _extract_c_number(child.name)
+            has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
+            has_quote = any(child.glob("*quote*.xls*")) or any(child.glob("*Quote*.xls*"))
+            has_steel = any(child.glob("*steel*.xls*")) or any(child.glob("*J000*.xls*"))
+            entries.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": child.is_dir(),
+                    "c_number": c_num,
+                    "has_xt_csv": has_xt,
+                    "has_quote_sheet": has_quote,
+                    "has_steel_sheet": has_steel,
+                    "quote_ready": child.is_dir() and (has_xt or has_quote or has_steel),
+                }
+            )
+    except PermissionError:
+        pass
+
+    parent = str(base.parent) if base.parent != base else None
+    return {
+        "path": str(base),
+        "exists": True,
+        "parent": parent,
+        "entries": entries,
+        "roots": [str(r) for r in _workspace_roots()],
+    }
+
+
+def import_from_folder(folder_path: str) -> dict:
+    """Register a quote from an existing folder on disk (C-number job)."""
+    import re
+    import shutil
+
+    src = Path(folder_path)
+    if not src.exists() or not src.is_dir():
+        raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+    c_num = _extract_c_number(src.name)
+    job_id = c_num or src.name[:40]
+    job_dir = _job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy key files into the job registry
+    for pattern in (
+        "XT_Export_CAD_Dimensions.csv",
+        "Purchased Components Quote.csv",
+        "Pullcore Prices.csv",
+        "classification.json",
+        "classification.csv",
+    ):
+        for hit in src.glob(pattern):
+            if hit.is_file():
+                shutil.copy2(hit, job_dir / hit.name)
+
+    for sub in ("images", "models", "documents"):
+        src_sub = src / sub
+        if src_sub.is_dir():
+            dest_sub = job_dir / sub
+            dest_sub.mkdir(exist_ok=True)
+            for f in src_sub.iterdir():
+                if f.is_file():
+                    shutil.copy2(f, dest_sub / f.name)
+
+    # Flat files in job root -> documents/
+    docs = job_dir / "documents"
+    docs.mkdir(exist_ok=True)
+    for f in src.iterdir():
+        if not f.is_file():
+            continue
+        low = f.name.lower()
+        if low.endswith((".xlsx", ".xls", ".pdf", ".csv")) and f.name not in {
+            "XT_Export_CAD_Dimensions.csv",
+            "classification.csv",
+        }:
+            dest = docs / f.name
+            if not dest.exists():
+                shutil.copy2(f, dest)
+
+    meta = _read_meta(job_dir)
+    meta.update(
+        {
+            "display_name": src.name,
+            "customer": re.search(r"\d{6,}", src.name).group(0) if re.search(r"\d{6,}", src.name) else "",
+            "source_folder": str(src),
+            "c_number": c_num or "",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+    )
+    if "created_at" not in meta:
+        meta["created_at"] = meta["updated_at"]
+    (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    return get_job(job_id)
+
+
 def save_upload(job_id: str, subfolder: str, filename: str, data: bytes) -> dict:
     job_dir = _job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)

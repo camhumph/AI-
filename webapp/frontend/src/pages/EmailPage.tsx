@@ -154,9 +154,9 @@ export default function EmailPage() {
                 <button
                   onClick={quoteThis}
                   disabled={quoting}
-                  className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-600/40 transition hover:bg-blue-500 disabled:opacity-60"
+                  className="inline-flex items-center gap-2 border border-ink-100 bg-ink-100 px-6 py-2 text-xs font-bold uppercase tracking-widest text-ink-950 transition hover:bg-transparent hover:text-ink-100 disabled:opacity-50"
                 >
-                  {quoting ? "Starting quote..." : "Quote"}
+                  {quoting ? "Starting..." : "Quote"}
                 </button>
               </div>
 

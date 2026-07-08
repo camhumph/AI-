@@ -68,6 +68,10 @@ export interface QuoteLineItem {
   confidence: string;
   quote: boolean;
   price: number;
+  price_source?: string;
+  thickness?: number;
+  width?: number;
+  length?: number;
 }
 
 export interface QuoteSheet {
@@ -76,6 +80,30 @@ export interface QuoteSheet {
   total_price: number;
   quoted_part_count: number;
   total_part_count: number;
+  csv_priced_count?: number;
+  missing_csv_price_count?: number;
+  pricing_source?: string;
+  shop_csv?: string;
+  has_steel_sheet_dims?: boolean;
+}
+
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  c_number: string | null;
+  has_xt_csv: boolean;
+  has_quote_sheet: boolean;
+  has_steel_sheet: boolean;
+  quote_ready: boolean;
+}
+
+export interface WorkspaceBrowse {
+  path: string;
+  exists: boolean;
+  parent: string | null;
+  entries: WorkspaceEntry[];
+  roots: string[];
 }
 
 export interface EmailSummary {
@@ -147,6 +175,9 @@ export const api = {
   health: () => req<{ ok: boolean; email_configured: boolean; smtp_configured: boolean }>("/health"),
 
   listJobs: () => req<JobSummary[]>("/jobs"),
+  browseWorkspace: (path = "") => req<WorkspaceBrowse>(`/workspace/browse?path=${encodeURIComponent(path)}`),
+  importFromFolder: (folder_path: string) =>
+    req<JobDetail>("/jobs/import-folder", { method: "POST", body: JSON.stringify({ folder_path }) }),
   getJob: (jobId: string) => req<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`),
   createJob: (job_id: string, display_name: string, customer: string) =>
     req<JobDetail>("/jobs", { method: "POST", body: JSON.stringify({ job_id, display_name, customer }) }),
@@ -182,6 +213,7 @@ export const api = {
   getEmailSettings: () => req<EmailSettings>("/settings/email"),
   putEmailSettings: (settings: Partial<EmailSettings> & { imap_password?: string; smtp_password?: string }) =>
     req<EmailSettings>("/settings/email", { method: "PUT", body: JSON.stringify(settings) }),
+  testEmail: () => req<{ ok: boolean; message: string }>("/settings/email/test", { method: "POST" }),
   listEmails: () => req<EmailSummary[]>("/email/messages"),
   getEmail: (id: string) => req<EmailDetail>(`/email/messages/${encodeURIComponent(id)}`),
   quoteEmail: (id: string, launchMacro = true) =>

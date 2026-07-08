@@ -26,8 +26,6 @@ type EmailSettings = {
 
 export default function SettingsPage() {
   const [rates, setRates] = useState<Record<string, Rate> | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null);
   const [imapPassword, setImapPassword] = useState("");
   const [smtpPassword, setSmtpPassword] = useState("");
@@ -42,26 +40,6 @@ export default function SettingsPage() {
     api.getEmailSettings().then(setEmailSettings);
     api.trainingStatus().then(setTrainingStatus).catch(() => setTrainingStatus(null));
   }, []);
-
-  const updateRate = (role: string, field: keyof Rate, value: string) => {
-    setRates((prev) => {
-      if (!prev) return prev;
-      const numeric = field === "mode" ? value : parseFloat(value) || 0;
-      return { ...prev, [role]: { ...prev[role], [field]: numeric } };
-    });
-  };
-
-  const save = async () => {
-    if (!rates) return;
-    setSaving(true);
-    try {
-      await api.putPricing(rates);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const saveEmail = async () => {
     if (!emailSettings) return;
@@ -91,6 +69,18 @@ export default function SettingsPage() {
     }
   };
 
+  const [emailTestMsg, setEmailTestMsg] = useState("");
+
+  const testEmail = async () => {
+    setEmailTestMsg("");
+    try {
+      const r = await api.testEmail();
+      setEmailTestMsg(r.message);
+    } catch (e) {
+      setEmailTestMsg((e as Error).message);
+    }
+  };
+
   const runTraining = async () => {
     setTrainingRunning(true);
     try {
@@ -111,9 +101,12 @@ export default function SettingsPage() {
               <h3 className="text-sm font-semibold text-ink-100">Gmail Credentials</h3>
             </div>
             <div className="flex items-center gap-2">
-              <StatusRow ok={!!emailSettings?.configured} label={emailSettings?.configured ? "Inbox connected" : "Not connected"} />
+              <StatusRow ok={!!emailSettings?.configured} label={emailSettings?.configured ? "Connected" : "Not connected"} />
+              <Button variant="secondary" onClick={testEmail} disabled={!emailSettings?.configured}>
+                Test
+              </Button>
               <Button onClick={saveEmail} disabled={emailSaving || !emailSettings}>
-                <Save className="h-4 w-4" /> {emailSaving ? "Saving..." : emailSaved ? "Saved!" : "Save Email"}
+                <Save className="h-4 w-4" /> {emailSaving ? "Saving..." : emailSaved ? "Saved" : "Save"}
               </Button>
             </div>
           </div>
@@ -122,6 +115,7 @@ export default function SettingsPage() {
             Module6121 and the inbox both read from{" "}
             <code className="text-ink-200">{emailSettings?.credentials_path || "cms_data/email_credentials.json"}</code> on this PC.
           </p>
+          {emailTestMsg && <p className="mb-3 text-xs text-ink-300">{emailTestMsg}</p>}
           {!emailSettings ? (
             <Spinner label="Loading email settings..." />
           ) : (
@@ -179,62 +173,28 @@ export default function SettingsPage() {
       </div>
 
       <Card className="mt-6 p-5">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-semibold text-ink-100">Pricing Rules</h3>
-            <p className="text-xs text-ink-400">Rates drive the Total Price on every quote.</p>
-          </div>
-          <Button onClick={save} disabled={saving || !rates}>
-            <Save className="h-4 w-4" /> {saving ? "Saving..." : saved ? "Saved!" : "Save Rates"}
-          </Button>
-        </div>
-
+        <div className="section-label mb-4">Purchased Component Prices (CSV)</div>
+        <p className="mb-4 text-xs text-ink-400">
+          Quote totals pull directly from Purchased Components Prices.csv and per-job Purchased Components Quote.csv.
+        </p>
         {!rates ? (
-          <Spinner label="Loading pricing config..." />
+          <Spinner label="Loading CSV prices..." />
+        ) : Object.keys(rates).length === 0 ? (
+          <p className="text-xs text-ink-400">No prices in CSV yet.</p>
         ) : (
           <div className="scrollbar-thin overflow-x-auto">
             <table className="w-full text-left text-sm">
               <thead>
-                <tr className="text-[11px] uppercase tracking-wider text-ink-400">
-                  <th className="px-3 py-2 font-medium">Role</th>
-                  <th className="px-3 py-2 font-medium">Pricing Mode</th>
-                  <th className="px-3 py-2 font-medium">Rate</th>
-                  <th className="px-3 py-2 font-medium">Minimum</th>
+                <tr className="text-[10px] uppercase tracking-widest text-ink-500">
+                  <th className="px-3 py-2">Component</th>
+                  <th className="px-3 py-2">Unit Price</th>
                 </tr>
               </thead>
               <tbody>
-                {Object.entries(rates).map(([role, spec]) => (
-                  <tr key={role} className="border-t border-ink-800/60">
-                    <td className="px-3 py-2 text-ink-200">{role.replace(/_/g, " ")}</td>
-                    <td className="px-3 py-2">
-                      <select
-                        value={spec.mode}
-                        onChange={(e) => updateRate(role, "mode", e.target.value)}
-                        className="rounded-lg border border-ink-700/60 bg-ink-850 px-2 py-1 text-xs text-ink-100"
-                      >
-                        <option value="flat">flat</option>
-                        <option value="per_cuin">per cubic inch</option>
-                        <option value="per_inch">per inch (length)</option>
-                      </select>
-                    </td>
-                    <td className="px-3 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={spec.rate}
-                        onChange={(e) => updateRate(role, "rate", e.target.value)}
-                        className="w-24 rounded-lg border border-ink-700/60 bg-ink-850 px-2 py-1 text-xs text-ink-100"
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={spec.minimum}
-                        onChange={(e) => updateRate(role, "minimum", e.target.value)}
-                        className="w-24 rounded-lg border border-ink-700/60 bg-ink-850 px-2 py-1 text-xs text-ink-100"
-                      />
-                    </td>
+                {Object.entries(rates).map(([comp, spec]) => (
+                  <tr key={comp} className="border-t border-ink-800">
+                    <td className="px-3 py-2 text-ink-200">{comp}</td>
+                    <td className="px-3 py-2 text-ink-100">${spec.rate.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>

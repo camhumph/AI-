@@ -16,6 +16,17 @@ DATA_DIR = Path(os.environ.get("CMS_DATA_DIR", BACKEND_DIR / "data"))
 # On a real CMS machine this should point at C:\CMS_Local_Workspace.
 JOBS_ROOT = Path(os.environ.get("CMS_JOBS_ROOT", DATA_DIR / "jobs"))
 
+# Folders to browse when picking a quote job (C-number folders on the shop PC).
+WORKSPACE_ROOT = Path(
+    os.environ.get("CMS_WORKSPACE_ROOT", r"C:\CMS_Local_Workspace")
+)
+# Additional roots scanned for existing quote folders (network drive, month folders).
+WORKSPACE_EXTRA_ROOTS = [
+    p.strip()
+    for p in os.environ.get("CMS_WORKSPACE_EXTRA_ROOTS", "").split(";")
+    if p.strip()
+]
+
 # Where the AI classifier lives (repo-relative), used to actually (re)run
 # classification against a job's raw XT_Export_CAD_Dimensions.csv.
 GEOMETRY_CLASSIFIER_DIR = Path(

@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, Mail, FileStack, Settings, Wand2 } from "lucide-react";
+import { LayoutDashboard, Mail, FileStack, Settings } from "lucide-react";
 import clsx from "clsx";
 
 const NAV = [
@@ -11,18 +11,13 @@ const NAV = [
 
 export default function Sidebar() {
   return (
-    <aside className="hidden md:flex md:w-64 flex-col shrink-0 border-r border-ink-700/60 bg-ink-900/60 backdrop-blur-xl">
-      <div className="flex items-center gap-2.5 px-6 py-6">
-        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand-400 to-accent-teal shadow-lg shadow-brand-600/30">
-          <Wand2 className="h-5 w-5 text-ink-950" strokeWidth={2.5} />
-        </div>
-        <div>
-          <div className="text-sm font-semibold tracking-wide text-ink-100">CMS AI Quoting</div>
-          <div className="text-[11px] text-ink-400">Mold Geometry Console</div>
-        </div>
+    <aside className="hidden md:flex md:w-56 shrink-0 flex-col border-r border-ink-700 bg-ink-950">
+      <div className="px-6 py-8">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.35em] text-ink-400">CMS</div>
+        <div className="mt-1 text-lg font-light uppercase tracking-[0.15em] text-ink-100">Quoting</div>
       </div>
 
-      <nav className="flex-1 space-y-1 px-3 py-2">
+      <nav className="flex-1 space-y-0 px-0 py-2">
         {NAV.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
@@ -30,28 +25,25 @@ export default function Sidebar() {
             end={end}
             className={({ isActive }) =>
               clsx(
-                "flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors",
+                "relative flex items-center gap-3 border-l-2 px-6 py-3 text-xs font-semibold uppercase tracking-widest transition-colors",
                 isActive
-                  ? "bg-gradient-to-r from-brand-600/30 to-brand-500/10 text-ink-100 shadow-inner shadow-brand-500/10 ring-1 ring-brand-500/30"
-                  : "text-ink-300 hover:bg-ink-800/70 hover:text-ink-100"
+                  ? "border-ink-100 bg-ink-900 text-ink-100"
+                  : "border-transparent text-ink-400 hover:border-ink-500 hover:text-ink-200"
               )
             }
           >
-            <Icon className="h-4.5 w-4.5" size={18} strokeWidth={2} />
+            <Icon size={16} strokeWidth={1.5} />
             {label}
           </NavLink>
         ))}
       </nav>
 
-      <div className="mx-3 mb-4 rounded-xl border border-ink-700/60 bg-ink-850/70 p-3.5">
-        <div className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-accent-green shadow-[0_0_6px] shadow-accent-green/60" />
-          <span className="text-[11px] font-medium uppercase tracking-wider text-ink-400">Module6121 Bridge</span>
+      <div className="border-t border-ink-700 px-6 py-5">
+        <div className="flex items-center gap-2">
+          <span className="h-1.5 w-1.5 rounded-full bg-accent-green" />
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-ink-400">Local</span>
         </div>
-        <p className="mt-1.5 text-xs leading-relaxed text-ink-300">
-          The macro calls this app live on <span className="font-semibold text-ink-100">127.0.0.1</span> --
-          local machine only, never the network.
-        </p>
+        <p className="mt-2 text-[10px] leading-relaxed text-ink-500">127.0.0.1:8000</p>
       </div>
     </aside>
   );

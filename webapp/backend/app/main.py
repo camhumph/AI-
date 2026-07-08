@@ -242,6 +242,36 @@ def api_put_email_settings(body: EmailSettingsBody):
     return saved
 
 
+@app.post("/api/settings/email/test")
+def api_test_email():
+    try:
+        email_service.list_messages(limit=1)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"IMAP test failed: {e}")
+    return {"ok": True, "message": "Inbox connection successful."}
+
+
+@app.get("/api/workspace/browse")
+def api_browse_workspace(path: str = ""):
+    return jobs.browse_workspace(path)
+
+
+class ImportFolderBody(BaseModel):
+    folder_path: str
+
+
+@app.post("/api/jobs/import-folder")
+def api_import_folder(body: ImportFolderBody):
+    try:
+        return jobs.import_from_folder(body.folder_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/email/status")
 def api_email_status():
     view = credentials.public_view()

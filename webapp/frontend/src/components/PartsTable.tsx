@@ -116,7 +116,9 @@ export default function PartsTable({
                           <Badge tone={confidenceTone(row.confidence)}>{row.confidence}</Badge>
                         </td>
                         <td className="px-4 py-2 text-xs text-ink-400">
-                          {row.Thickness || "--"} x {row.Width || "--"} x {row.Length || "--"}
+                          {(prices?.[row.index]?.thickness ?? row.Thickness) || "--"} x{" "}
+                          {(prices?.[row.index]?.width ?? row.Width) || "--"} x{" "}
+                          {(prices?.[row.index]?.length ?? row.Length) || "--"}
                         </td>
                         <td className="px-4 py-2">
                           {row.quote ? <Badge tone="brand">Quoted</Badge> : <Badge>--</Badge>}
@@ -125,7 +127,9 @@ export default function PartsTable({
                           <td className="px-4 py-2 text-right font-medium text-ink-100">
                             {prices[row.index]?.price
                               ? `$${prices[row.index].price.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
-                              : "--"}
+                              : prices[row.index]?.price_source === "no_csv_price"
+                                ? <span className="text-accent-amber text-[10px]">NO CSV</span>
+                                : "--"}
                           </td>
                         )}
                       </tr>
