@@ -167,8 +167,15 @@ Private Const DOWNLOADS_FOLDER As String = "C:\Users\lenovo\Downloads"
 ' Trusted location where the PDFs and Excel/xlsm templates now live.
 Private Const TRUSTED_FOLDER As String = "C:\Users\lenovo\Documents\Trust"
 ' Gmail SMTP for the proposal email-back (same app password as the picker script).
+' SECURITY: the app password is no longer hardcoded here (the old one was
+' committed to GitHub and must be revoked at myaccount.google.com/apppasswords).
+' Put the NEW app password, alone on one line, in:
+'   C:\CMS_Local_Workspace\gmail_app_password.txt
 Private Const GMAIL_ADDRESS As String = "cms1engineering@gmail.com"
-Private Const GMAIL_APP_PASSWORD As String = "fipw wryb aktk vtmu"
+Private Const GMAIL_APP_PASSWORD_FILE As String = "C:\CMS_Local_Workspace\gmail_app_password.txt"
+' Proposal email behavior: "AUTO" sends with no prompt (old behavior),
+' "PROMPT" asks before sending, "OFF" only writes the preview file.
+Private Const PROPOSAL_EMAIL_MODE As String = "PROMPT"
 Private Const QUOTE_SHEET_NAME As String = "QuoteWorksheet"
 Private Const POTBLOCK_STEEL_TYPE As String = "#2 4140"
 ' Quote worksheet shows STOCK sizes = finished size rounded UP to the next 1/4".
@@ -346,6 +353,35 @@ Private gStdPartingLineAxis As Integer
 Private gStdPartingLinePos As Double
 Private gStdCavityCadIndex As Long
 Private gStdCoreCadIndex As Long
+
+' ============================================================
+' AI BRIDGE (CMS AI Quoting local web app / geometry classifier)
+'
+' After WritePartDimensionCsv the macro POSTs the CSV path to the LOCAL
+' AI service (127.0.0.1 only - never the network) which runs the Python
+' geometry classifier (shop-token anchors, latch-lock/SC detection,
+' bottom-up rail/ejector stack anchoring) and returns one role per CAD
+' part index. Those roles feed ClassifyStandardBasePlates.
+'
+' HARD RULE: the AI is used for STANDARD (non-BMS) bases ONLY. BMS /
+' pot-block jobs keep the proven BOM-driven flow untouched - see the
+' isStd guard in RunAiBridgeClassification.
+' ============================================================
+Private Const AI_BRIDGE_ENABLED As Boolean = True
+Private Const AI_BRIDGE_URL As String = "http://127.0.0.1:8000"
+Private Const AI_BRIDGE_TIMEOUT_MS As Long = 30000
+' Fallback folder scanned for <job>_part_names.csv when the local web app
+' is not running (matches the web app's CMS_VBA_BRIDGE_DIR).
+Private Const AI_BRIDGE_FILE_DIR As String = "C:\CMS_Local_Workspace\AI_Bridge"
+' Minimum HIGH-confidence AI plate roles before the AI stack is trusted
+' over the macro's own geometry pass.
+Private Const AI_BRIDGE_MIN_PLATES As Long = 3
+
+Private gAiRoleByPart() As String       ' AI role key per CAD part index ("a_plate", ...)
+Private gAiConfByPart() As String       ' "HIGH" / "MEDIUM" / "LOW"
+Private gAiRoleCount As Long            ' rows parsed from the bridge
+Private gAiBridgeUsed As Boolean        ' True when AI roles drove the standard stack
+Private gAiSequencedLatchLock As Boolean ' True when the AI flagged a latch-lock/SC base
 
 ' Handoff file written by CMS_Launcher.vbs and read at startup
 Private Type HandoffInfo
@@ -581,6 +617,12 @@ On Error GoTo ErrHandler
     isStd = DetectBaseTypeIsStandard()
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
     DoEvents
+
+    ' AI bridge: classify through the LOCAL AI service (standard bases only;
+    ' BMS/pot-block jobs are guarded inside and keep the BOM-driven flow).
+    LogStart "AI bridge classification"
+    RunAiBridgeClassification CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv", isStd
+    LogDone "AI bridge classification"
 
     If isStd Then
         LogStart "Classify STANDARD mold base from active CAD"
@@ -935,6 +977,12 @@ On Error GoTo ErrHandler
     Dim isStd As Boolean
     isStd = DetectBaseTypeIsStandard()
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
+
+    ' AI bridge: classify through the LOCAL AI service (standard bases only;
+    ' BMS/pot-block jobs are guarded inside and keep the BOM-driven flow).
+    LogStart "AI bridge classification"
+    RunAiBridgeClassification CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv", isStd
+    LogDone "AI bridge classification"
 
     If isStd Then
         LogStart "Set STANDARD mold base orientation"
@@ -6090,7 +6138,9 @@ Private Sub BuildStdFromGeometry()
                 " | T=" & parts(railIdx(1)).Thickness & " W=" & parts(railIdx(1)).Width & " L=" & parts(railIdx(1)).Length
     End If
 
-    ' Ejector plates: thinner plate = ejector plate, thicker/backing plate = ejector retainer.
+    ' Ejector stack naming (CMS rule from J8420): the THINNER plate is always
+    ' the "Ejector Plate"; the THICKER/LOWER plate is the "Bottom Ejector
+    ' Plate". Never name the thinner plate "Ejector Retainer Plate".
     If nEj > 0 Then
         StdSortByAxisDesc ejIdx, nEj, ax
         If Not topIsFirst Then StdReverse ejIdx, nEj
@@ -6111,7 +6161,7 @@ Private Sub BuildStdFromGeometry()
             If ejIdx(j) = retainerIdx Then
                 ejRole = "Ejector Plate"
             Else
-                ejRole = "Ejector Retainer Plate"
+                ejRole = "Bottom Ejector Plate"
             End If
             SetStdCadRole ejIdx(j), ejRole
             AddStdPlateFromCad ejIdx(j), ejRole
@@ -6360,7 +6410,9 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     If InStr(s, " SC RETAINER ") > 0 Or InStr(s, " SC RETAINER PLATE ") > 0 Then StandardPlateNameStd = "SC Retainer Plate": Exit Function
     If InStr(s, " SC BACKUP ") > 0 Or InStr(s, " SC BACKUP PLATE ") > 0 Or InStr(s, " SC BACK UP ") > 0 Then StandardPlateNameStd = "SC Backup Plate": Exit Function
     If InStr(s, " EJECTOR RETAINER ") > 0 Or InStr(s, " EJ RET ") > 0 Or InStr(s, " KO RET ") > 0 Then StandardPlateNameStd = "Ejector Plate": Exit Function
-    If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJ BACKUP ") > 0 Then StandardPlateNameStd = "Ejector Retainer Plate": Exit Function
+    ' CMS naming: the thicker/lower backing plate is the "Bottom Ejector Plate"
+    ' (never "Ejector Retainer Plate"). Same PIN quote row as before.
+    If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJ BACKUP ") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
     If InStr(s, " RETAINER ") > 0 Or InStr(s, " RETAINER PLATE ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " HOLDER MOUNT ") > 0 Or InStr(s, " MOUNT ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " RUNNER STRIPPER ") > 0 Then StandardPlateNameStd = "Runner Stripper Plate": Exit Function
@@ -6398,8 +6450,12 @@ Private Function StdSlotForName(ByVal nm As String) As String
     If InStr(s, " SC BACKUP ") > 0 Or InStr(s, " SC BACK UP ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
     If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJ BACKUP ") > 0 Then StdSlotForName = "PIN": Exit Function
     If InStr(s, " EJ RET ") > 0 Then StdSlotForName = "EJECTOR": Exit Function
+    ' CMS rule: "Bottom Ejector Plate" is the thicker/lower plate (same physical
+    ' plate the EJ-BACKUP token names) -> same PIN row it always used. The
+    ' thinner "Ejector Plate" keeps the EJECTOR row below.
+    If InStr(s, " BOTTOM EJECTOR ") > 0 Then StdSlotForName = "PIN": Exit Function
     If InStr(s, " EJECTOR RETAINER ") > 0 Or InStr(s, " PIN PLATE ") > 0 Or InStr(s, " PIN ") > 0 Or InStr(s, " RETAINER ") > 0 Then StdSlotForName = "PIN": Exit Function
-    If InStr(s, " BOTTOM EJECTOR ") > 0 Or InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJECTOR ") > 0 Then StdSlotForName = "EJECTOR": Exit Function
+    If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJECTOR ") > 0 Then StdSlotForName = "EJECTOR": Exit Function
     If InStr(s, " SUPPORT ") > 0 Or InStr(s, " PILLAR ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
     If InStr(s, " RAIL ") > 0 Or InStr(s, " RAILS ") > 0 Or InStr(s, " RISER ") > 0 Or InStr(s, " RISERS ") > 0 Then StdSlotForName = "RAILS": Exit Function
     If InStr(s, " DIE BACKUP ") > 0 Or InStr(s, " DIE BACK UP ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
@@ -6662,9 +6718,259 @@ Private Function BuildStdFromCadNames() As Boolean
     BuildStdFromCadNames = (added >= 3)
 End Function
 
-' Standard-base plate source priority: geometry/layout first, then BOM/names if
-' geometry is unavailable. Names help label plates, but they do not define the stack.
+' ============================================================
+' AI BRIDGE implementation
+' ============================================================
+
+' Job token used for bridge file names and web-app job registration.
+Private Function AiBridgeJobToken() As String
+    Dim t As String
+    t = Trim(CurrentJobNumber)
+    If t = "" Then t = Trim(AssignedQuoteNumber)
+    If t = "" And CurrentJobFolder <> "" Then
+        Dim fso As Object
+        Set fso = CreateObject("Scripting.FileSystemObject")
+        t = fso.GetFileName(CurrentJobFolder)
+    End If
+    If t = "" Then t = "ACTIVE"
+    AiBridgeJobToken = t
+End Function
+
+Private Sub AiBridgeReset()
+    gAiRoleCount = 0
+    gAiBridgeUsed = False
+    gAiSequencedLatchLock = False
+    If PartCount >= 1 Then
+        ReDim gAiRoleByPart(1 To PartCount)
+        ReDim gAiConfByPart(1 To PartCount)
+    End If
+End Sub
+
+Private Function AiJsonEscape(ByVal s As String) As String
+    s = Replace(s, "\", "\\")
+    s = Replace(s, Chr(34), "\" & Chr(34))
+    AiJsonEscape = s
+End Function
+
+' POST the CAD CSV path to the LOCAL AI service. Returns the bridge CSV text
+' (Index,Component,Role,ResolvedName,Confidence,Quote,Price,SecondaryPartingLine)
+' or "" when the service is unreachable.
+Private Function AiBridgeHttpClassify(ByVal csvPath As String) As String
+    AiBridgeHttpClassify = ""
+    On Error GoTo done
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts 3000, 3000, AI_BRIDGE_TIMEOUT_MS, AI_BRIDGE_TIMEOUT_MS
+    http.Open "POST", AI_BRIDGE_URL & "/api/vba/classify", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
+              """,""csv_path"":""" & AiJsonEscape(csvPath) & _
+              """,""base_type"":""standard""}"
+    If http.Status = 200 Then AiBridgeHttpClassify = http.responseText
+done:
+End Function
+
+' Fallback: read a bridge CSV the web app exported earlier for this job.
+Private Function AiBridgeReadFallbackFile() As String
+    AiBridgeReadFallbackFile = ""
+    On Error GoTo done
+    Dim fso As Object, p As String, ts As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p = AI_BRIDGE_FILE_DIR & "\" & AiBridgeJobToken() & "_part_names.csv"
+    If Not fso.FileExists(p) Then Exit Function
+    Set ts = fso.OpenTextFile(p, 1)
+    AiBridgeReadFallbackFile = ts.ReadAll
+    ts.Close
+    LogLine "AI bridge: using fallback file " & p
+done:
+End Function
+
+' Parse the bridge CSV into gAiRoleByPart/gAiConfByPart (by CAD part Index).
+Private Sub AiBridgeParseCsv(ByVal csvText As String)
+    Dim lines() As String, i As Long, f() As String
+    Dim idx As Long, roleCol As Long, confCol As Long
+    csvText = Replace(csvText, vbCrLf, vbLf)
+    csvText = Replace(csvText, vbCr, vbLf)
+    lines = Split(csvText, vbLf)
+    If UBound(lines) < 1 Then Exit Sub
+
+    ' Locate the Role / Confidence columns from the header so the format can
+    ' grow new columns without breaking this parser.
+    Dim hdr() As String, c As Long
+    hdr = Split(lines(0), ",")
+    roleCol = -1: confCol = -1
+    For c = 0 To UBound(hdr)
+        Select Case UCase(Trim(hdr(c)))
+            Case "ROLE": roleCol = c
+            Case "CONFIDENCE": confCol = c
+        End Select
+    Next c
+    If roleCol < 0 Then Exit Sub
+
+    For i = 1 To UBound(lines)
+        If Trim(lines(i)) <> "" Then
+            f = Split(lines(i), ",")
+            If UBound(f) >= roleCol Then
+                idx = Val(f(0))
+                If idx >= 1 And idx <= PartCount Then
+                    gAiRoleByPart(idx) = LCase(Trim(f(roleCol)))
+                    If confCol >= 0 And UBound(f) >= confCol Then
+                        gAiConfByPart(idx) = UCase(Trim(f(confCol)))
+                    Else
+                        gAiConfByPart(idx) = "MEDIUM"
+                    End If
+                    gAiRoleCount = gAiRoleCount + 1
+                    If gAiRoleByPart(idx) = "latch_lock" Then gAiSequencedLatchLock = True
+                End If
+            End If
+        End If
+    Next i
+End Sub
+
+' Map an AI role key to the macro's standard plate name. "" = not a quoted plate.
+Private Function AiPlateNameForRole(ByVal roleKey As String) As String
+    Select Case LCase(Trim(roleKey))
+        Case "top_clamp_plate": AiPlateNameForRole = "Top Clamp Plate"
+        Case "a_plate": AiPlateNameForRole = "A Plate"
+        Case "b_plate": AiPlateNameForRole = "B Plate"
+        Case "stripper_plate": AiPlateNameForRole = "Stripper Plate"
+        Case "sc_retainer_plate": AiPlateNameForRole = "SC Retainer Plate"
+        Case "sc_backup_plate": AiPlateNameForRole = "SC Backup Plate"
+        Case "support_plate": AiPlateNameForRole = "Support Plate"
+        Case "bottom_clamp_plate": AiPlateNameForRole = "Bottom Clamp Plate"
+        Case "rail", "rail_1", "rail_2": AiPlateNameForRole = "Rails"
+        Case "pin_plate": AiPlateNameForRole = "Pin Plate"
+        Case "ejector_plate": AiPlateNameForRole = "Ejector Plate"
+        ' CMS naming: the thicker/lower ejector-stack plate is the Bottom
+        ' Ejector Plate (never "Ejector Retainer Plate").
+        Case "bottom_ejector_plate", "ejector_retainer_plate", "ejector_backup_plate"
+            AiPlateNameForRole = "Bottom Ejector Plate"
+        Case Else: AiPlateNameForRole = ""
+    End Select
+End Function
+
+' Round-hardware role names for SetStdCadRole (naming analysis / logs only).
+Private Function AiHardwareNameForRole(ByVal roleKey As String) As String
+    Select Case LCase(Trim(roleKey))
+        Case "leader_pin": AiHardwareNameForRole = "Leader Pin"
+        Case "leader_pin_bushing": AiHardwareNameForRole = "Leader Pin Bushing"
+        Case "guided_ejector_bushing": AiHardwareNameForRole = "Guided Ejector Bushing"
+        Case "return_pin": AiHardwareNameForRole = "Return Pin"
+        Case "ejector_pin": AiHardwareNameForRole = "Ejector Pin"
+        Case "support_pillar": AiHardwareNameForRole = "Support Pillar"
+        Case "latch_lock": AiHardwareNameForRole = "Latch Lock / Safety Strap"
+        Case Else: AiHardwareNameForRole = ""
+    End Select
+End Function
+
+' Main entry: classify this job through the local AI service.
+' HARD GUARD: BMS / pot-block jobs never touch the AI - their BOM-driven
+' flow already works and must not be disturbed.
+Public Sub RunAiBridgeClassification(ByVal csvPath As String, ByVal isStandardBase As Boolean)
+    On Error GoTo eh
+    AiBridgeReset
+    If Not AI_BRIDGE_ENABLED Then Exit Sub
+    If Not isStandardBase Then
+        LogLine "AI bridge: SKIPPED - BMS/pot-block base keeps the BOM-driven flow (AI is for standard bases only)."
+        ' Still register the job with the local app (marked BMS) so it shows in
+        ' the dashboard, but no classification is applied.
+        AiBridgeNotifyBms csvPath
+        Exit Sub
+    End If
+
+    Dim csvText As String
+    csvText = AiBridgeHttpClassify(csvPath)
+    If csvText = "" Then csvText = AiBridgeReadFallbackFile()
+    If csvText = "" Then
+        LogLine "AI bridge: local AI service not reachable at " & AI_BRIDGE_URL & " and no fallback file - macro geometry rules will run alone."
+        Exit Sub
+    End If
+
+    AiBridgeParseCsv csvText
+    LogLine "AI bridge: " & gAiRoleCount & " part roles received." & _
+            IIf(gAiSequencedLatchLock, " Plate-sequenced LATCH-LOCK base detected: latch locks mark secondary parting lines and must not flip A/B.", "")
+    Exit Sub
+eh:
+    LogLine "AI bridge error (ignored, geometry rules continue): " & Err.Description
+End Sub
+
+' Register a BMS/pot-block job with the local app dashboard (no classification).
+Private Sub AiBridgeNotifyBms(ByVal csvPath As String)
+    On Error Resume Next
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts 2000, 2000, 5000, 5000
+    http.Open "POST", AI_BRIDGE_URL & "/api/vba/classify", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
+              """,""csv_path"":""" & AiJsonEscape(csvPath) & _
+              """,""base_type"":""bms""}"
+End Sub
+
+' Build the standard plate list from AI roles. Returns True when the AI gave
+' enough plate roles to define the stack; otherwise the caller falls back to
+' the macro's own geometry pass.
+Private Function BuildStdFromAiBridge() As Boolean
+    BuildStdFromAiBridge = False
+    If gAiRoleCount < 1 Then Exit Function
+
+    Dim i As Long, nm As String, hw As String, plateCount As Long
+    Dim railT As Double, railW As Double, railL As Double, nRail As Long
+
+    ' First pass: count distinct AI plate roles so we only take over when the
+    ' AI actually resolved a stack (>= AI_BRIDGE_MIN_PLATES full plates).
+    For i = 1 To PartCount
+        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        If nm <> "" And nm <> "Rails" Then plateCount = plateCount + 1
+    Next i
+    If plateCount < AI_BRIDGE_MIN_PLATES Then
+        LogLine "AI bridge: only " & plateCount & " plate roles (< " & AI_BRIDGE_MIN_PLATES & ") - macro geometry rules stay in charge."
+        Exit Function
+    End If
+
+    nRail = 0
+    For i = 1 To PartCount
+        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        If nm = "Rails" Then
+            SetStdCadRole i, "Rails"
+            If nRail = 0 Then
+                railT = parts(i).Thickness: railW = parts(i).Width: railL = parts(i).Length
+            End If
+            nRail = nRail + 1
+        ElseIf nm <> "" Then
+            SetStdCadRole i, nm
+            Select Case NormalizeKey(nm)
+                Case "APLATE": gStdCavityCadIndex = i
+                Case "BPLATE": gStdCoreCadIndex = i
+            End Select
+            AddStdPlateFromCad i, nm
+            LogLine "AI bridge plate: idx " & i & " -> " & nm & " [" & gAiConfByPart(i) & "]" & _
+                    " | T=" & parts(i).Thickness & " W=" & parts(i).Width & " L=" & parts(i).Length & _
+                    " | name=" & parts(i).cleanName
+        Else
+            hw = AiHardwareNameForRole(gAiRoleByPart(i))
+            If hw <> "" Then SetStdCadRole i, hw
+        End If
+    Next i
+    If nRail > 0 Then
+        AddStdPlate "Rails", railT, railW, railL, nRail
+        LogLine "AI bridge rails: qty " & nRail
+    End If
+
+    gAiBridgeUsed = True
+    BuildStdFromAiBridge = True
+End Function
+
+' Standard-base plate source priority: AI bridge roles first (shop-token +
+' latch-lock aware), then geometry/layout, then BOM/names if geometry is
+' unavailable. Names help label plates, but they do not define the stack.
 Private Sub ClassifyStandardBasePlates()
+    StdResetArrays
+    If BuildStdFromAiBridge() Then
+        LogLine "Standard base plates: AI bridge classification in charge."
+        GoTo finishStd
+    End If
+
     StdResetArrays
     BuildStdFromGeometry
     If StdCount >= 3 Then GoTo finishStd
@@ -6992,7 +7298,14 @@ On Error GoTo ErrHandler
 
     For i = 1 To PartCount
         If TryClassifyStandardCadPurchased(i, d, v, pn) Then
-            k = NormalizeKey(d & "|" & pn)
+            ' Group by description + part number + SIZE so different-size parts
+            ' with the same generic name (e.g. 1" ejector leader pins vs 1-1/2"
+            ' main leader pins, both with no part number) stay separate quote
+            ' lines instead of collapsing into one mispriced line.
+            k = NormalizeKey(d & "|" & pn & "|" & _
+                             Format(parts(i).Thickness, "0.000") & "x" & _
+                             Format(parts(i).Width, "0.000") & "x" & _
+                             Format(parts(i).Length, "0.000"))
             hit = 0
             For j = 1 To n
                 If key(j) = k Then hit = j: Exit For
@@ -8147,36 +8460,49 @@ Private Function PurchasedKeyword(ByVal comp As String) As String
 End Function
 
 ' Find the best price-list row for a BOM description (part number first, then keyword).
-Private Function MatchPurchasedRow(ByVal desc As String, Optional ByVal partNo As String = "") As Long
+' matchKind reports how the row was found: PARTNO / DESCNO / PHRASE / KEYWORD / "".
+' KEYWORD matches are weak evidence and must NOT silently price grouped
+' assemblies (the J8420 "$25.46 for a latch-lock assembly" bug).
+Private Function MatchPurchasedRow(ByVal desc As String, Optional ByVal partNo As String = "", _
+                                   Optional ByRef matchKind As String) As Long
     Dim du As String, k As Long, tok As String, pu As String
+    matchKind = ""
     du = " " & UCase(desc) & " "
     pu = UCase(Trim(partNo))
     ' 1) exact-ish match on the BOM's part number against the price list part numbers
     If pu <> "" Then
         For k = 1 To PlCount
             If PlPartNo(k) <> "" Then
-                If InStr(pu, UCase(PlPartNo(k))) > 0 Or InStr(UCase(PlPartNo(k)), pu) > 0 Then MatchPurchasedRow = k: Exit Function
+                If InStr(pu, UCase(PlPartNo(k))) > 0 Or InStr(UCase(PlPartNo(k)), pu) > 0 Then matchKind = "PARTNO": MatchPurchasedRow = k: Exit Function
             End If
         Next k
     End If
     ' 2) price-list part number appearing inside the description text
     For k = 1 To PlCount
         If PlPartNo(k) <> "" Then
-            If InStr(du, UCase(PlPartNo(k))) > 0 Then MatchPurchasedRow = k: Exit Function
+            If InStr(du, UCase(PlPartNo(k))) > 0 Then matchKind = "DESCNO": MatchPurchasedRow = k: Exit Function
         End If
     Next k
     ' 3) component phrase (Top Plate / Bottom Plate / exact named hardware).
     For k = 1 To PlCount
         If Trim(PlComp(k)) <> "" Then
-            If InStr(du, " " & UCase(Trim(PlComp(k))) & " ") > 0 Then MatchPurchasedRow = k: Exit Function
+            If InStr(du, " " & UCase(Trim(PlComp(k))) & " ") > 0 Then matchKind = "PHRASE": MatchPurchasedRow = k: Exit Function
         End If
     Next k
-    ' 4) component keyword (LEADER / BUSHING / RETAIN / STRAP / INSULAT / BEARING)
+    ' 4) component keyword (LEADER / BUSHING / RETAIN / STRAP / INSULAT / BEARING).
+    '    Guards: grouped assemblies (ASM/ASSEMBLY names) never keyword-match,
+    '    and the PIN keyword requires LEADER/GUIDE in the description so
+    '    return pins / dowel pins / PLC latch pins can't take the leader-pin price.
+    If InStr(du, " ASM ") > 0 Or InStr(du, "_ASM") > 0 Or InStr(du, "-ASM") > 0 Or InStr(du, "ASSEMBLY") > 0 Then Exit Function
     For k = 1 To PlCount
         tok = PurchasedKeyword(PlComp(k))
         If tok <> "" Then
-            If InStr(du, tok) > 0 Then MatchPurchasedRow = k: Exit Function
-            If tok = "INSULAT" And InStr(du, "PYROPEL") > 0 Then MatchPurchasedRow = k: Exit Function
+            If tok = "PIN" Then
+                If InStr(du, "PIN") > 0 And (InStr(du, "LEADER") > 0 Or InStr(du, "GUIDE") > 0) Then matchKind = "KEYWORD": MatchPurchasedRow = k: Exit Function
+            ElseIf InStr(du, tok) > 0 Then
+                matchKind = "KEYWORD": MatchPurchasedRow = k: Exit Function
+            End If
+            If tok = "INSULAT" And InStr(du, "PYROPEL") > 0 Then matchKind = "KEYWORD": MatchPurchasedRow = k: Exit Function
         End If
     Next k
 End Function
@@ -8213,7 +8539,8 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     End If
 
     Dim k As Long
-    k = MatchPurchasedRow(desc, partNo)
+    Dim matchKind As String
+    k = MatchPurchasedRow(desc, partNo, matchKind)
 
     ' Gate: if the BOM has an explicit TYPE = Purchase, capture it no matter what
     ' (so every purchased line shows up, even if it is not in the price list).
@@ -8242,17 +8569,27 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     PpDet(PpCount) = Trim(detNo)
 
     ' Price: web lookup (off by default) -> direct part# match in the list ->
-    ' the keyword-matched row -> 0. Logged so a $0 is easy to diagnose.
+    ' the matched row -> 0. Logged so a $0 is easy to diagnose.
+    ' KEYWORD matches with no part number are too weak to price: they are what
+    ' put $25.46 (Leader Pin) on grouped assemblies in J8420. Those now stay
+    ' $0 with a NEEDS PRICE warning instead of silently taking a wrong price.
     Dim p As Double
     p = GetOnlineUnitPrice(PpVendor(PpCount), PpPartNo(PpCount))
     If p <= 0 Then p = LookupListPriceByPartNo(PpPartNo(PpCount))
-    If p <= 0 And k > 0 Then p = PlPrice(k)
+    If p <= 0 And k > 0 Then
+        If matchKind = "KEYWORD" And Trim(partNo) = "" Then
+            LogLine "PRICE WARNING (" & desc & "): weak keyword match to '" & PlComp(k) & _
+                    "' with no part number - NEEDS PRICE, left at $0 instead of $" & FormatNumberForCsv(PlPrice(k)) & "."
+        Else
+            p = PlPrice(k)
+        End If
+    End If
     If p <= 0 And InStr(UCase(PpVendor(PpCount)), "DME") > 0 Then
         p = LookupDmePriceWithPython(PpPartNo(PpCount))
         If p > 0 Then SavePriceToList PpVendor(PpCount), PpPartNo(PpCount), p
     End If
     PpPrice(PpCount) = p
-    LogLine "PRICE " & PpPartNo(PpCount) & " (" & desc & "): listRow#=" & k & _
+    LogLine "PRICE " & PpPartNo(PpCount) & " (" & desc & "): listRow#=" & k & " match=" & matchKind & _
             " -> $" & FormatNumberForCsv(p) & "   [price list has " & PlCount & " row(s)]"
 End Sub
 
@@ -8752,6 +9089,24 @@ On Error GoTo eh
         Exit Sub
     End If
 
+    ' Email gate: PROPOSAL_EMAIL_MODE = OFF | PROMPT | AUTO. This stops the
+    ' unwanted automatic CDO proposal emails (J8420) unless explicitly allowed.
+    If UCase(PROPOSAL_EMAIL_MODE) = "OFF" Then
+        gEmailStatus = "NOT sent - PROPOSAL_EMAIL_MODE=OFF (preview written to cms_proposal.txt)"
+        LogLine "Proposal email skipped: PROPOSAL_EMAIL_MODE=OFF."
+        WriteProposalPreviewFile total, False
+        Exit Sub
+    ElseIf UCase(PROPOSAL_EMAIL_MODE) = "PROMPT" Then
+        If MsgBox("Send the PROPOSAL-BOM PRICING email now?" & vbCrLf & vbCrLf & _
+                  "Purchased lines: " & PpCount & "   Total: $" & FormatNumberForCsv(total), _
+                  vbYesNo + vbQuestion, "CMS Proposal Email") <> vbYes Then
+            gEmailStatus = "NOT sent - user declined at prompt (preview written to cms_proposal.txt)"
+            LogLine "Proposal email skipped: user declined at PROMPT."
+            WriteProposalPreviewFile total, False
+            Exit Sub
+        End If
+    End If
+
     ' Build the BOM line: "Leader Pin (107), Guide Bushing (108), ..."
     Dim items As String, i As Long
     items = ""
@@ -8812,9 +9167,58 @@ eh:
     LogLine "SendProposalEmail error: " & Err.Description
 End Sub
 
+' Write the proposal handoff/preview file without sending (used when the
+' email gate is OFF or the user declines the prompt).
+Private Sub WriteProposalPreviewFile(ByVal total As Double, ByVal wasSent As Boolean)
+    On Error Resume Next
+    Dim items As String, i As Long
+    For i = 1 To PpCount
+        If items <> "" Then items = items & ", "
+        items = items & PpComp(i)
+        If PpDet(i) <> "" Then items = items & " (" & PpDet(i) & ")"
+    Next i
+    Dim fso As Object, p As String, ts As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
+    p = LOCAL_WORKSPACE_ROOT & "\cms_proposal.txt"
+    Set ts = fso.CreateTextFile(p, True)
+    ts.WriteLine "To=" & GMAIL_ADDRESS
+    ts.WriteLine "CustomerPrefix=" & CustomerPrefix
+    ts.WriteLine "CustomerName=" & CustomerDisplayName
+    ts.WriteLine "CustJob=" & CustomerJobNumber
+    ts.WriteLine "CNum=" & AssignedQuoteNumber
+    ts.WriteLine "Items=" & items
+    ts.WriteLine "Total=" & FormatNumberForCsv(total)
+    ts.WriteLine "Sent=" & IIf(wasSent, "1", "0")
+    ts.WriteLine "GatedBy=PROPOSAL_EMAIL_MODE:" & PROPOSAL_EMAIL_MODE
+    ts.Close
+End Sub
+
+' Read the Gmail app password from its local file (never hardcoded/committed).
+Private Function GmailAppPassword() As String
+    GmailAppPassword = ""
+    On Error Resume Next
+    Dim fso As Object, ts As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FileExists(GMAIL_APP_PASSWORD_FILE) Then Exit Function
+    Set ts = fso.OpenTextFile(GMAIL_APP_PASSWORD_FILE, 1)
+    GmailAppPassword = Trim(ts.ReadAll)
+    ts.Close
+    GmailAppPassword = Replace(GmailAppPassword, vbCr, "")
+    GmailAppPassword = Replace(GmailAppPassword, vbLf, "")
+End Function
+
 ' Send an HTML email through Gmail SMTP using CDO. Tries SSL 465, then STARTTLS 587.
 Private Function SendViaCdo(ByVal toAddr As String, ByVal subj As String, ByVal htmlBody As String) As Boolean
     SendViaCdo = False
+    Dim appPw As String
+    appPw = GmailAppPassword()
+    If appPw = "" Then
+        LogLine "CDO send skipped: no app password file at " & GMAIL_APP_PASSWORD_FILE & _
+                " (revoke the old leaked password and save the new one there)."
+        Exit Function
+    End If
+
     Dim sch As String
     sch = "http://schemas.microsoft.com/cdo/configuration/"
 
@@ -8833,7 +9237,7 @@ Private Function SendViaCdo(ByVal toAddr As String, ByVal subj As String, ByVal 
             .Item(sch & "smtpusessl") = ssls(pi)
             .Item(sch & "smtpauthenticate") = 1
             .Item(sch & "sendusername") = GMAIL_ADDRESS
-            .Item(sch & "sendpassword") = GMAIL_APP_PASSWORD
+            .Item(sch & "sendpassword") = appPw
             .Item(sch & "smtpconnectiontimeout") = 30
             .Update
         End With
