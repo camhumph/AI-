@@ -1,0 +1,20 @@
+# CMS PURCHASED-COMPONENTS PRICE LIST  (DME / McMaster-Carr / JACO / PCS / Pyropel)
+# HOW TO USE: set UnitPrice + PartNumber for each line. The quoting macro reads each
+#   job's BOM "Purchase" rows, matches here by Vendor+PartNumber first, then by the
+#   Component keyword, multiplies UnitPrice x Qty(No. Req'd), and adds it to the quote.
+#   Leave UnitPrice 0 to skip. For DME parts look up the # on dme.net and enter the price.
+Component,Vendor,PartNumber,Description,Unit,UnitPrice,Notes
+Leader Pin,DME,5211GL,Leader Pin Straight 1 x 8-1/4,EA,25.46,dme.net list price
+Leader Pin,DME,5210GL,Leader pin,EA,0.00,enter exact 5210GL price
+Bushing,DME,5503,Shoulder Bushing ID 1 x 1-3/8,EA,0.00,dme.net login required - enter price
+Top Plate,DME,1620-13-2,Top plate,EA,0.00,enter exact DME 1620-13-2 price
+Bottom Plate,DME,1620-13-2,Bottom plate,EA,0.00,enter exact DME 1620-13-2 price
+Safety Strap,PCS,LSS-300,Safety strap,EA,20.00,
+Insulation,JACO,HT200,HT200 spacer insulation,EA,0.00,enter price
+Ejector Bushing,McMaster-Carr,6381K539,Ejector bushing,EA,6.75,$13.50 for 2 = 6.75 each
+Retaining Ring,McMaster-Carr,99142A520,Retaining / snap ring,EA,5.00,$10 for 2 snap rings = 5.00 each
+External Insulation,Pyropel,,Pyropel external insulation,Sq In,0.00,enter price per sq in
+Guide Bushing,DME,B6,Base / leader bushing family,EA,0.00,enter exact B6-* price
+Leader Pin,DME,P6,Base / guide pin family,EA,0.00,enter exact P6-* price
+Retaining Ring,DME,MUD,MUD retaining ring / circlip family,EA,0.00,enter exact MUD* price
+Support Pillar,DME,6143,Support pillar,EA,0.00,enter exact 6143 price
