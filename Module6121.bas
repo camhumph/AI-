@@ -1043,6 +1043,8 @@ On Error GoTo ErrHandler
     MoveLooseSolidWorksPartsToBaseFolder
     SyncCompletedJobToNetworkFolder
 
+    AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
+
     gLastJobDiag = "BOM file:  " & IIf(gDiagBomPath = "", "(NONE FOUND)", gDiagBomPath) & vbCrLf & _
                    "BOM rows read:  " & BomCount & vbCrLf & _
                    "Purchased parts matched:  " & PpCount & vbCrLf & _
@@ -6903,6 +6905,23 @@ Private Sub AiBridgeNotifyBms(ByVal csvPath As String)
     http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
               """,""csv_path"":""" & AiJsonEscape(csvPath) & _
               """,""base_type"":""bms""}"
+End Sub
+
+' Tell the local webapp the job finished so it can import quote/steel/CSV outputs.
+Private Sub AiBridgeNotifyJobComplete(ByVal baseType As String)
+    On Error Resume Next
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts 2000, 2000, 15000, 15000
+    http.Open "POST", AI_BRIDGE_URL & "/api/vba/job-complete", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
+              """,""folder_path"":""" & AiJsonEscape(CurrentJobFolder) & _
+              """,""base_type"":""" & AiJsonEscape(baseType) & _
+              """,""status"":""completed""}"
+    If http.Status = 200 Then
+        LogLine "AI bridge: job-complete synced to webapp."
+    End If
 End Sub
 
 ' Build the standard plate list from AI roles. Returns True when the AI gave

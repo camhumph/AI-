@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, credentials, email_service, jobs, pricing, vba_bridge
+from . import config, credentials, email_service, jobs, pricing, quote_pipeline, vba_bridge
 
 app = FastAPI(title="CMS AI Quoting")
 
@@ -260,16 +260,42 @@ def api_browse_workspace(path: str = ""):
 
 class ImportFolderBody(BaseModel):
     folder_path: str
+    run_quote: bool = True
 
 
 @app.post("/api/jobs/import-folder")
 def api_import_folder(body: ImportFolderBody):
     try:
-        return jobs.import_from_folder(body.folder_path)
+        return jobs.import_from_folder(body.folder_path, run_quote=body.run_quote)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class JobCompleteBody(BaseModel):
+    job_id: str
+    folder_path: str
+    base_type: str = "standard"
+    status: str = "completed"
+
+
+@app.post("/api/vba/job-complete")
+def api_vba_job_complete(body: JobCompleteBody):
+    """Called by Module6121 when ProcessOneJob finishes — syncs outputs to webapp."""
+    try:
+        job = quote_pipeline.sync_completed_job(body.job_id, body.folder_path, body.base_type)
+        return {"synced": True, "job_id": job.get("job_id")}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/quote/status/{quote_id}")
+def api_quote_status(quote_id: str):
+    status = quote_pipeline.poll_completion(quote_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Quote run not found")
+    return status
 
 
 @app.get("/api/email/status")

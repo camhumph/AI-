@@ -3,27 +3,26 @@
 @theme {
   --font-sans: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
 
-  /* SpaceX-inspired monochrome palette */
-  --color-ink-950: #000000;
-  --color-ink-900: #0a0a0a;
-  --color-ink-850: #111111;
-  --color-ink-800: #1a1a1a;
-  --color-ink-700: #2a2a2a;
-  --color-ink-600: #3a3a3a;
-  --color-ink-500: #666666;
-  --color-ink-400: #888888;
-  --color-ink-300: #aaaaaa;
-  --color-ink-200: #cccccc;
-  --color-ink-100: #ffffff;
+  --color-ink-950: #f4f4f5;
+  --color-ink-900: #ececed;
+  --color-ink-850: #e4e4e6;
+  --color-ink-800: #d4d4d8;
+  --color-ink-700: #b8b8be;
+  --color-ink-600: #8e8e96;
+  --color-ink-500: #6b6b73;
+  --color-ink-400: #4a4a52;
+  --color-ink-300: #2e2e34;
+  --color-ink-200: #1a1a1f;
+  --color-ink-100: #0a0a0c;
 
-  --color-brand-500: #ffffff;
-  --color-brand-400: #e8e8e8;
-  --color-brand-600: #cccccc;
+  --color-brand-500: #0a0a0c;
+  --color-brand-400: #1a1a1f;
+  --color-brand-600: #000000;
 
-  --color-accent-teal: #ffffff;
-  --color-accent-amber: #ffcc00;
-  --color-accent-rose: #ff4444;
-  --color-accent-green: #00ff88;
+  --color-accent-teal: #0066ff;
+  --color-accent-amber: #c47f00;
+  --color-accent-rose: #c41e3a;
+  --color-accent-green: #0a7c42;
 }
 
 html, body, #root {
@@ -31,16 +30,15 @@ html, body, #root {
 }
 
 body {
-  background: #000000;
-  color: #ffffff;
+  background: linear-gradient(180deg, #f8f8f9 0%, #ececed 40%, #e2e2e5 100%);
+  color: #0a0a0c;
   font-family: var(--font-sans);
-  font-feature-settings: "cv02", "cv03", "cv04";
   -webkit-font-smoothing: antialiased;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.015em;
 }
 
 h1, h2, h3 {
-  letter-spacing: 0.04em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   font-weight: 600;
 }
@@ -49,33 +47,23 @@ h1, h2, h3 {
   font-variant-numeric: tabular-nums;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-::-webkit-scrollbar-track {
-  background: #0a0a0a;
-}
-::-webkit-scrollbar-thumb {
-  background: #333333;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #555555;
-}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #e4e4e6; }
+::-webkit-scrollbar-thumb { background: #b8b8be; }
 
 .glass-panel {
-  background: #0a0a0a;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(10, 10, 12, 0.1);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 8px 32px rgba(10, 10, 12, 0.06);
+  backdrop-filter: blur(12px);
 }
 
-.scrollbar-thin {
-  scrollbar-width: thin;
-}
+.scrollbar-thin { scrollbar-width: thin; }
 
 .section-label {
-  font-size: 0.65rem;
-  font-weight: 600;
-  letter-spacing: 0.2em;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
-  color: #888888;
+  color: #6b6b73;
 }

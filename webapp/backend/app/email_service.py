@@ -378,15 +378,38 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
                 shutil.copy2(src, dest)
 
     launched = False
+    quote_id = info["cust_job"] or job_token
     if launch_macro:
-        launched = _launch_quote_flow()
+        from . import quote_pipeline
+
+        quote_pipeline.set_status(
+            quote_id,
+            phase="queued",
+            message="Preparing quote — downloading attachments done.",
+            cust_job=info["cust_job"],
+        )
+        result = quote_pipeline.launch_full_quote(
+            quote_id,
+            str(attach_dir),
+            {
+                "subject": info["subject"],
+                "cust_job": info["cust_job"],
+                "similar_to": info["similar_to"],
+                "ship_date": info["ship_date"],
+                "attachments": attach_count,
+            },
+        )
+        launched = result.get("launched", False)
+        job_token = result.get("job_id") or job_token
 
     return {
         "job_id": job_token,
+        "quote_id": quote_id,
         "subject": info["subject"],
         "cust_job": info["cust_job"],
         "attachments_saved": attach_count,
         "attach_dir": str(attach_dir),
         "launcher_started": launched,
         "email_handoff": str(EMAIL_OUTPUT_FILE),
+        "poll_url": f"/api/quote/status/{quote_id}",
     }

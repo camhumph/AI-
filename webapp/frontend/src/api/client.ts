@@ -133,14 +133,24 @@ export interface EmailSettings {
   credentials_path: string;
 }
 
+export interface QuoteRunStatus {
+  phase: string;
+  message?: string;
+  job_id?: string;
+  c_number?: string;
+  quote_id?: string;
+}
+
 export interface QuoteEmailResult {
   job_id: string;
+  quote_id?: string;
   subject: string;
   cust_job: string;
   attachments_saved: number;
   attach_dir: string;
   launcher_started: boolean;
   email_handoff: string;
+  poll_url?: string;
 }
 
 export interface EmailDetail extends EmailSummary {
@@ -176,8 +186,12 @@ export const api = {
 
   listJobs: () => req<JobSummary[]>("/jobs"),
   browseWorkspace: (path = "") => req<WorkspaceBrowse>(`/workspace/browse?path=${encodeURIComponent(path)}`),
-  importFromFolder: (folder_path: string) =>
-    req<JobDetail>("/jobs/import-folder", { method: "POST", body: JSON.stringify({ folder_path }) }),
+  importFromFolder: (folder_path: string, run_quote = true) =>
+    req<JobDetail & { quote_started?: boolean; quote_id?: string; poll_url?: string }>("/jobs/import-folder", {
+      method: "POST",
+      body: JSON.stringify({ folder_path, run_quote }),
+    }),
+  quoteStatus: (quoteId: string) => req<QuoteRunStatus>(`/quote/status/${encodeURIComponent(quoteId)}`),
   getJob: (jobId: string) => req<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`),
   createJob: (job_id: string, display_name: string, customer: string) =>
     req<JobDetail>("/jobs", { method: "POST", body: JSON.stringify({ job_id, display_name, customer }) }),

@@ -161,6 +161,7 @@ def get_job(job_id: str) -> dict:
         "models": _list_assets(job_dir, "models", MODEL_EXTS),
         "documents": _list_assets(job_dir, "documents", DOC_EXTS),
         "has_raw_csv": (job_dir / "XT_Export_CAD_Dimensions.csv").exists(),
+        "has_classification": classification is not None and bool(classification.get("classifications")),
     }
 
 
@@ -283,7 +284,7 @@ def browse_workspace(path: str = "") -> dict:
     }
 
 
-def import_from_folder(folder_path: str) -> dict:
+def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
     """Register a quote from an existing folder on disk (C-number job)."""
     import re
     import shutil
@@ -347,7 +348,37 @@ def import_from_folder(folder_path: str) -> dict:
         meta["created_at"] = meta["updated_at"]
     (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    return get_job(job_id)
+    job = get_job(job_id)
+
+    if job.get("has_raw_csv") and not job.get("has_classification"):
+        try:
+            job = classify_job(job_id, mode="rules")
+        except Exception:
+            pass
+
+    if run_quote:
+        from . import quote_pipeline
+
+        qid = c_num or job_id
+        create_job(qid, display_name=src.name, customer=meta.get("customer", ""))
+        quote_pipeline.launch_full_quote(
+            qid,
+            str(src),
+            {
+                "subject": src.name,
+                "cust_job": meta.get("customer", ""),
+                "attachments": sum(1 for _ in src.rglob("*") if _.is_file()),
+            },
+        )
+        return {
+            "job_id": qid,
+            "quote_id": qid,
+            "quote_started": True,
+            "poll_url": f"/api/quote/status/{qid}",
+            "display_name": src.name,
+        }
+
+    return job
 
 
 def save_upload(job_id: str, subfolder: str, filename: str, data: bytes) -> dict:

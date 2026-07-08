@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Mail, Paperclip, Reply, RefreshCw, Send, AlertCircle, Trash2 } from "lucide-react";
 import Layout from "../components/Layout";
-import { Card, Badge, Button, Spinner, EmptyState } from "../components/ui";
-import { api, type EmailSummary, type EmailDetail } from "../api/client";
+import { Card, Button, Spinner, EmptyState } from "../components/ui";
+import { api, type EmailSummary, type EmailDetail, type QuoteRunStatus } from "../api/client";
+import QuoteProgressModal from "../components/QuoteProgressModal";
 
 export default function EmailPage() {
   const [status, setStatus] = useState<{ configured: boolean; smtp_configured: boolean } | null>(null);
@@ -16,6 +17,8 @@ export default function EmailPage() {
   const [sendState, setSendState] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState("");
+  const [quoteProgress, setQuoteProgress] = useState<QuoteRunStatus | null>(null);
+  const [activeQuoteId, setActiveQuoteId] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const refresh = () => {
@@ -37,17 +40,44 @@ export default function EmailPage() {
     setSendState("idle");
   }, [selectedId]);
 
+  useEffect(() => {
+    if (!activeQuoteId) return;
+    const iv = setInterval(async () => {
+      try {
+        const st = await api.quoteStatus(activeQuoteId);
+        setQuoteProgress(st);
+        if (st.phase === "completed" && st.job_id) {
+          clearInterval(iv);
+          setActiveQuoteId(null);
+          navigate(`/quotes/${encodeURIComponent(st.job_id)}`);
+        }
+        if (st.phase === "error") {
+          clearInterval(iv);
+          setQuoteError(st.message || "Quote failed");
+          setActiveQuoteId(null);
+          setQuoting(false);
+        }
+      } catch {
+        /* keep polling */
+      }
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [activeQuoteId, navigate]);
+
   const quoteThis = async () => {
     if (!detail) return;
     setQuoting(true);
     setQuoteError("");
+    setQuoteProgress({ phase: "queued", message: "Starting full quote pipeline..." });
     try {
       const result = await api.quoteEmail(detail.id, true);
-      navigate(`/quotes/${encodeURIComponent(result.job_id)}`);
+      const qid = result.quote_id || result.job_id;
+      setActiveQuoteId(qid);
+      setQuoteProgress({ phase: "running", message: "DME price lookup → SolidWorks → Module6121 → AI...", job_id: result.job_id });
     } catch (e) {
       setQuoteError(e instanceof Error ? e.message : "Could not start quote");
-    } finally {
       setQuoting(false);
+      setQuoteProgress(null);
     }
   };
 
@@ -69,25 +99,25 @@ export default function EmailPage() {
       <Layout title="Inbox" subtitle="Read and reply to customer emails, and quote them in one click.">
         <EmptyState
           icon={<Mail className="h-8 w-8" />}
-          title="Connect your email to get started"
-          description="Open Settings and enter your Gmail address and app password. Nothing is stored in gmail_app_password.txt — credentials stay in the webapp on this PC only."
-          action={
-            <Button variant="secondary" onClick={() => navigate("/settings")}>
-              Open Settings
-            </Button>
-          }
+          title="Connect your email"
+          description="Open Settings, enter your Gmail app password, and save."
+          action={<Button variant="secondary" onClick={() => navigate("/settings")}>Settings</Button>}
         />
       </Layout>
     );
   }
 
   return (
-    <Layout title="Inbox" subtitle="Read, reply, and quote customer emails.">
+    <Layout title="Inbox" subtitle="Select an email and press Quote — the full pipeline runs automatically.">
+      {quoteProgress && activeQuoteId && (
+        <QuoteProgressModal status={quoteProgress} onClose={() => { setActiveQuoteId(null); setQuoting(false); setQuoteProgress(null); }} />
+      )}
+
       <div className="grid h-[calc(100vh-160px)] grid-cols-1 gap-4 lg:grid-cols-[340px_1fr]">
         <Card className="flex flex-col overflow-hidden">
-          <div className="flex items-center justify-between border-b border-ink-700/60 px-4 py-3">
-            <span className="text-sm font-semibold text-ink-100">Messages</span>
-            <button onClick={refresh} className="text-ink-400 hover:text-ink-100">
+          <div className="flex items-center justify-between border-b border-ink-700/20 px-4 py-3">
+            <span className="section-label">Messages</span>
+            <button onClick={refresh} className="text-ink-500 hover:text-ink-100">
               <RefreshCw className="h-4 w-4" />
             </button>
           </div>
@@ -97,28 +127,21 @@ export default function EmailPage() {
             ) : loadError ? (
               <div className="flex items-start gap-2 p-4 text-xs text-accent-rose"><AlertCircle className="h-4 w-4 shrink-0" /> {loadError}</div>
             ) : messages.length === 0 ? (
-              <p className="p-4 text-sm text-ink-400">No messages found.</p>
+              <p className="p-4 text-sm text-ink-500">No messages found.</p>
             ) : (
               messages.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setSelectedId(m.id)}
-                  className={`block w-full border-b border-ink-800/60 px-4 py-3 text-left transition ${
-                    selectedId === m.id ? "bg-ink-800/70" : "hover:bg-ink-850/60"
+                  className={`block w-full border-b border-ink-700/15 px-4 py-3 text-left transition ${
+                    selectedId === m.id ? "bg-white/90" : "hover:bg-white/50"
                   }`}
                 >
                   <div className="flex items-center justify-between">
-                    <span className="truncate text-xs font-medium text-ink-200">{m.from}</span>
+                    <span className="truncate text-xs font-medium text-ink-300">{m.from}</span>
                     <span className="shrink-0 text-[10px] text-ink-500">{formatDate(m.date)}</span>
                   </div>
                   <div className="mt-0.5 truncate text-sm text-ink-100">{m.subject || "(no subject)"}</div>
-                  {m.matched_jobs.length > 0 && (
-                    <div className="mt-1.5 flex gap-1">
-                      {m.matched_jobs.map((j) => (
-                        <Badge key={j} tone="brand">{j}</Badge>
-                      ))}
-                    </div>
-                  )}
                 </button>
               ))
             )}
@@ -127,69 +150,44 @@ export default function EmailPage() {
 
         <Card className="flex flex-col overflow-hidden">
           {!selectedId ? (
-            <div className="flex flex-1 items-center justify-center text-sm text-ink-500">
-              Select a message to read it
-            </div>
+            <div className="flex flex-1 items-center justify-center text-sm text-ink-500">Select a message</div>
           ) : !detail ? (
             <div className="p-6"><Spinner label="Loading message..." /></div>
           ) : (
             <div className="flex flex-1 flex-col overflow-hidden">
-              {/* Gmail-style action bar */}
-              <div className="flex items-center gap-1 border-b border-ink-700/60 bg-ink-850/40 px-3 py-2">
-                <button
-                  onClick={() => setReplying((r) => !r)}
-                  className="rounded-lg p-2 text-ink-400 transition hover:bg-ink-800 hover:text-ink-100"
-                  title="Reply"
-                >
+              <div className="flex items-center gap-1 border-b border-ink-700/20 bg-white/40 px-3 py-2">
+                <button onClick={() => setReplying((r) => !r)} className="rounded p-2 text-ink-500 hover:bg-white/80 hover:text-ink-100" title="Reply">
                   <Reply className="h-4 w-4" />
                 </button>
-                <button
-                  className="rounded-lg p-2 text-ink-500 cursor-not-allowed"
-                  title="Delete (use Gmail)"
-                  disabled
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-                <div className="ml-2 flex-1" />
+                <button className="rounded p-2 text-ink-400" disabled title="Delete in Gmail"><Trash2 className="h-4 w-4" /></button>
+                <div className="flex-1" />
                 <button
                   onClick={quoteThis}
                   disabled={quoting}
-                  className="inline-flex items-center gap-2 border border-ink-100 bg-ink-100 px-6 py-2 text-xs font-bold uppercase tracking-widest text-ink-950 transition hover:bg-transparent hover:text-ink-100 disabled:opacity-50"
+                  className="border border-ink-100 bg-ink-100 px-8 py-2.5 text-[10px] font-bold uppercase tracking-[0.2em] text-white transition hover:bg-transparent hover:text-ink-100 disabled:opacity-50"
                 >
-                  {quoting ? "Starting..." : "Quote"}
+                  {quoting ? "Quoting..." : "Quote"}
                 </button>
               </div>
 
-              <div className="border-b border-ink-700/60 px-6 py-4">
-                <h2 className="truncate text-base font-semibold text-ink-100">{detail.subject || "(no subject)"}</h2>
-                <p className="mt-1 text-xs text-ink-400">
-                  From <span className="text-ink-200">{detail.from}</span> &middot; {formatDate(detail.date)}
-                </p>
-                {quoteError && (
-                  <p className="mt-2 text-xs text-accent-rose">{quoteError}</p>
-                )}
-                {detail.matched_jobs.length > 0 && (
-                  <p className="mt-2 text-xs text-ink-400">
-                    Known job{detail.matched_jobs.length > 1 ? "s" : ""}:{" "}
-                    {detail.matched_jobs.map((j) => (
-                      <Badge key={j} tone="brand">{j}</Badge>
-                    ))}
-                  </p>
-                )}
+              <div className="border-b border-ink-700/20 px-6 py-4">
+                <h2 className="truncate text-sm font-semibold uppercase tracking-wider text-ink-100">{detail.subject || "(no subject)"}</h2>
+                <p className="mt-1 text-xs text-ink-500">From {detail.from} · {formatDate(detail.date)}</p>
+                {quoteError && <p className="mt-2 text-xs text-accent-rose">{quoteError}</p>}
               </div>
 
               <div className="scrollbar-thin flex-1 overflow-y-auto px-6 py-4">
                 {detail.body_html ? (
-                  <div className="prose prose-invert prose-sm max-w-none text-ink-200" dangerouslySetInnerHTML={{ __html: detail.body_html }} />
+                  <div className="prose prose-sm max-w-none text-ink-300" dangerouslySetInnerHTML={{ __html: detail.body_html }} />
                 ) : (
-                  <pre className="whitespace-pre-wrap font-sans text-sm text-ink-200">{detail.body_text}</pre>
+                  <pre className="whitespace-pre-wrap font-sans text-sm text-ink-300">{detail.body_text}</pre>
                 )}
                 {detail.attachments.length > 0 && (
-                  <div className="mt-4 space-y-1.5 border-t border-ink-800/60 pt-3">
-                    <div className="text-xs font-medium text-ink-400">Attachments</div>
+                  <div className="mt-4 border-t border-ink-700/20 pt-3">
+                    <div className="section-label mb-2">Attachments (auto-used by Quote)</div>
                     {detail.attachments.map((a, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs text-ink-300">
-                        <Paperclip className="h-3.5 w-3.5" /> {a.filename} <span className="text-ink-500">({(a.size / 1024).toFixed(1)} KB)</span>
+                      <div key={i} className="flex items-center gap-2 text-xs text-ink-400">
+                        <Paperclip className="h-3.5 w-3.5" /> {a.filename}
                       </div>
                     ))}
                   </div>
@@ -197,21 +195,16 @@ export default function EmailPage() {
               </div>
 
               {replying && (
-                <div className="border-t border-ink-700/60 px-6 py-4">
+                <div className="border-t border-ink-700/20 px-6 py-4">
                   <textarea
                     value={replyBody}
                     onChange={(e) => setReplyBody(e.target.value)}
-                    rows={5}
-                    placeholder="Write your reply..."
-                    className="w-full rounded-xl border border-ink-700/60 bg-ink-850/70 p-3 text-sm text-ink-100 placeholder:text-ink-500 focus:border-brand-500/60 focus:outline-none"
+                    rows={4}
+                    className="w-full border border-ink-700/30 bg-white/80 p-3 text-sm text-ink-100 focus:border-ink-100 focus:outline-none"
                   />
-                  <div className="mt-2 flex items-center justify-between">
-                    <span className="text-xs text-ink-500">
-                      {sendState === "error" && <span className="text-accent-rose">Failed to send. Check SMTP settings.</span>}
-                      {sendState === "sent" && <span className="text-accent-green">Reply sent.</span>}
-                    </span>
+                  <div className="mt-2 flex justify-end">
                     <Button onClick={sendReply} disabled={sendState === "sending" || !replyBody.trim()}>
-                      <Send className="h-4 w-4" /> {sendState === "sending" ? "Sending..." : "Send Reply"}
+                      <Send className="h-4 w-4" /> Send
                     </Button>
                   </div>
                 </div>

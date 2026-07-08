@@ -22,7 +22,6 @@ export default function QuoteDetailPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [activeModel, setActiveModel] = useState<string | null>(null);
-  const rawFileRef = useRef<HTMLInputElement>(null);
   const modelFileRef = useRef<HTMLInputElement>(null);
   const docFileRef = useRef<HTMLInputElement>(null);
 
@@ -43,18 +42,6 @@ export default function QuoteDetailPage() {
     setError("");
     try {
       await api.classifyJob(jobId, "rules");
-      load();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const uploadRaw = async (file: File) => {
-    setBusy(true);
-    try {
-      await api.uploadFile(jobId, "raw", file);
       load();
     } catch (e) {
       setError((e as Error).message);
@@ -123,17 +110,9 @@ export default function QuoteDetailPage() {
         </div>
       )}
 
-      {!job.has_raw_csv && (
-        <Card className="mb-5 flex items-center justify-between p-4">
-          <div>
-            <div className="section-label">CAD Export</div>
-            <p className="mt-1 text-xs text-ink-400">Upload XT_Export_CAD_Dimensions.csv from the job folder.</p>
-          </div>
-          <Button onClick={() => rawFileRef.current?.click()}>
-            <Upload className="h-4 w-4" /> Upload CSV
-          </Button>
-          <input ref={rawFileRef} type="file" accept=".csv" className="hidden"
-            onChange={(e) => e.target.files?.[0] && uploadRaw(e.target.files[0])} />
+      {!job.has_raw_csv && job.base_type !== "bms" && (
+        <Card className="mb-5 border border-accent-amber/30 bg-accent-amber/5 p-4 text-xs text-accent-amber">
+          Waiting for Module6121 to export XT_Export_CAD_Dimensions.csv — press Quote from Inbox or run the macro.
         </Card>
       )}
 
