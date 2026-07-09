@@ -346,6 +346,23 @@ def cancel_quote(quote_id: str) -> dict:
     return get_status(quote_id) or {"phase": "cancelled", "quote_id": quote_id}
 
 
+def _macro_log_says_done(folder: Path) -> bool:
+    """True when Module6121 wrote a DONE line (standard or BMS)."""
+    for name in ("CMS_Base_Export_Log.txt", "CMS_Training_XT_Log.txt"):
+        p = folder / name
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")[-8000:].upper()
+        except Exception:
+            continue
+        if "DONE JOB" in text or "DONE ACTIVE CAD QUOTE" in text:
+            return True
+        if "TOTAL JOB TIME:" in text or "TOTAL ACTIVE RUN TIME:" in text:
+            return True
+    return False
+
+
 def poll_completion(quote_id: str) -> dict:
     """Check if macro has finished by looking for output files or status."""
     status = get_status(quote_id) or {"phase": "unknown", "quote_id": quote_id}
@@ -358,7 +375,12 @@ def poll_completion(quote_id: str) -> dict:
         has_xt = (local / "XT_Export_CAD_Dimensions.csv").exists()
         has_quote = any(local.glob("*quote*.xls*")) or any(local.glob("*Quote*.xls*"))
         has_purchased = (local / "Purchased Components Quote.csv").exists()
-        if has_xt and (has_quote or has_purchased):
+        has_steel = any(local.glob("*steel*.xls*")) or any(local.glob("*J000*.xls*"))
+        has_done_log = _macro_log_says_done(local)
+        # Standard jobs may write steel/quote under slightly different names;
+        # also accept DONE log so the UI does not stay on "running" forever.
+        ready = has_xt and (has_quote or has_purchased or has_steel or has_done_log)
+        if ready:
             if status.get("phase") != "completed":
                 try:
                     sync_completed_job(job_id, str(local))

@@ -13,6 +13,7 @@ A "job" is a folder under config.JOBS_ROOT. Recognized contents:
 """
 import csv
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -331,9 +332,17 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
 
 
 def _folder_looks_like_bms(folder: Path) -> bool:
-    """Detect Tempcraft / BMS pot-block jobs that must never get A/B/rail AI roles."""
+    """Detect Tempcraft / BMS pot-block jobs that must never get A/B/rail AI roles.
+
+    Only use folder/file *names* — do not scan arbitrary CSV/log text for
+    'ID HOLDER' / 'SMED' tokens (those can appear in unrelated notes and
+    falsely tag standard Dynacast/DME jobs as BMS).
+    """
     blob = folder.name.lower()
     if any(m in blob for m in ("bms", "tempcraft", "howmet", "potblock", "pot-block", "pot_block")):
+        return True
+    # Whole-token HTE customer prefix in folder name.
+    if re.search(r"(^|[^a-z0-9])hte([^a-z0-9]|$)", blob):
         return True
     try:
         for path in folder.rglob("*"):
@@ -353,15 +362,19 @@ def _folder_looks_like_bms(folder: Path) -> bool:
                 )
             ):
                 return True
-            if path.suffix.lower() in (".csv", ".txt", ".log") and path.stat().st_size < 2_000_000:
+            # Only trust the macro's own base-type log line — not free-text BOM dumps.
+            if path.name.lower() in (
+                "cms_base_export_log.txt",
+                "cms_training_xt_log.txt",
+            ) and path.stat().st_size < 2_000_000:
                 try:
-                    text = path.read_text(encoding="utf-8", errors="ignore")[:8000].upper()
+                    text = path.read_text(encoding="utf-8", errors="ignore")[:12000].upper()
                 except Exception:
                     continue
-                if "ID HOLDER" in text or "OD HOLDER" in text or "SMED" in text or "POT BLOCK" in text:
+                if "BASE TYPE: POT" in text or "BASE TYPE FORCED POT/BMS" in text:
                     return True
-                if "BASE TYPE: POT" in text or "BOM-DRIVEN" in text:
-                    return True
+                if "BASE TYPE: STANDARD" in text or "BASE TYPE STANDARD FROM" in text:
+                    return False
     except Exception:
         pass
     return False
@@ -407,7 +420,10 @@ def _hoist_macro_deliverables(src: Path, job_dir: Path) -> dict:
 
 
 def _xt_looks_like_pot_block(job_dir: Path) -> bool:
-    """Geometry heuristic: 2 thin full clamps + thick non-full holders + 0.25\" sheets."""
+    """Geometry heuristic: 2 thin full clamps + thick non-full holders + 0.25\" sheets.
+
+    Must NEVER fire on a standard mold stack (5+ full-footprint plates).
+    """
     xt = job_dir / "XT_Export_CAD_Dimensions.csv"
     if not xt.exists():
         return False
@@ -439,6 +455,17 @@ def _xt_looks_like_pot_block(job_dir: Path) -> bool:
         return False
 
     max_fp = max(p[3] for p in parsed)
+    max_w = max(p[1] for p in parsed)
+    max_l = max(p[2] for p in parsed)
+
+    # Standard mold stacks have many same-size full-footprint plates.
+    full_plates = [
+        p for p in parsed
+        if p[1] >= max_w * 0.85 and p[2] >= max_l * 0.85 and p[0] >= 0.5
+    ]
+    if len(full_plates) >= 5:
+        return False
+
     full_thin = [
         p for p in parsed
         if p[3] >= max_fp * 0.85 and 0.75 <= p[0] <= 2.5

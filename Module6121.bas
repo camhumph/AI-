@@ -6609,126 +6609,171 @@ Private Sub StdReverse(ByRef idx() As Long, ByVal n As Long)
     Next i
 End Sub
 
-' Detect whether this job is a standard base (vs pot/holder block).
-Private Function DetectBaseTypeIsStandard() As Boolean
-    If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
-    If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
-
-    ' HARD RULE: BMS / pot-block jobs are NEVER standard mold bases.
-    ' Folder names like BMS-851100029-C18603 must keep the BOM-driven pot-block flow.
-    If LooksLikeBmsJob() Then
-        DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from job/folder/customer name"
-        Exit Function
-    End If
-
-    ' Strong signal: holder/pot/smed families -> pot block.
-    ' TCP/BCP alone are not pot-block proof; standard molds have clamp plates too.
-    Dim i As Long, d As String, q As String
-    For i = 1 To BomCount
-        q = NormalizeKey(BomRows(i).quoteName)
-        Select Case q
-            Case "IDHOLDER", "ODHOLDER", "IDPOT", "IDPOTBLOCK", "ODPOT", "ODPOTBLOCK", "SMEDPLATE"
-                DetectBaseTypeIsStandard = False
-                Exit Function
-        End Select
-        d = NormalizeText(BomRows(i).Description)
-        If InStr(d, "SMED") > 0 Or InStr(d, "POT") > 0 Or InStr(d, "ID HOLDER") > 0 Or InStr(d, "OD HOLDER") > 0 Then DetectBaseTypeIsStandard = False: Exit Function
-    Next i
-
-    ' BOM that names several standard structural plates (top clamp, retainers,
-    ' support, ejector, rails...) -> standard base, even with no CAD scanned.
-    Dim nStd As Long
-    nStd = 0
-    For i = 1 To BomCount
-        If StandardPlateNameStd(BomRows(i).Description) <> "" Then nStd = nStd + 1
-    Next i
-    If nStd >= 3 Then DetectBaseTypeIsStandard = True: Exit Function
-
-    ' Geometry: a standard base stacks several same-size full-footprint plates;
-    ' a pot block has only ~2 (the clamp plates) plus smaller holders/pots.
-    Dim baseFoot As Double, fp As Double
-    baseFoot = 0
+' Count full-footprint structural plates (standard stacks have many; pot-blocks ~2).
+Private Function CountFullFootprintPlates() As Long
+    CountFullFootprintPlates = 0
+    If PartCount < 1 Then Exit Function
+    Dim baseFoot As Double, fp As Double, i As Long
+    baseFoot = 0#
     For i = 1 To PartCount
         fp = parts(i).Width * parts(i).Length
         If fp > baseFoot Then baseFoot = fp
     Next i
-    Dim nFull As Long
-    nFull = 0
+    If baseFoot <= 0# Then Exit Function
     For i = 1 To PartCount
         If parts(i).Thickness >= STD_MIN_PLATE_THICKNESS Then
-            If parts(i).Width * parts(i).Length >= (1 - STD_FOOTPRINT_TOL) * baseFoot Then nFull = nFull + 1
+            If parts(i).Width * parts(i).Length >= (1 - STD_FOOTPRINT_TOL) * baseFoot Then
+                CountFullFootprintPlates = CountFullFootprintPlates + 1
+            End If
         End If
     Next i
-    DetectBaseTypeIsStandard = (nFull >= 3)
 End Function
 
-Private Function LooksLikeBmsJob() As Boolean
-    LooksLikeBmsJob = False
+' Detect whether this job is a standard base (vs pot/holder block).
+' Order matters: explicit BMS markers win, then BOM pot-block names, then
+' standard BOM/geometry. Never use ClassifyPotBlockPlatesFromCad gIdx* alone —
+' that subroutine labels normal A/B plates as "pots" and rails as "holders".
+Private Function DetectBaseTypeIsStandard() As Boolean
+    If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
+    If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
+
+    Dim nFull As Long
+    nFull = CountFullFootprintPlates()
+
+    ' Explicit BMS / Tempcraft folder markers always keep the pot-block flow.
+    If LooksLikeBmsJobFromName() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from job/folder/customer name (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
+    If LooksLikeBmsJobFromBom() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' BOM that names several standard structural plates -> standard base.
+    Dim i As Long, nStd As Long
+    nStd = 0
+    For i = 1 To BomCount
+        If StandardPlateNameStd(BomRows(i).Description) <> "" Then nStd = nStd + 1
+    Next i
+    If nStd >= 3 Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type STANDARD from BOM plate names (nStd=" & nStd & ", nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' Geometry: 3+ full-footprint plates = standard mold stack.
+    ' Pot-blocks only have ~2 clamp plates plus smaller holders/pots.
+    If nFull >= 3 Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type STANDARD from geometry (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' Geometry-only pot-block (generic asm_objects, no BMS in folder / BOM).
+    ' Only when the stack is NOT a multi-plate standard base.
+    If LooksLikeBmsJobFromGeometry() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    DetectBaseTypeIsStandard = False
+    LogLine "Base type default POT/BMS (insufficient standard signals; nFull=" & nFull & ")"
+End Function
+
+' Folder / customer / job-name BMS markers only (no geometry, no gIdx*).
+Private Function LooksLikeBmsJobFromName() As Boolean
+    LooksLikeBmsJobFromName = False
     Dim blob As String
     blob = UCase$(CurrentJobNumber & "|" & CustomerJobNumber & "|" & CustomerPrefix & "|" & _
                   CustomerDisplayName & "|" & gExactJobFolderName & "|" & NetworkJobFolder & "|" & _
                   CurrentJobFolder & "|" & gHandoffAttachDir & "|" & JobBaseName)
-    If InStr(blob, "BMS") > 0 Then LooksLikeBmsJob = True: Exit Function
+    If InStr(blob, "BMS") > 0 Then LooksLikeBmsJobFromName = True: Exit Function
     If InStr(blob, "POTBLOCK") > 0 Or InStr(blob, "POT-BLOCK") > 0 Or InStr(blob, "POT_BLOCK") > 0 Then
-        LooksLikeBmsJob = True: Exit Function
+        LooksLikeBmsJobFromName = True: Exit Function
     End If
     ' Tempcraft / Howmet pot-block RFQs (often no "BMS" in the folder name).
-    If InStr(blob, "TEMPCRAFT") > 0 Or InStr(blob, "HOWMET") > 0 Or InStr(blob, "HTE") > 0 Then
-        LooksLikeBmsJob = True: Exit Function
+    If InStr(blob, "TEMPCRAFT") > 0 Or InStr(blob, "HOWMET") > 0 Then
+        LooksLikeBmsJobFromName = True: Exit Function
+    End If
+    ' HTE as a whole-token customer prefix (avoid matching random substrings).
+    If InStr(blob, "|HTE|") > 0 Or InStr(blob, "|HTE-") > 0 Or InStr(blob, "-HTE|") > 0 Or InStr(blob, "\HTE\") > 0 Then
+        LooksLikeBmsJobFromName = True: Exit Function
     End If
     If InStr(blob, "RFQ_MB_ASM") > 0 Or InStr(blob, "MB_ASM") > 0 Then
-        LooksLikeBmsJob = True: Exit Function
+        LooksLikeBmsJobFromName = True: Exit Function
     End If
-    ' BOM already names pot-block plates → never treat as standard mold.
-    ' TCP/BCP alone are NOT enough (standard molds also have clamp plates).
+End Function
+
+' BOM already names pot-block plates. TCP/BCP alone are NOT enough.
+Private Function LooksLikeBmsJobFromBom() As Boolean
+    LooksLikeBmsJobFromBom = False
     Dim i As Long, d As String, q As String
     For i = 1 To BomCount
         q = NormalizeKey(BomRows(i).quoteName)
         Select Case q
             Case "IDHOLDER", "ODHOLDER", "IDPOT", "IDPOTBLOCK", "ODPOT", "ODPOTBLOCK", "SMEDPLATE"
-                LooksLikeBmsJob = True: Exit Function
+                LooksLikeBmsJobFromBom = True: Exit Function
         End Select
         d = NormalizeText(BomRows(i).Description)
         If InStr(d, "SMED") > 0 Or InStr(d, "POT BLOCK") > 0 Or InStr(d, "HOLDER BLOCK") > 0 Then
-            LooksLikeBmsJob = True: Exit Function
+            LooksLikeBmsJobFromBom = True: Exit Function
         End If
         If InStr(d, "ID HOLDER") > 0 Or InStr(d, "OD HOLDER") > 0 Or InStr(d, "TOP HOLDER") > 0 Or InStr(d, "BOTTOM HOLDER") > 0 Then
-            LooksLikeBmsJob = True: Exit Function
+            LooksLikeBmsJobFromBom = True: Exit Function
+        End If
+        If InStr(d, "ID POT") > 0 Or InStr(d, "OD POT") > 0 Or InStr(d, "POT BLOCK") > 0 Then
+            LooksLikeBmsJobFromBom = True: Exit Function
         End If
     Next i
-    ' Geometry already resolved holder/pot plates (not just clamps).
-    If gIdxIDH > 0 Or gIdxODH > 0 Or gIdxIDP > 0 Or gIdxODP > 0 Then LooksLikeBmsJob = True: Exit Function
+End Function
 
-    ' Geometry-only pot-block (generic asm_objects names, no BMS in folder):
-    ' ~2 thin full clamps + >=2 thick non-full holders + 0.25" sheets.
-    If PartCount >= 6 Then
-        Dim maxFp As Double, i2 As Long, fp As Double
-        Dim nFullThin As Long, nThickInner As Long, nThinSheet As Long, nPotLike As Long
-        maxFp = 0#
-        For i2 = 1 To PartCount
-            fp = parts(i2).Width * parts(i2).Length
-            If fp > maxFp Then maxFp = fp
-        Next i2
-        If maxFp > 0 Then
-            For i2 = 1 To PartCount
-                fp = parts(i2).Width * parts(i2).Length
-                If fp >= 0.85 * maxFp And parts(i2).Thickness >= 0.75 And parts(i2).Thickness <= 2.5 Then
-                    nFullThin = nFullThin + 1
-                End If
-                If parts(i2).Thickness >= 3# And fp < 0.85 * maxFp And fp >= 0.15 * maxFp Then
-                    nThickInner = nThickInner + 1
-                End If
-                If Abs(parts(i2).Thickness - 0.25) <= 0.06 Then nThinSheet = nThinSheet + 1
-                If parts(i2).Thickness >= 3# And parts(i2).Width >= 3# And parts(i2).Length >= 3# And fp < 0.55 * maxFp Then
-                    nPotLike = nPotLike + 1
-                End If
-            Next i2
-            If nFullThin <= 2 And nThickInner >= 2 And (nThinSheet >= 2 Or nPotLike >= 2) Then
-                LooksLikeBmsJob = True
-            End If
+' Geometry-only pot-block: ~2 thin full clamps + >=2 thick non-full holders + sheets/pots.
+' NEVER use gIdxIDH/ODH/IDP/ODP — ClassifyPotBlockPlatesFromCad runs on every job
+' and mislabels standard A/B plates as pots and rails as holders.
+Private Function LooksLikeBmsJobFromGeometry() As Boolean
+    LooksLikeBmsJobFromGeometry = False
+    If PartCount < 6 Then Exit Function
+
+    ' Standard mold stacks have many full-footprint plates — never BMS.
+    If CountFullFootprintPlates() >= 5 Then Exit Function
+
+    Dim maxFp As Double, i2 As Long, fp As Double
+    Dim nFullThin As Long, nThickInner As Long, nThinSheet As Long, nPotLike As Long
+    maxFp = 0#
+    For i2 = 1 To PartCount
+        fp = parts(i2).Width * parts(i2).Length
+        If fp > maxFp Then maxFp = fp
+    Next i2
+    If maxFp <= 0# Then Exit Function
+
+    For i2 = 1 To PartCount
+        fp = parts(i2).Width * parts(i2).Length
+        If fp >= 0.85 * maxFp And parts(i2).Thickness >= 0.75 And parts(i2).Thickness <= 2.5 Then
+            nFullThin = nFullThin + 1
         End If
+        If parts(i2).Thickness >= 3# And fp < 0.85 * maxFp And fp >= 0.15 * maxFp Then
+            nThickInner = nThickInner + 1
+        End If
+        If Abs(parts(i2).Thickness - 0.25) <= 0.06 Then nThinSheet = nThinSheet + 1
+        If parts(i2).Thickness >= 3# And parts(i2).Width >= 3# And parts(i2).Length >= 3# And fp < 0.55 * maxFp Then
+            nPotLike = nPotLike + 1
+        End If
+    Next i2
+
+    If nFullThin <= 2 And nThickInner >= 2 And (nThinSheet >= 2 Or nPotLike >= 2) Then
+        LooksLikeBmsJobFromGeometry = True
     End If
+End Function
+
+' Combined helper for callers that only need a yes/no BMS check.
+Private Function LooksLikeBmsJob() As Boolean
+    LooksLikeBmsJob = LooksLikeBmsJobFromName() Or LooksLikeBmsJobFromBom() Or LooksLikeBmsJobFromGeometry()
 End Function
 
 Private Sub AddStdPlate(ByVal nm As String, ByVal t As Double, ByVal w As Double, ByVal l As Double, ByVal qty As Long, Optional ByVal gradeHint As String = "")
