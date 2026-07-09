@@ -37,11 +37,24 @@ ROLE_LABELS = {
     "hardware_other": "Other Hardware",
     "other_hardware": "Other Hardware",
     "purchased_component": "Purchased Component",
+    "tcp": "TCP",
+    "bcp": "BCP",
+    "id_holder": "ID Holder",
+    "od_holder": "OD Holder",
+    "id_pot": "ID Pot",
+    "od_pot": "OD Pot",
+    "steel_plate": "Steel Plate",
     "ignore": "Ignored",
 }
 
 # Coarse grouping used to organize the Parts table / quote sheet in the UI.
 ROLE_GROUPS = {
+    "Steel Plates / Mold Base": {
+        "top_clamp_plate", "a_plate", "b_plate", "stripper_plate",
+        "sc_retainer_plate", "sc_backup_plate", "support_plate",
+        "bottom_clamp_plate", "full_footprint_plate",
+        "tcp", "bcp", "id_holder", "od_holder", "id_pot", "od_pot", "steel_plate",
+    },
     "Mold Base Plates": {
         "top_clamp_plate", "a_plate", "b_plate", "stripper_plate",
         "sc_retainer_plate", "sc_backup_plate", "support_plate",
@@ -58,7 +71,8 @@ ROLE_GROUPS = {
         "leader_pin", "leader_pin_bushing", "guided_ejector_bushing",
         "support_pillar",
     },
-    "Core / Cavity Details": {"insert_or_core_detail", "pullcore"},
+    "Pull Cores & Keys": {"pullcore"},
+    "Core / Cavity Details": {"insert_or_core_detail"},
     "Purchased Components": {"purchased_component"},
     "Other Hardware": {"hardware_other", "other_hardware"},
     "Ignored": {"ignore"},

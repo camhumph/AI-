@@ -61,6 +61,7 @@ export interface JobDetail {
 
 export interface QuoteLineItem {
   index: string;
+  section?: "steel" | "pullcore" | "purchased" | "classified";
   component: string;
   role: string;
   role_label: string;
@@ -69,16 +70,45 @@ export interface QuoteLineItem {
   quote: boolean;
   price: number;
   price_source?: string;
-  thickness?: number;
-  width?: number;
-  length?: number;
+  thickness?: number | null;
+  width?: number | null;
+  length?: number | null;
+  qty?: number | null;
+  cu_in?: number | null;
+  hours?: number | null;
+  vendor?: string;
+  part_number?: string;
+  unit_price?: number | null;
+  material?: string;
+  category?: string;
+}
+
+export interface QuoteSummary {
+  total_hours?: number | null;
+  total_price_rough?: number | null;
+  total_price_finish?: number | null;
+  commission_pct?: number | null;
+  commission_rough?: number | null;
+  commission_finish?: number | null;
+  grand_total_rough?: number | null;
+  grand_total_finish?: number | null;
 }
 
 export interface QuoteSheet {
   job_id: string;
   line_items: QuoteLineItem[];
+  sections?: {
+    steel?: QuoteLineItem[];
+    pullcore?: QuoteLineItem[];
+    purchased?: QuoteLineItem[];
+    classified?: QuoteLineItem[];
+  };
+  steel_plates?: QuoteLineItem[];
+  pullcore_components?: QuoteLineItem[];
   purchased_components?: QuoteLineItem[];
+  summary?: QuoteSummary;
   total_price: number;
+  section_total_price?: number;
   quoted_part_count: number;
   total_part_count: number;
   csv_priced_count?: number;
