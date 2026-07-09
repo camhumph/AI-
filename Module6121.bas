@@ -38,6 +38,10 @@ Private Const PUBLISH_OUTPUTS As Boolean = True              ' copy signature/sh
 Private Const DELETE_EXTRACTED_ZIP_AFTER_FLATTEN As Boolean = True
 Private Const SYNC_COMPLETED_JOB_TO_NETWORK As Boolean = True  ' completed local package copied back to the source job folder
 Private Const WRITE_PCS_NAMING_ANALYSIS As Boolean = False
+' Always write the Qwen-parity stack / leader-pin position analysis (lightweight CSV).
+Private Const WRITE_STACK_LEADERPIN_ANALYSIS As Boolean = True
+' Lateral center-plane tolerance (inches) for matching a leader pin to its bushing.
+Private Const LEADER_PIN_BUSHING_PLANE_TOL As Double = 0.55
 
 Private Const RUN_SOLIDWORKS_INVISIBLE As Boolean = True
 Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
@@ -395,6 +399,17 @@ Private gStdPartingLineAxis As Integer
 Private gStdPartingLinePos As Double
 Private gStdCavityCadIndex As Long
 Private gStdCoreCadIndex As Long
+' Qwen-parity leader-pin / stack analysis (offline geometry path + AI bridge).
+' Per-part set: "PRIMARY" (matched to shoulder/LBB bushings on B plate),
+' "SECONDARY" (matched to guided-ejector bushings — must not decide A/B),
+' or "" when unmatched.
+Private gStdLeaderPinSetByPart() As String
+Private gStdLeaderPinFromTop As Boolean      ' True = pins enter from top/A side
+Private gStdLeaderPinFromKnown As Boolean    ' True when pin direction was measured
+Private gStdLeaderPinReversed As Boolean     ' Seated in B area running toward A
+Private gStdSequencedLatchLock As Boolean    ' PLC / latch-lock / safety-strap base
+Private gStdStackRules As String             ' Pipe-separated rules_for_this_job text
+Private gStdPartingLineText As String
 
 ' ============================================================
 ' AI BRIDGE (CMS AI Quoting local web app / geometry classifier)
@@ -7232,6 +7247,9 @@ End Function
 Private Function StdLeaderPinOrientationTopIsFirst(ByRef fullIdx() As Long, ByVal nFull As Long, _
                                                    ByRef lpIdx() As Long, ByVal nLp As Long, _
                                                    ByVal ax As Integer, ByRef topIsFirstOut As Boolean) As Boolean
+    ' Fallback ONLY when rails/ejector anchors are missing (Qwen rule).
+    ' Prefer PRIMARY leader pins (matched to shoulder/LBB bushings). Never let
+    ' SECONDARY (guided-ejector) pins decide stack orientation.
     StdLeaderPinOrientationTopIsFirst = False
     If nFull < 1 Or nLp < 1 Then Exit Function
 
@@ -7239,17 +7257,25 @@ Private Function StdLeaderPinOrientationTopIsFirst(ByRef fullIdx() As Long, ByVa
     Dim roleKey As String
     Dim pinMean As Double, pinCount As Long
     Dim bushMean As Double, bushCount As Long
+    Dim setTag As String
 
     For i = 1 To nLp
         roleKey = NormalizeKey(StandardRoundComponentRole(lpIdx(i)))
+        setTag = ""
+        On Error Resume Next
+        setTag = gStdLeaderPinSetByPart(lpIdx(i))
+        On Error GoTo 0
         Select Case roleKey
             Case "LEADERPIN"
+                If setTag = "SECONDARY" Then GoTo nextLp
                 pinMean = pinMean + PartAxisCenter(lpIdx(i), ax)
                 pinCount = pinCount + 1
-            Case "LEADERPINBUSHING", "GUIDEDEJECTORBUSHING"
+            Case "LEADERPINBUSHING"
                 bushMean = bushMean + PartAxisCenter(lpIdx(i), ax)
                 bushCount = bushCount + 1
+            ' Guided-ejector bushings intentionally ignored for orientation.
         End Select
+nextLp:
     Next i
 
     Dim firstC As Double
@@ -7425,6 +7451,24 @@ Private Sub BuildStdFromGeometry()
 
     StdSortByAxisDesc fullIdx, nFull, ax
 
+    ' Pre-classify leader-pin PRIMARY/SECONDARY sets before orientation so
+    ' guided-ejector (secondary) pins cannot flip the stack (Qwen rule).
+    Dim supportPosGuess As Double
+    supportPosGuess = 0#
+    If nFull >= 4 Then
+        ' Rough support = second-from-bottom full plate before roles are assigned.
+        supportPosGuess = PartAxisCenter(fullIdx(nFull - 1), ax)
+    End If
+    If nLp > 0 Then ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPosGuess
+
+    ' Detect latch-lock / sequenced base early (shop tokens).
+    For i = 1 To PartCount
+        If IsLatchLockName(parts(i).componentName) Then
+            gStdSequencedLatchLock = True
+            Exit For
+        End If
+    Next i
+
     ' Direction: the end nearer the ejector plates/rails is the B/ejector side
     ' and therefore the bottom. If those anchors are not in the model, use
     ' end-plate hints and standard clamp thickness behavior so unnamed standard
@@ -7550,7 +7594,37 @@ Private Sub BuildStdFromGeometry()
         LogLine "Standard leader-pin stack rule: round leader/bushing components=" & nLp
     End If
 
-    LogLine "Standard base (geometry): full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " leaderStack=" & nLp & " (stack axis " & ax & ")"
+    ' Tag latch-lock / PLC / safety-strap hardware (sequenced bases).
+    Dim nLatch As Long
+    nLatch = 0
+    For i = 1 To PartCount
+        If IsLatchLockName(parts(i).componentName) Then
+            SetStdCadRole i, "Latch Lock / Safety Strap"
+            nLatch = nLatch + 1
+        End If
+    Next i
+    If nLatch > 0 Then
+        gStdSequencedLatchLock = True
+        LogLine "Standard latch-lock rule: " & nLatch & " PLC/latch-lock/safety-strap parts (sequenced base; must not flip A/B)"
+    End If
+
+    ' Re-run pin/bushing plane match with the real support-plate position, then
+    ' measure top-vs-bottom pin direction WITHOUT flipping confirmed A/B.
+    Dim supportPos As Double
+    supportPos = 0#
+    For i = 1 To nFull
+        If NormalizeKey(StdCadRole(fullIdx(i))) = "SUPPORTPLATE" Or _
+           NormalizeKey(StdCadRole(fullIdx(i))) = "SCBACKUPPLATE" Then
+            supportPos = PartAxisCenter(fullIdx(i), ax)
+            Exit For
+        End If
+    Next i
+    ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPos
+    MeasureLeaderPinTopBottomDirection ax
+    BuildStdStackAnalysisText ax, nFull, nRail, nEj, nLp
+
+    LogLine "Standard base (geometry): full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " leaderStack=" & nLp & " (stack axis " & StdStackAxisName(ax) & ")"
+    LogLine "Standard parting_line: " & gStdPartingLineText
 End Sub
 
 Private Function StdSteelTypeFor(ByVal grade As String) As String
@@ -7771,11 +7845,27 @@ End Function
 
 ' Canonical standard-plate name from a CAD component name OR a BOM description.
 ' Returns "" if it isn't a recognizable structural plate.
+' Exact shop STEP tokens (A-PLATE, EJ-RET-PLATE, SC-RETAINER-PLATE, ...) are
+' checked first — same priority as qwen_classify_xt_csv.apply_strong_shop_name_hints.
 Private Function StandardPlateNameStd(ByVal raw As String) As String
     Dim s As String
+    Dim u As String
     s = StdCleanName(raw)
+    u = UCase(raw)
     StandardPlateNameStd = ""
     If IsHardwareName(raw) Then Exit Function
+
+    ' --- Strong shop STEP tokens (hyphen/underscore forms before spaced cleanup) ---
+    If InStr(u, "A-PLATE") > 0 Or InStr(u, "A_PLATE") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
+    If InStr(u, "B-PLATE") > 0 Or InStr(u, "B_PLATE") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
+    If InStr(u, "SC-RETAINER-PLATE") > 0 Or InStr(u, "SC_RETAINER_PLATE") > 0 Then StandardPlateNameStd = "SC Retainer Plate": Exit Function
+    If InStr(u, "SC-BACKUP-PLATE") > 0 Or InStr(u, "SC_BACKUP_PLATE") > 0 Then StandardPlateNameStd = "SC Backup Plate": Exit Function
+    If InStr(u, "EJ-BACKUP-PLATE") > 0 Or InStr(u, "EJ_BACKUP_PLATE") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
+    If InStr(u, "EJ-RET-PLATE") > 0 Or InStr(u, "EJ_RET_PLATE") > 0 Then StandardPlateNameStd = "Ejector Plate": Exit Function
+    If InStr(u, "CLAMP-PLATE") > 0 Or InStr(u, "CLAMP_PLATE") > 0 Then
+        If InStr(u, "TOP") = 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
+    End If
+
     If InStr(s, " LOWER BASE ") > 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
     If InStr(s, " UPPER BASE ") > 0 Then StandardPlateNameStd = "Top Clamp Plate": Exit Function
     If InStr(s, " BASE PLATE ") > 0 Or InStr(s, " BASE ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
@@ -8002,8 +8092,10 @@ Private Sub StdResetArrays()
     ReDim StdL(1 To 80): ReDim StdQty(1 To 80): ReDim StdGrade(1 To 80): ReDim StdQuoteRow(1 To 80)
     If PartCount > 0 Then
         ReDim gStdRoleByPart(1 To PartCount)
+        ReDim gStdLeaderPinSetByPart(1 To PartCount)
     Else
         Erase gStdRoleByPart
+        Erase gStdLeaderPinSetByPart
     End If
     gStdStackAxis = 0
     gStdTopIsFirst = True
@@ -8012,6 +8104,12 @@ Private Sub StdResetArrays()
     gStdPartingLinePos = 0#
     gStdCavityCadIndex = 0
     gStdCoreCadIndex = 0
+    gStdLeaderPinFromTop = False
+    gStdLeaderPinFromKnown = False
+    gStdLeaderPinReversed = False
+    gStdSequencedLatchLock = False
+    gStdStackRules = ""
+    gStdPartingLineText = ""
 End Sub
 
 Private Sub SetStdCadRole(ByVal idx As Long, ByVal roleName As String)
@@ -8347,6 +8445,65 @@ Private Function BuildStdFromAiBridge() As Boolean
         LogLine "AI bridge rails: qty " & nRail
     End If
 
+    ' Carry latch-lock flag + Qwen-parity leader-pin set / top-bottom direction
+    ' into the same globals the offline geometry path fills.
+    If gAiSequencedLatchLock Then gStdSequencedLatchLock = True
+
+    Dim ax As Integer, bestRange As Double, a As Integer, mn As Double, mx As Double, v As Double
+    Dim fullIdx(1 To 60) As Long, nFull As Long
+    Dim lpIdx(1 To 120) As Long, nLp As Long
+    Dim nEj As Long
+    Dim baseFoot As Double, fp As Double
+    baseFoot = 0#: nFull = 0: nLp = 0: nEj = 0
+    For i = 1 To PartCount
+        fp = parts(i).Width * parts(i).Length
+        If fp > baseFoot Then baseFoot = fp
+    Next i
+    For i = 1 To PartCount
+        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        hw = AiHardwareNameForRole(gAiRoleByPart(i))
+        If nm <> "" And nm <> "Rails" And baseFoot > 0# Then
+            If parts(i).Width * parts(i).Length >= (1 - STD_FOOTPRINT_TOL) * baseFoot Then
+                If nFull < UBound(fullIdx) Then nFull = nFull + 1: fullIdx(nFull) = i
+            End If
+        End If
+        If NormalizeKey(nm) = "EJECTORPLATE" Or NormalizeKey(nm) = "BOTTOMEJECTORPLATE" Then nEj = nEj + 1
+        If hw = "Leader Pin" Or hw = "Leader Pin Bushing" Or hw = "Guided Ejector Bushing" Then
+            If nLp < UBound(lpIdx) Then nLp = nLp + 1: lpIdx(nLp) = i
+        End If
+    Next i
+
+    bestRange = -1: ax = 3
+    If nFull >= 2 Then
+        For a = 1 To 3
+            mn = 1E+30: mx = -1E+30
+            For i = 1 To nFull
+                v = PartAxisCenter(fullIdx(i), a)
+                If v < mn Then mn = v
+                If v > mx Then mx = v
+            Next i
+            If (mx - mn) > bestRange Then bestRange = (mx - mn): ax = a
+        Next a
+    End If
+    gStdStackAxis = ax
+    gStdTopIsFirst = True
+    If gStdCavityCadIndex > 0 And gStdCoreCadIndex > 0 Then StdSetPartingLineFromRoles ax
+
+    Dim supportPos As Double
+    supportPos = 0#
+    For i = 1 To PartCount
+        If NormalizeKey(StdCadRole(i)) = "SUPPORTPLATE" Or NormalizeKey(StdCadRole(i)) = "SCBACKUPPLATE" Then
+            supportPos = PartAxisCenter(i, ax)
+            Exit For
+        End If
+    Next i
+    ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPos
+    MeasureLeaderPinTopBottomDirection ax
+    BuildStdStackAnalysisText ax, nFull, nRail, nEj, nLp
+    gStdDmeStackFamily = "AI bridge stack (" & StdStackAxisName(ax) & ")" & _
+        IIf(gStdSequencedLatchLock, " + latch-lock sequenced", "") & _
+        IIf(nLp > 0, " + leader-pin stack", "")
+
     gAiBridgeUsed = True
     BuildStdFromAiBridge = True
 End Function
@@ -8380,6 +8537,9 @@ finishStd:
         LogLine "  STD " & Replace(stdName(i), Chr(34), "") & " qty " & StdQty(i) & _
                 " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i) & " -> " & StdGrade(i) & " row " & StdQuoteRow(i)
     Next i
+    If WRITE_STACK_LEADERPIN_ANALYSIS And CurrentJobFolder <> "" Then
+        WriteStackLeaderPinAnalysis CurrentJobFolder & "\Stack_LeaderPin_Analysis.csv", True
+    End If
 End Sub
 
 ' ---- Pullcore / key straight quote: total volume x rate ----
@@ -9304,6 +9464,93 @@ eh:
     Close #f
 End Sub
 
+' Qwen-parity stack + leader-pin position dump (always-on for standard bases).
+' Mirrors job_analysis + per-part roles/positions from the AI classifier output.
+Private Sub WriteStackLeaderPinAnalysis(ByVal destPath As String, ByVal isStandardBase As Boolean)
+On Error GoTo eh
+    If PartCount < 1 Then Exit Sub
+    If Not isStandardBase Then Exit Sub
+
+    Dim f As Integer
+    Dim i As Long
+    Dim role As String
+    Dim pinSet As String
+    Dim pinDir As String
+    Dim rules() As String
+    Dim r As Long
+
+    f = FreeFile
+    Open destPath For Output As #f
+
+    ' --- job_analysis header block (one row of metadata, then blank, then parts) ---
+    Print #f, "SECTION,KEY,VALUE"
+    Print #f, "job_analysis,stack_axis," & CsvText(StdStackAxisName(gStdStackAxis))
+    Print #f, "job_analysis,top_is_first," & CStr(gStdTopIsFirst)
+    Print #f, "job_analysis,dme_stack_family," & CsvText(gStdDmeStackFamily)
+    Print #f, "job_analysis,parting_line," & CsvText(gStdPartingLineText)
+    Print #f, "job_analysis,parting_line_axis," & CStr(gStdPartingLineAxis)
+    Print #f, "job_analysis,parting_line_pos," & FormatNumberForCsv(gStdPartingLinePos)
+    Print #f, "job_analysis,a_plate_idx," & CStr(gStdCavityCadIndex)
+    Print #f, "job_analysis,b_plate_idx," & CStr(gStdCoreCadIndex)
+    Print #f, "job_analysis,sequenced_latch_lock_base," & CStr(gStdSequencedLatchLock)
+    If gStdLeaderPinFromKnown Then
+        pinDir = IIf(gStdLeaderPinFromTop, "FROM_TOP_A", "FROM_BOTTOM_B")
+        If gStdLeaderPinReversed Then pinDir = pinDir & "_REVERSED"
+    Else
+        pinDir = "UNKNOWN"
+    End If
+    Print #f, "job_analysis,leader_pin_direction," & CsvText(pinDir)
+    Print #f, "job_analysis,leader_pin_reversed," & CStr(gStdLeaderPinReversed)
+    Print #f, "job_analysis,ai_bridge_used," & CStr(gAiBridgeUsed)
+
+    If gStdStackRules <> "" Then
+        rules = Split(gStdStackRules, "|")
+        For r = LBound(rules) To UBound(rules)
+            If Trim(rules(r)) <> "" Then
+                Print #f, "job_analysis,rule_" & (r - LBound(rules) + 1) & "," & CsvText(Trim(rules(r)))
+            End If
+        Next r
+    End If
+
+    Print #f, ""
+    Print #f, "Index,CurrentName,GeometryRole,LeaderPinSet,PartingSide,LeaderPinStackKey,StackAxisPos,Thickness,Width,Length,CenterX,CenterY,CenterZ,ConfidenceHint"
+
+    For i = 1 To PartCount
+        role = GeometryRoleForCadIndex(i, True)
+        pinSet = ""
+        On Error Resume Next
+        pinSet = gStdLeaderPinSetByPart(i)
+        On Error GoTo eh
+        ' Only emit structural / guide / latch rows to keep the file readable.
+        If role = "" Then GoTo nextPart
+        If NormalizeKey(role) = "HARDWAREOTHER" Or NormalizeKey(role) = "HARDWARE/OTHER" Then
+            If pinSet = "" And Not IsLatchLockName(parts(i).componentName) Then GoTo nextPart
+        End If
+        If NormalizeKey(role) = "IGNORE" Then GoTo nextPart
+
+        Print #f, i & "," & CsvText(parts(i).componentName) & "," & CsvText(role) & "," & _
+                  CsvText(pinSet) & "," & CsvText(StdPartingSideForCadIndex(i)) & "," & _
+                  CsvText(LeaderPinStackKeyForCadIndex(i)) & "," & FormatNumberForCsv(StandardStackAxisPos(i)) & "," & _
+                  FormatNumberForCsv(parts(i).Thickness) & "," & FormatNumberForCsv(parts(i).Width) & "," & _
+                  FormatNumberForCsv(parts(i).Length) & "," & FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
+                  FormatNumberForCsv(parts(i).AsmCenterY) & "," & FormatNumberForCsv(parts(i).AsmCenterZ) & "," & _
+                  CsvText(IIf(pinSet = "PRIMARY", "HIGH primary pin-bushing plane", _
+                         IIf(pinSet = "SECONDARY", "MEDIUM secondary guided-ejector plane", "")))
+nextPart:
+    Next i
+
+    Close #f
+    LogLine "Wrote stack/leader-pin analysis: " & destPath & _
+            " | axis=" & StdStackAxisName(gStdStackAxis) & _
+            " | pins=" & pinDir & _
+            " | latchLock=" & CStr(gStdSequencedLatchLock)
+    Exit Sub
+eh:
+    LogLine "WriteStackLeaderPinAnalysis error: " & Err.Description
+    On Error Resume Next
+    Close #f
+End Sub
+
 Private Function StandardStackAxisPos(ByVal idx As Long) As Double
     If idx < 1 Or idx > PartCount Then Exit Function
     If gStdStackAxis < 1 Or gStdStackAxis > 3 Then
@@ -9356,6 +9603,11 @@ Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase
         Exit Function
     End If
 
+    If IsLatchLockName(parts(idx).componentName) Then
+        GeometryRoleForCadIndex = "Latch Lock / Safety Strap"
+        Exit Function
+    End If
+
     If LooksLikePlate(idx) Then
         If isStandardBase Then
             GeometryRoleForCadIndex = "STANDARD PLATE / RAIL"
@@ -9383,6 +9635,20 @@ Private Function StandardRoundComponentRole(ByVal idx As Long) As String
     dia = RoundBarDiameter(idx)
     axisLen = RoundBarAxisLength(idx)
     If dia > 0# Then ratio = axisLen / dia
+
+    ' Strong shop STEP tokens first (same as qwen apply_strong_shop_name_hints).
+    If InStr(u, "LDR-PIN") > 0 Or InStr(u, "LDR_PIN") > 0 Then
+        StandardRoundComponentRole = "Leader Pin"
+        Exit Function
+    End If
+    If InStr(u, "/LBB_") > 0 Or InStr(u, "LBB_") > 0 Or InStr(u, "-LBB") > 0 Or InStr(u, "_LBB") > 0 Then
+        StandardRoundComponentRole = "Leader Pin Bushing"
+        Exit Function
+    End If
+    If IsLatchLockName(parts(idx).componentName) Then
+        StandardRoundComponentRole = "Latch Lock / Safety Strap"
+        Exit Function
+    End If
 
     ' Geometry first. CAD component names in customer files are often copied,
     ' swapped, or stale. The stack logic needs the physical shape, not the label.
@@ -9449,6 +9715,231 @@ Private Function StandardRoundComponentRole(ByVal idx As Long) As String
         StandardRoundComponentRole = "Leader Pin Bushing"
     End If
 End Function
+
+' Latch-lock / PLC / safety-strap tokens (qwen is_latch_lock_name).
+Private Function IsLatchLockName(ByVal raw As String) As Boolean
+    Dim u As String
+    u = UCase(raw)
+    IsLatchLockName = False
+    If InStr(u, "LATCH-LOCK") > 0 Or InStr(u, "LATCH_LOCK") > 0 Or InStr(u, "LATCH LOCK") > 0 Then IsLatchLockName = True: Exit Function
+    If InStr(u, "SAFETY-STRAP") > 0 Or InStr(u, "SAFETY_STRAP") > 0 Or InStr(u, "SAFETY STRAP") > 0 Then IsLatchLockName = True: Exit Function
+    If InStr(u, "SAFTEY-STRAP") > 0 Or InStr(u, "SAFTEY_STRAP") > 0 Or InStr(u, "SAFTEY STRAP") > 0 Then IsLatchLockName = True: Exit Function
+    If InStr(u, "PLC75") > 0 Then IsLatchLockName = True: Exit Function
+    ' PLC + digit (PLC1, PLC2, ...) without matching random "PLC" substrings alone.
+    Dim p As Long, ch As String
+    p = InStr(u, "PLC")
+    Do While p > 0
+        If p + 3 <= Len(u) Then
+            ch = Mid(u, p + 3, 1)
+            If ch >= "0" And ch <= "9" Then IsLatchLockName = True: Exit Function
+        End If
+        p = InStr(p + 1, u, "PLC")
+    Loop
+End Function
+
+' True when two round parts share a lateral center plane (orthogonal to stack axis).
+' Mirrors qwen near_same_axis_plane: any two of X/Y/Z within tolerance.
+Private Function NearSameAxisPlane(ByVal aIdx As Long, ByVal bIdx As Long, Optional ByVal tol As Double = LEADER_PIN_BUSHING_PLANE_TOL) As Boolean
+    NearSameAxisPlane = False
+    If aIdx < 1 Or bIdx < 1 Or aIdx > PartCount Or bIdx > PartCount Then Exit Function
+    Dim dx As Double, dy As Double, dz As Double
+    dx = Abs(parts(aIdx).AsmCenterX - parts(bIdx).AsmCenterX)
+    dy = Abs(parts(aIdx).AsmCenterY - parts(bIdx).AsmCenterY)
+    dz = Abs(parts(aIdx).AsmCenterZ - parts(bIdx).AsmCenterZ)
+    NearSameAxisPlane = ((dx <= tol And dy <= tol) Or (dx <= tol And dz <= tol) Or (dy <= tol And dz <= tol))
+End Function
+
+' Classify each leader pin as PRIMARY (shoulder/LBB bushing match on B plate) or
+' SECONDARY (guided-ejector bushing match — must not decide A/B). Also match
+' unmatched long pins to nearby short bushings (dynacast / T001015 secondary set).
+Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp As Long, _
+                                               ByVal ax As Integer, ByVal supportPos As Double)
+    Dim i As Long, j As Long
+    Dim roleKey As String
+    Dim pinIdx(1 To 120) As Long, nPin As Long
+    Dim shoulderIdx(1 To 120) As Long, nShoulder As Long
+    Dim ejectorBushIdx(1 To 120) As Long, nEjectorBush As Long
+    Dim longPinIdx(1 To 120) As Long, nLong As Long
+    Dim shortBushIdx(1 To 120) As Long, nShort As Long
+    Dim dia As Double, axisLen As Double, ratio As Double
+    Dim matched As Boolean
+
+    If PartCount < 1 Then Exit Sub
+    On Error Resume Next
+    If UBound(gStdLeaderPinSetByPart) < 1 Then ReDim gStdLeaderPinSetByPart(1 To PartCount)
+    On Error GoTo 0
+    If Not StdRoleArrayReady() Then
+        ' Ensure role array exists so SetStdCadRole during matching is safe.
+        ReDim gStdRoleByPart(1 To PartCount)
+    End If
+
+    nPin = 0: nShoulder = 0: nEjectorBush = 0: nLong = 0: nShort = 0
+
+    For i = 1 To nLp
+        roleKey = NormalizeKey(StandardRoundComponentRole(lpIdx(i)))
+        Select Case roleKey
+            Case "LEADERPIN"
+                If nPin < UBound(pinIdx) Then nPin = nPin + 1: pinIdx(nPin) = lpIdx(i)
+            Case "LEADERPINBUSHING"
+                If nShoulder < UBound(shoulderIdx) Then nShoulder = nShoulder + 1: shoulderIdx(nShoulder) = lpIdx(i)
+            Case "GUIDEDEJECTORBUSHING"
+                If nEjectorBush < UBound(ejectorBushIdx) Then nEjectorBush = nEjectorBush + 1: ejectorBushIdx(nEjectorBush) = lpIdx(i)
+        End Select
+    Next i
+
+    ' Also scan all round parts for long-pin / short-bushing geometry pairs
+    ' (covers cases where role naming was ambiguous before matching).
+    For i = 1 To PartCount
+        If Not IsRoundBarLike(i) Then GoTo nextRound
+        dia = RoundBarDiameter(i)
+        axisLen = RoundBarAxisLength(i)
+        If dia <= 0# Or dia > 4# Then GoTo nextRound
+        ratio = axisLen / dia
+        If ratio >= 3# And axisLen >= 6# Then
+            If nLong < UBound(longPinIdx) Then nLong = nLong + 1: longPinIdx(nLong) = i
+        ElseIf ratio >= 0.6 And ratio <= 1.35 And dia >= 1# And dia <= 2.6 Then
+            If nShort < UBound(shortBushIdx) Then nShort = nShort + 1: shortBushIdx(nShort) = i
+        End If
+nextRound:
+    Next i
+
+    ' Primary vs secondary from already-named bushings.
+    For i = 1 To nPin
+        matched = False
+        For j = 1 To nShoulder
+            If NearSameAxisPlane(pinIdx(i), shoulderIdx(j)) Then
+                gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
+                matched = True
+                Exit For
+            End If
+        Next j
+        If Not matched Then
+            For j = 1 To nEjectorBush
+                If NearSameAxisPlane(pinIdx(i), ejectorBushIdx(j)) Then
+                    gStdLeaderPinSetByPart(pinIdx(i)) = "SECONDARY"
+                    matched = True
+                    Exit For
+                End If
+            Next j
+        End If
+    Next i
+
+    ' Geometry fallback: long pin + short bushing on same lateral plane.
+    For i = 1 To nLong
+        If gStdLeaderPinSetByPart(longPinIdx(i)) <> "" Then GoTo nextLong
+        For j = 1 To nShort
+            If NearSameAxisPlane(longPinIdx(i), shortBushIdx(j), LEADER_PIN_BUSHING_PLANE_TOL) Then
+                SetStdCadRole longPinIdx(i), "Leader Pin"
+                SetStdCadRole shortBushIdx(j), "Leader Pin Bushing"
+                If gStdLeaderPinSetByPart(longPinIdx(i)) = "" Then
+                    ' Prefer PRIMARY when bushing is at/above support (B-plate side);
+                    ' SECONDARY when bushing is clearly in the ejector half.
+                    If supportPos <> 0# And PartAxisCenter(shortBushIdx(j), ax) < supportPos - 0.25 Then
+                        gStdLeaderPinSetByPart(longPinIdx(i)) = "SECONDARY"
+                    Else
+                        gStdLeaderPinSetByPart(longPinIdx(i)) = "PRIMARY"
+                    End If
+                End If
+                Exit For
+            End If
+        Next j
+nextLong:
+    Next i
+
+    Dim nPri As Long, nSec As Long
+    nPri = 0: nSec = 0
+    For i = 1 To PartCount
+        If gStdLeaderPinSetByPart(i) = "PRIMARY" Then nPri = nPri + 1
+        If gStdLeaderPinSetByPart(i) = "SECONDARY" Then nSec = nSec + 1
+    Next i
+    LogLine "Leader-pin sets (Qwen parity): PRIMARY=" & nPri & " (shoulder/LBB plane) SECONDARY=" & nSec & " (guided-ejector plane; does not decide A/B)"
+End Sub
+
+' Measure whether primary leader pins enter from the top (A) or bottom (B) of
+' the already-oriented stack. Reversed pins (seated in B, running toward A)
+' are flagged but NEVER used to flip a confirmed A/B assignment.
+Private Sub MeasureLeaderPinTopBottomDirection(ByVal ax As Integer)
+    Dim i As Long
+    Dim pinMean As Double, pinCount As Long
+    Dim bushMean As Double, bushCount As Long
+    Dim aPos As Double, bPos As Double
+    Dim roleKey As String
+
+    gStdLeaderPinFromKnown = False
+    gStdLeaderPinFromTop = False
+    gStdLeaderPinReversed = False
+    If gStdCavityCadIndex < 1 Or gStdCoreCadIndex < 1 Then Exit Sub
+    If PartCount < 1 Then Exit Sub
+
+    aPos = PartAxisCenter(gStdCavityCadIndex, ax)
+    bPos = PartAxisCenter(gStdCoreCadIndex, ax)
+
+    For i = 1 To PartCount
+        roleKey = NormalizeKey(StdCadRole(i))
+        If roleKey = "" Then roleKey = NormalizeKey(StandardRoundComponentRole(i))
+        If roleKey = "LEADERPIN" Then
+            ' Only PRIMARY set decides guide direction (Qwen rule).
+            If gStdLeaderPinSetByPart(i) = "SECONDARY" Then GoTo nextPin
+            pinMean = pinMean + PartAxisCenter(i, ax)
+            pinCount = pinCount + 1
+        ElseIf roleKey = "LEADERPINBUSHING" Then
+            bushMean = bushMean + PartAxisCenter(i, ax)
+            bushCount = bushCount + 1
+        End If
+nextPin:
+    Next i
+
+    If pinCount < 1 Then Exit Sub
+    pinMean = pinMean / pinCount
+    gStdLeaderPinFromKnown = True
+
+    ' Pins closer to B/core than A/cavity => seated on B side (typical / reversed-ok).
+    ' "From top" means pin centers are nearer the A/cavity plate (pins enter from top).
+    gStdLeaderPinFromTop = (Abs(pinMean - aPos) < Abs(pinMean - bPos))
+
+    If bushCount > 0 Then
+        bushMean = bushMean / bushCount
+        ' Reversed: pin body on B side while bushings sit toward A (pins run upward).
+        If (Abs(pinMean - bPos) < Abs(pinMean - aPos)) And (Abs(bushMean - aPos) < Abs(bushMean - bPos)) Then
+            gStdLeaderPinReversed = True
+        End If
+    End If
+
+    LogLine "Leader-pin direction: from_" & IIf(gStdLeaderPinFromTop, "TOP/A", "BOTTOM/B") & _
+            IIf(gStdLeaderPinReversed, " (REVERSED — seated in B running toward A; A/B NOT flipped)", "") & _
+            " | pinMean=" & FormatNumberForCsv(pinMean) & " A=" & FormatNumberForCsv(aPos) & " B=" & FormatNumberForCsv(bPos)
+End Sub
+
+Private Function StdStackAxisName(ByVal ax As Integer) As String
+    Select Case ax
+        Case 1: StdStackAxisName = "CenterX"
+        Case 2: StdStackAxisName = "CenterY"
+        Case Else: StdStackAxisName = "CenterZ"
+    End Select
+End Function
+
+Private Sub BuildStdStackAnalysisText(ByVal ax As Integer, ByVal nFull As Long, _
+                                      ByVal nRail As Long, ByVal nEj As Long, ByVal nLp As Long)
+    Dim axisName As String
+    axisName = StdStackAxisName(ax)
+    gStdPartingLineText = "Between a_plate and b_plate from the full-footprint stack order."
+    gStdStackRules = "Full-footprint plates were sorted by " & axisName & " from top to bottom."
+    gStdStackRules = gStdStackRules & "|Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation."
+    gStdStackRules = gStdStackRules & "|Ejector-stack plates: thinner = Ejector Plate, thicker/lower = Bottom Ejector Plate."
+    gStdStackRules = gStdStackRules & "|Round guide hardware separated by diameter/length; primary leader pins matched to shoulder/LBB bushings on the same center plane."
+    gStdStackRules = gStdStackRules & "|Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) applied before geometry-only rules."
+    If gStdSequencedLatchLock Then
+        gStdPartingLineText = "Primary parting line between a_plate and b_plate from the full-footprint stack order. " & _
+            "Latch-lock/PLC/safety-strap hardware detected: plate-sequenced/latch-lock standard base with secondary opening/parting lines at latch attachment points."
+        gStdStackRules = gStdStackRules & "|Latch-lock/PLC/safety-strap tokens detected. Latch locks mark secondary parting lines and do not set guide direction. " & _
+            "Reversed/seated leader pins were not allowed to flip the A/B assignment."
+    End If
+    If gStdLeaderPinFromKnown Then
+        gStdStackRules = gStdStackRules & "|Leader pins enter from the " & IIf(gStdLeaderPinFromTop, "TOP/A", "BOTTOM/B") & " side" & _
+            IIf(gStdLeaderPinReversed, " (reversed seating)", "") & "."
+    End If
+    gStdStackRules = gStdStackRules & "|Counts: full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " leaderStack=" & nLp & "."
+End Sub
 
 Private Function SuggestedPcsNameForCadIndex(ByVal idx As Long, ByVal role As String, _
                                             ByRef confidence As String, ByRef reason As String) As String
@@ -9521,6 +10012,11 @@ Private Function SuggestedPcsNameForCadIndex(ByVal idx As Long, ByVal role As St
             SuggestedPcsNameForCadIndex = "SUPPORT_PILLAR_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_DME"
             confidence = "HIGH"
             reason = "Large round post geometry; kept separate from leader-pin logic."
+            Exit Function
+        Case "LATCHLOCK/SAFETYSTRAP", "LATCHLOCKSAFETYSTRAP", "LATCHLOCK"
+            SuggestedPcsNameForCadIndex = "LATCH_LOCK_PLC"
+            confidence = "HIGH"
+            reason = "Shop latch-lock/PLC/safety-strap token; secondary parting marker, does not set guide direction."
             Exit Function
     End Select
 
