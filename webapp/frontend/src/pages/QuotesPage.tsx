@@ -38,7 +38,7 @@ export default function QuotesPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search by C-number or folder name..."
-          className="w-full border border-ink-700 bg-ink-900 py-2.5 pl-9 pr-3 text-sm text-ink-100 placeholder:text-ink-500 focus:border-ink-100 focus:outline-none"
+          className="glass-input w-full rounded-full py-2.5 pl-9 pr-3 text-sm text-ink-100 placeholder:text-ink-500"
         />
       </div>
 
@@ -119,7 +119,7 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-100/40 p-4 backdrop-blur-sm">
+    <div className="overlay-backdrop fixed inset-0 z-50 flex items-center justify-center p-4">
       <Card className="flex max-h-[80vh] w-full max-w-2xl flex-col">
         <div className="flex items-center justify-between border-b border-ink-700 px-6 py-4">
           <div>

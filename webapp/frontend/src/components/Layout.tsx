@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import Sidebar from "./Sidebar";
+import Sidebar, { MobileDock } from "./Sidebar";
 
 export default function Layout({
   title,
@@ -13,18 +13,23 @@ export default function Layout({
   children: ReactNode;
 }) {
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-ink-950">
+    <div className="flex h-screen w-full overflow-hidden">
       <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex shrink-0 items-center justify-between border-b border-ink-700 px-6 py-5 sm:px-10">
+      <div className="flex min-w-0 flex-1 flex-col pr-3 pt-3 pb-3">
+        <header className="glass-panel mb-3 flex shrink-0 items-center justify-between rounded-2xl px-6 py-4 sm:px-8">
           <div>
-            <h1 className="text-sm font-semibold uppercase tracking-[0.2em] text-ink-100 sm:text-base">{title}</h1>
-            {subtitle && <p className="mt-1 text-xs text-ink-400">{subtitle}</p>}
+            <h1 className="text-sm font-semibold uppercase tracking-[0.22em] text-ink-100 sm:text-base">
+              {title}
+            </h1>
+            {subtitle && <p className="mt-1 text-xs text-ink-500">{subtitle}</p>}
           </div>
           {actions && <div className="flex items-center gap-3">{actions}</div>}
         </header>
-        <main className="scrollbar-thin flex-1 overflow-y-auto px-6 py-8 sm:px-10">{children}</main>
+        <main className="scrollbar-thin glass-panel flex-1 overflow-y-auto rounded-2xl px-6 py-8 pb-24 sm:px-10 md:pb-8 space-grid">
+          {children}
+        </main>
       </div>
+      <MobileDock />
     </div>
   );
 }

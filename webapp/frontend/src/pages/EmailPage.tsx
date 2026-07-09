@@ -211,22 +211,19 @@ export default function EmailPage() {
 
   return (
     <Layout title="Inbox" subtitle="Gmail-style inbox — quote runs in the background.">
-      <div className="flex h-[calc(100vh-148px)] flex-col gap-0 overflow-hidden rounded-lg border border-ink-700/25 bg-ink-900/60 shadow-sm">
+      <div className="glass-panel-strong flex h-[calc(100vh-148px)] flex-col gap-0 overflow-hidden rounded-2xl">
         {/* Toolbar */}
-        <div className="flex shrink-0 items-center gap-2 border-b border-ink-700/25 bg-ink-850/80 px-3 py-2">
-          <button
-            onClick={() => openCompose("new")}
-            className="flex items-center gap-2 rounded-full bg-ink-200 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-ink-950 hover:bg-ink-100"
-          >
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-3 py-2.5">
+          <Button onClick={() => openCompose("new")} className="px-4 py-2">
             <PenSquare className="h-3.5 w-3.5" /> Compose
-          </button>
+          </Button>
           <div className="relative ml-2 flex-1 max-w-xl">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-500" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search mail"
-              className="w-full rounded-full border border-ink-700/30 bg-ink-950/50 py-2 pl-9 pr-4 text-sm text-ink-200 placeholder:text-ink-500 focus:border-ink-400 focus:outline-none"
+              className="glass-input w-full rounded-full py-2 pl-9 pr-4 text-sm text-ink-200 placeholder:text-ink-500"
             />
           </div>
           <button onClick={refresh} className="rounded-full p-2 text-ink-500 hover:bg-ink-800/40 hover:text-ink-200" title="Refresh">
@@ -328,13 +325,9 @@ export default function EmailPage() {
                   <ToolbarBtn icon={<ReplyAll className="h-4 w-4" />} title="Reply all" onClick={() => openCompose("replyAll")} />
                   <ToolbarBtn icon={<Forward className="h-4 w-4" />} title="Forward" onClick={() => openCompose("forward")} />
                   <div className="flex-1" />
-                  <button
-                    onClick={quoteThis}
-                    disabled={quoting}
-                    className="mx-2 border border-ink-200 bg-ink-200 px-6 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-ink-950 transition hover:bg-ink-100 disabled:opacity-50"
-                  >
+                  <Button onClick={quoteThis} disabled={quoting} className="mx-2 px-6 py-2">
                     {quoting ? "Starting…" : "Quote"}
-                  </button>
+                  </Button>
                 </div>
 
                 <div className="border-b border-ink-700/15 px-6 py-4">
@@ -458,10 +451,10 @@ function ComposePanel({
     mode === "new" ? "New message" : mode === "reply" ? "Reply" : mode === "replyAll" ? "Reply all" : "Forward";
 
   return (
-    <div className="compose-shadow fixed bottom-4 right-4 z-40 flex w-full max-w-xl flex-col overflow-hidden rounded-lg border border-ink-700/30 bg-ink-900">
-      <div className="flex items-center justify-between bg-ink-300 px-4 py-2.5">
-        <span className="text-xs font-semibold uppercase tracking-wider text-ink-950">{title}</span>
-        <button onClick={onClose} className="text-ink-700 hover:text-ink-950">
+    <div className="compose-shadow glass-panel-strong fixed bottom-20 right-4 z-40 flex w-full max-w-xl flex-col overflow-hidden rounded-2xl md:bottom-4">
+      <div className="flex items-center justify-between border-b border-white/8 px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wider text-ink-200">{title}</span>
+        <button onClick={onClose} className="rounded-full p-1 text-ink-500 hover:bg-white/10 hover:text-ink-200">
           <X className="h-4 w-4" />
         </button>
       </div>

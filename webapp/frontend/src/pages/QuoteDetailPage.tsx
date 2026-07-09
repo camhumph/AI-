@@ -156,24 +156,24 @@ export default function QuoteDetailPage() {
         </Card>
       </div>
 
-      <div className="mb-5 flex gap-0 overflow-x-auto border border-ink-700">
-        {[
-          { id: "overview", label: "Overview", icon: Layers },
-          { id: "parts", label: "Parts & Pricing", icon: FileText },
-          { id: "images", label: `Images (${job.images.length})`, icon: ImageIcon },
-          { id: "model", label: `3D (${job.models.length})`, icon: Box },
-          { id: "documents", label: `Docs (${job.documents.length})`, icon: FileText },
-        ].map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id as Tab)}
-            className={`flex items-center gap-2 whitespace-nowrap border-r border-ink-700 px-4 py-3 text-[10px] font-semibold uppercase tracking-widest transition last:border-r-0 ${
-              tab === id ? "bg-ink-100 text-ink-950" : "text-ink-400 hover:text-ink-100"
-            }`}
-          >
-            <Icon className="h-3.5 w-3.5" /> {label}
-          </button>
-        ))}
+      <div className="mb-5 overflow-x-auto">
+        <div className="tab-bar inline-flex min-w-max">
+          {[
+            { id: "overview", label: "Overview", icon: Layers },
+            { id: "parts", label: "Parts & Pricing", icon: FileText },
+            { id: "images", label: `Images (${job.images.length})`, icon: ImageIcon },
+            { id: "model", label: `3D (${job.models.length})`, icon: Box },
+            { id: "documents", label: `Docs (${job.documents.length})`, icon: FileText },
+          ].map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id as Tab)}
+              className={`tab-bar-item ${tab === id ? "tab-bar-item-active" : ""}`}
+            >
+              <Icon className="h-3.5 w-3.5" /> {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === "overview" && (

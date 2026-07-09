@@ -65,7 +65,7 @@ export default function PartsTable({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search parts by name or role..."
-          className="w-full rounded-xl border border-ink-700/60 bg-ink-850/70 py-2.5 pl-9 pr-3 text-sm text-ink-100 placeholder:text-ink-500 focus:border-brand-500/60 focus:outline-none"
+          className="glass-input w-full rounded-full py-2.5 pl-9 pr-3 text-sm text-ink-100 placeholder:text-ink-500"
         />
       </div>
 
@@ -74,7 +74,7 @@ export default function PartsTable({
         const isCollapsed = collapsed[group];
         const groupTotal = rows.reduce((sum, r) => sum + (prices?.[r.index]?.price || 0), 0);
         return (
-          <div key={group} className="overflow-hidden rounded-xl border border-ink-700/60">
+          <div key={group} className="glass-panel overflow-hidden rounded-2xl">
             <button
               onClick={() => setCollapsed((c) => ({ ...c, [group]: !c[group] }))}
               className="flex w-full items-center justify-between bg-ink-800/70 px-4 py-2.5 text-left"

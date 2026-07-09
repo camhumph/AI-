@@ -19,7 +19,7 @@ export default function QuoteProgressModal({
   const currentIdx = phaseOrder.indexOf(status.phase);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-100/40 p-4 backdrop-blur-sm">
+    <div className="overlay-backdrop fixed inset-0 z-50 flex items-center justify-center p-4">
       <Card className="w-full max-w-md p-6">
         <div className="section-label mb-2">Quote in progress</div>
         <p className="text-sm text-ink-300">{status.message || "Running full CMS quote pipeline..."}</p>

@@ -26,6 +26,7 @@ export default function Dashboard() {
         </Link>
       }
     >
+      <div className="horizon-line mb-6" />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <StatCard label="Active Quotes" value={jobs?.length ?? "--"} sub="Registered C-number jobs" />
         <StatCard label="Classified Parts" value={totalParts.toLocaleString()} sub="Across all quotes" />

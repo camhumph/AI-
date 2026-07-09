@@ -1,28 +1,30 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "Inter Variable", "Inter", -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
 
-  --color-ink-950: #e8e8ea;
-  --color-ink-900: #dedee1;
-  --color-ink-850: #d4d4d8;
-  --color-ink-800: #c4c4c9;
-  --color-ink-700: #a8a8b0;
-  --color-ink-600: #7e7e88;
-  --color-ink-500: #5c5c66;
-  --color-ink-400: #3a3a42;
-  --color-ink-300: #242428;
-  --color-ink-200: #141418;
-  --color-ink-100: #0a0a0c;
+  /* Dark SpaceX base — low numbers = deep space */
+  --color-ink-950: #050508;
+  --color-ink-900: #0a0a10;
+  --color-ink-850: #101018;
+  --color-ink-800: #181822;
+  --color-ink-700: #252530;
+  --color-ink-600: #4a4a58;
+  --color-ink-500: #7a7a88;
+  --color-ink-400: #a8a8b4;
+  --color-ink-300: #c8c8d0;
+  --color-ink-200: #e4e4ea;
+  --color-ink-100: #f5f5f7;
 
-  --color-brand-500: #0a0a0c;
-  --color-brand-400: #1a1a1f;
-  --color-brand-600: #000000;
+  --color-brand-500: #0a84ff;
+  --color-brand-400: #409cff;
+  --color-brand-600: #0066cc;
 
-  --color-accent-teal: #0066ff;
-  --color-accent-amber: #c47f00;
-  --color-accent-rose: #c41e3a;
-  --color-accent-green: #0a7c42;
+  --color-accent-teal: #0a84ff;
+  --color-accent-amber: #ff9f0a;
+  --color-accent-rose: #ff453a;
+  --color-accent-green: #30d158;
 }
 
 html, body, #root {
@@ -30,15 +32,32 @@ html, body, #root {
 }
 
 body {
-  background: linear-gradient(180deg, #e4e4e7 0%, #d8d8dc 45%, #ceced3 100%);
-  color: #0a0a0c;
+  background: var(--color-ink-950);
+  color: var(--color-ink-100);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  letter-spacing: 0.015em;
+  letter-spacing: 0.01em;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 90% 70% at 0% -10%, rgba(10, 132, 255, 0.14), transparent 55%),
+    radial-gradient(ellipse 70% 60% at 100% 110%, rgba(255, 255, 255, 0.05), transparent 50%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(10, 132, 255, 0.03), transparent 70%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
 }
 
 h1, h2, h3 {
-  letter-spacing: 0.12em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   font-weight: 600;
 }
@@ -47,45 +66,162 @@ h1, h2, h3 {
   font-variant-numeric: tabular-nums;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #d4d4d8; }
-::-webkit-scrollbar-thumb { background: #a8a8b0; border-radius: 3px; }
+.font-mono, code {
+  font-family: var(--font-mono);
+}
 
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+}
+
+/* iOS liquid glass + SpaceX precision */
 .glass-panel {
-  background: rgba(222, 222, 225, 0.88);
-  border: 1px solid rgba(10, 10, 12, 0.08);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.5) inset, 0 8px 32px rgba(10, 10, 12, 0.08);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45) inset,
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 16px 48px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+}
+
+.glass-panel-strong {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5) inset,
+    0 1px 0 rgba(255, 255, 255, 0.1) inset,
+    0 20px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.glass-input:focus {
+  border-color: rgba(10, 132, 255, 0.5);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.15);
+  outline: none;
 }
 
 .scrollbar-thin { scrollbar-width: thin; }
 
 .section-label {
-  font-size: 0.62rem;
+  font-size: 0.6rem;
   font-weight: 700;
-  letter-spacing: 0.22em;
+  letter-spacing: 0.24em;
   text-transform: uppercase;
-  color: #5c5c66;
+  color: var(--color-ink-500);
 }
 
+/* Inbox — dark glass rows */
 .inbox-row {
-  transition: background 0.12s ease;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
 }
 
 .inbox-row:hover {
-  background: rgba(196, 196, 201, 0.55);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .inbox-row-selected {
-  background: rgba(186, 186, 192, 0.75);
+  background: rgba(10, 132, 255, 0.12);
+  box-shadow: inset 2px 0 0 var(--color-accent-teal);
 }
 
 .inbox-unread .inbox-sender,
 .inbox-unread .inbox-subject {
   font-weight: 600;
-  color: #0a0a0c;
+  color: var(--color-ink-100);
 }
 
 .compose-shadow {
-  box-shadow: 0 12px 48px rgba(10, 10, 12, 0.18);
+  box-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* Subtle grid — SpaceX engineering feel */
+.space-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* Modal / overlay backdrop */
+.overlay-backdrop {
+  background: rgba(5, 5, 8, 0.72);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+/* iOS-style segmented tab bar */
+.tab-bar {
+  display: inline-flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.tab-bar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  padding: 0.625rem 1rem;
+  border-radius: 9999px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-500);
+  transition: all 0.2s ease;
+}
+
+.tab-bar-item:hover {
+  color: var(--color-ink-200);
+}
+
+.tab-bar-item-active {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--color-ink-100);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+    0 0 20px rgba(10, 132, 255, 0.15);
+}
+
+/* Horizon line — launch-pad accent */
+.horizon-line {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(10, 132, 255, 0.35) 20%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(10, 132, 255, 0.35) 80%,
+    transparent
+  );
+}
+
+/* Glow pulse for live indicators */
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.glow-pulse {
+  animation: glow-pulse 2.5s ease-in-out infinite;
 }

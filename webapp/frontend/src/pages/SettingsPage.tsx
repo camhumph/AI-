@@ -346,7 +346,7 @@ function Field({
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full rounded-lg border border-ink-700/60 bg-ink-850 px-3 py-2 text-sm text-ink-100 placeholder:text-ink-500"
+        className="glass-input mt-1 w-full rounded-xl px-3 py-2.5 text-sm text-ink-100 placeholder:text-ink-500"
       />
     </label>
   );
