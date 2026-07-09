@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Save, Mail, Send, FolderCog, CheckCircle2, XCircle, Brain, Play, AlertTriangle } from "lucide-react";
+import { Save, Mail, Send, FolderCog, CheckCircle2, XCircle, Brain, Play, AlertTriangle, Loader2 } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, Spinner } from "../components/ui";
 import { api, type EmailSettings, type TrainingReport } from "../api/client";
@@ -81,14 +81,10 @@ export default function SettingsPage() {
     try {
       const result = await api.runTraining(jobsRoot.trim() || undefined, useQwen, qwenModel, exportXt);
       setTrainingStatus(result);
-      if (result.background) {
-        setTrainingRunning(false);
-      }
+      setTrainingRunning(false);
     } catch (e) {
       setTrainingError(e instanceof Error ? e.message : "Training scan failed");
       setTrainingRunning(false);
-    } finally {
-      if (!useQwen) setTrainingRunning(false);
     }
   };
 
@@ -200,17 +196,50 @@ export default function SettingsPage() {
             />
             Run Qwen deep learning after XT export (slow — uncheck for fast scan only)
           </label>
-          {trainingStatus?.running && (
-            <div className="mb-3 rounded border border-ink-700/30 bg-ink-900/50 px-3 py-2 text-xs text-ink-300">
-              <strong className="text-ink-200">{trainingStatus.phase}</strong>
-              {trainingStatus.current_job && ` · ${trainingStatus.current_job}`}
-              {trainingStatus.job_total ? ` (${trainingStatus.job_index}/${trainingStatus.job_total})` : ""}
-              <div className="mt-1 text-[10px] text-ink-500">{trainingStatus.message}</div>
+          {((trainingStatus?.running) || trainingRunning) && (
+            <div className="glass-panel-strong mb-4 overflow-hidden rounded-2xl p-4">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-200">
+                  <Loader2 className="h-4 w-4 animate-spin text-brand-400" />
+                  {phaseLabel(trainingStatus?.phase)}
+                </div>
+                <div className="font-mono text-[11px] text-ink-500">
+                  {trainingStatus?.job_total
+                    ? `${trainingStatus.job_index ?? 0} / ${trainingStatus.job_total}`
+                    : "…"}
+                </div>
+              </div>
+              <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-white/5">
+                <div
+                  className="h-full rounded-full bg-brand-500 transition-all duration-500"
+                  style={{
+                    width: `${progressPct(trainingStatus?.job_index, trainingStatus?.job_total)}%`,
+                  }}
+                />
+              </div>
+              <div className="text-sm text-ink-100">
+                {trainingStatus?.current_job
+                  ? `Current job: ${trainingStatus.current_job}`
+                  : "Preparing…"}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-ink-500">
+                {trainingStatus?.message || "Starting training scan…"}
+              </div>
+            </div>
+          )}
+          {trainingStatus?.phase === "done" && !trainingStatus?.running && (
+            <div className="mb-3 flex items-center gap-2 rounded-xl border border-accent-green/25 bg-accent-green/10 px-3 py-2 text-xs text-accent-green">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Training complete
             </div>
           )}
           {trainingError && (
             <p className="mt-2 flex items-center gap-2 text-xs text-accent-rose">
               <AlertTriangle className="h-3.5 w-3.5" /> {trainingError}
+            </p>
+          )}
+          {trainingStatus?.error && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-accent-rose">
+              <AlertTriangle className="h-3.5 w-3.5" /> {trainingStatus.error}
             </p>
           )}
           {trainingStatus && (
@@ -384,4 +413,29 @@ function StatusRow({ ok, label }: { ok: boolean; label: string }) {
       <Badge tone={ok ? "success" : "neutral"}>{label}</Badge>
     </div>
   );
+}
+
+function phaseLabel(phase?: string) {
+  switch (phase) {
+    case "starting":
+      return "Starting";
+    case "scan":
+      return "Scanning jobs";
+    case "xt_export":
+      return "SolidWorks XT export";
+    case "qwen":
+      return "Qwen training";
+    case "done":
+      return "Complete";
+    case "error":
+      return "Error";
+    default:
+      return phase ? phase.replace(/_/g, " ") : "Working";
+  }
+}
+
+function progressPct(index?: number, total?: number) {
+  if (!total || total <= 0) return 8;
+  const n = Math.max(0, Math.min(total, index ?? 0));
+  return Math.max(4, Math.round((100 * n) / total));
 }

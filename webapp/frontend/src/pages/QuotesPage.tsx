@@ -124,17 +124,33 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
         <div className="flex items-center justify-between border-b border-ink-700 px-6 py-4">
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-widest text-ink-100">Select Quote Folder</h3>
-            <p className="mt-1 text-xs text-ink-400">Browse to a C-number job folder on this PC</p>
+            <p className="mt-1 text-xs text-ink-400">
+              Browse month folders under <code className="text-ink-300">\\Mycloudex2ultra\mexico\Downloads</code>
+            </p>
           </div>
           <button onClick={onClose} className="text-ink-400 hover:text-ink-100 text-xs uppercase tracking-widest">Close</button>
         </div>
 
         <div className="border-b border-ink-700 px-6 py-3">
-          <div className="flex items-center gap-2 text-xs text-ink-400">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-ink-400">
             <FolderOpen className="h-4 w-4" />
             <span className="truncate font-mono">{browse?.path || "..."}</span>
+            {browse?.roots && browse.roots.length > 0 && (
+              <div className="ml-auto flex flex-wrap gap-1">
+                {browse.roots.slice(0, 3).map((root) => (
+                  <button
+                    key={root}
+                    onClick={() => load(root)}
+                    className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-400 hover:border-white/20 hover:text-ink-200"
+                    title={root}
+                  >
+                    {root.split(/[/\\]/).filter(Boolean).slice(-2).join("\\") || root}
+                  </button>
+                ))}
+              </div>
+            )}
             {browse?.parent && (
-              <button onClick={() => load(browse.parent!)} className="ml-auto flex items-center gap-1 text-ink-300 hover:text-ink-100">
+              <button onClick={() => load(browse.parent!)} className="flex items-center gap-1 text-ink-300 hover:text-ink-100">
                 <ChevronUp className="h-3.5 w-3.5" /> Up
               </button>
             )}

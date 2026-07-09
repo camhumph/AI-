@@ -232,6 +232,7 @@ export interface TrainingReport {
   job_index?: number;
   job_total?: number;
   message?: string;
+  error?: string;
   background?: boolean;
   started?: boolean;
   results?: TrainingJobResult[];

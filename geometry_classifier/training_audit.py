@@ -51,21 +51,35 @@ from geometry_classifier.qwen_classify_xt_csv import (  # noqa: E402
 C_NUMBER_RE = re.compile(r"\b(C\d{4,6})\b", re.I)
 JOB_NUMBER_RE = re.compile(r"\b(\d{6,8})\b")
 
-BMS_MARKERS = (
+# Folder-name prefixes that mean STANDARD mold base (customer jobs).
+STANDARD_FOLDER_PREFIXES = (
+    "dynacast-",
+    "industrialmold-",
+    "itwmedical-",
+    "itw-",
+    "pcs-",
+    "dme-",
+)
+
+# Folder-name markers that mean BMS / pot-block (macro BOM path).
+BMS_FOLDER_MARKERS = (
+    "bms-",
+    "pot-block",
+    "potblock",
+    "pot_block",
+)
+
+# File-level hints only used when folder name is ambiguous.
+BMS_FILE_MARKERS = (
     "moldbase",
     "mold base",
     "mold-base",
     "pot block",
     "pot-block",
     "potblock",
-    "bms-",
-    "-bom",
-    "_bom",
-    "bom pricing",
-    "bom.pdf",
 )
 
-STANDARD_MARKERS = (
+STANDARD_FILE_MARKERS = (
     "a-plate",
     "a_plate",
     "b-plate",
@@ -76,7 +90,6 @@ STANDARD_MARKERS = (
     "ej-backup",
     "ldr-pin",
     "latch-lock",
-    "dynacast-",
 )
 
 SUGGESTION_TEMPLATES = {
@@ -121,7 +134,21 @@ def extract_job_id(folder: Path) -> str:
 
 
 def detect_base_type(folder: Path) -> tuple[str, list[str]]:
-    """Return ('bms'|'standard'|'unknown', list of reasons)."""
+    """Return ('bms'|'standard'|'unknown', list of reasons).
+
+    Folder name wins: BMS-... = BMS; Dynacast-/IndustrialMold-/ITW... = standard.
+    Generic BOM/moldbase files alone must NOT force BMS (standard jobs often have them).
+    """
+    folder_low = folder.name.lower().replace("_", "-")
+
+    # 1) Explicit BMS folder name (e.g. BMS-863700102-C18608)
+    if any(m in folder_low for m in BMS_FOLDER_MARKERS) or folder_low.startswith("bms"):
+        return "bms", [f"folder name: {folder.name}"]
+
+    # 2) Explicit customer / standard folder name
+    if any(folder_low.startswith(p) for p in STANDARD_FOLDER_PREFIXES):
+        return "standard", [f"folder name: {folder.name}"]
+
     signals_bms: list[str] = []
     signals_std: list[str] = []
 
@@ -129,29 +156,32 @@ def detect_base_type(folder: Path) -> tuple[str, list[str]]:
         if not path.is_file():
             continue
         low = path.name.lower()
-        if any(m in low for m in BMS_MARKERS):
+        low_dash = low.replace("_", "-")
+        if any(m in low for m in BMS_FILE_MARKERS):
             signals_bms.append(path.name)
-        if low.endswith((".sldasm", ".sldprt")) and "mold" in low:
-            signals_bms.append(path.name)
-        if any(m in low.replace("_", "-") for m in STANDARD_MARKERS):
+        if any(m in low_dash for m in STANDARD_FILE_MARKERS):
             signals_std.append(path.name)
 
-    # BASE subfolder with only part files often indicates BMS pot-block assembly
-    base_dir = folder / "BASE"
-    if base_dir.is_dir():
-        children = list(base_dir.iterdir())
-        if children and not train_from_quote_sheets.find_xt_csv(folder):
-            signals_bms.append("BASE/ subfolder without XT export (typical BMS layout)")
+    # Steel / quote sheet without BMS folder name → treat as standard for training
+    has_steel = any(
+        ("steel" in p.name.lower() or "quote" in p.name.lower())
+        and p.suffix.lower() in (".xls", ".xlsx", ".xlsm")
+        for p in folder.iterdir()
+        if p.is_file()
+    )
+    if has_steel and not signals_bms:
+        return "standard", ["steel/quote sheet present"] + signals_std[:6]
+    if has_steel and signals_std:
+        return "standard", ["steel/quote sheet + standard tokens"] + signals_std[:6]
 
-    if signals_bms and not signals_std:
-        return "bms", signals_bms[:8]
     if signals_std and not signals_bms:
         return "standard", signals_std[:8]
+    if signals_bms and not signals_std:
+        return "bms", signals_bms[:8]
     if signals_bms and signals_std:
-        # Steel sheet + BOM is common on finished BMS jobs — BOM wins for macro path
-        if any("bom" in s.lower() or "moldbase" in s.lower() for s in signals_bms):
-            return "bms", signals_bms[:8] + ["(also has standard-like files)"]
-        return "standard", signals_std[:8] + ["(also has BMS-like files)"]
+        return "standard", signals_std[:8] + ["(ambiguous files — default standard)"]
+    if has_steel:
+        return "standard", ["steel/quote sheet present"]
     return "unknown", []
 
 
@@ -476,21 +506,20 @@ def run_full_audit(
     qwen_model: str = "qwen3.5:9b",
     export_xt: bool = True,
 ) -> dict:
-    """Scan training folder; optionally run Qwen per job in background (slow)."""
-    if use_qwen:
-        start_background_audit(jobs_root, manifest_path, qwen_model, export_xt=export_xt)
-        return {
-            "started": True,
-            "background": True,
-            "use_qwen": True,
-            "qwen_model": qwen_model,
-            "export_xt": export_xt,
-            "message": "Training with Qwen started in background. Keep this PC awake; poll status for progress.",
-            **get_progress(),
-        }
-    return _run_audit_worker(
-        jobs_root, manifest_path, use_qwen=False, qwen_model=qwen_model, export_xt=export_xt
+    """Scan training folder. Always runs in background so the UI can show live status
+    (XT export and Qwen both take minutes per job)."""
+    start_background_audit(
+        jobs_root, manifest_path, qwen_model, export_xt=export_xt, use_qwen=use_qwen
     )
+    return {
+        "started": True,
+        "background": True,
+        "use_qwen": use_qwen,
+        "qwen_model": qwen_model if use_qwen else "",
+        "export_xt": export_xt,
+        "message": "Training started. Watch the status bar for current task.",
+        **get_progress(),
+    }
 
 
 def start_background_audit(
@@ -498,6 +527,7 @@ def start_background_audit(
     manifest_path: str | None,
     qwen_model: str = "qwen3.5:9b",
     export_xt: bool = True,
+    use_qwen: bool = True,
 ) -> None:
     if get_progress().get("running"):
         raise RuntimeError("Training already running")
@@ -505,9 +535,9 @@ def start_background_audit(
     _write_progress(
         running=True,
         phase="starting",
-        message="Starting training with Qwen...",
-        use_qwen=True,
-        qwen_model=qwen_model,
+        message="Starting training scan...",
+        use_qwen=use_qwen,
+        qwen_model=qwen_model if use_qwen else "",
         export_xt=export_xt,
         error="",
         job_index=0,
@@ -518,7 +548,7 @@ def start_background_audit(
     def _thread():
         try:
             _run_audit_worker(
-                jobs_root, manifest_path, use_qwen=True, qwen_model=qwen_model, export_xt=export_xt
+                jobs_root, manifest_path, use_qwen=use_qwen, qwen_model=qwen_model, export_xt=export_xt
             )
         except Exception as exc:
             _write_progress(running=False, phase="error", error=str(exc), message=str(exc))

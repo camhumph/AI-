@@ -17,8 +17,9 @@ DATA_DIR = Path(os.environ.get("CMS_DATA_DIR", BACKEND_DIR / "data"))
 JOBS_ROOT = Path(os.environ.get("CMS_JOBS_ROOT", DATA_DIR / "jobs"))
 
 # Folders to browse when picking a quote job (C-number folders on the shop PC).
+# Default: network Downloads where month folders / job packages land.
 WORKSPACE_ROOT = Path(
-    os.environ.get("CMS_WORKSPACE_ROOT", r"C:\CMS_Local_Workspace")
+    os.environ.get("CMS_WORKSPACE_ROOT", r"\\Mycloudex2ultra\mexico\Downloads")
 )
 # Additional roots scanned for existing quote folders (network drive, month folders).
 WORKSPACE_EXTRA_ROOTS = [
