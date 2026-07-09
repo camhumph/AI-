@@ -289,7 +289,10 @@ Private gIdxIDP As Long
 Private gIdxODP As Long
 Private Const PLATE_MIN_THICKNESS As Double = 0.5    ' below this = insulation/shim
 Private Const PLATE_MIN_FOOTPRINT As Double = 20#    ' W*L below this = hardware
-Private Const POT_MAX_ASPECT As Double = 1.7         ' L/W <= this => pot (blocky); else holder
+Private Const POT_MAX_ASPECT As Double = 1.7         ' L/W <= this => pot candidate (blocky)
+Private Const POT_MIN_THICKNESS As Double = 3#       ' pots are thick blocks, not mold plates
+Private Const POT_MAX_FOOTPRINT_FRAC As Double = 0.55 ' pots are clearly smaller than the mold footprint
+Private Const POT_MIN_CUBE_RATIO As Double = 0.35    ' min(T,W,L)/max(T,W,L) — pots are chunky, not flat
 Private Const CLAMP_THIN_RATIO As Double = 0.25      ' T <= ratio*L => clamp/smed plate
 Private Const ASSIGN_ID_AS_TOP As Boolean = True     ' higher Z (or larger) = ID/top; flip if reversed
 
@@ -5986,9 +5989,10 @@ End Function
 ' Resolve a plate's finished dims: try CAD bounding-box (by name key) first,
 ' then fall back to the BOM row (by standard name). Returns True if found.
 ' Identify the six pot-block plates directly from CAD geometry:
-'   - pots   = square cross-section (|W - T| small)
 '   - clamps = thin relative to length (TCP / BCP / SMED)
-'   - holders = the remaining thick plates
+'   - pots   = thick, chunky, clearly SMALLER than the mold footprint
+'             (never full-size A/B plates — those are flat + full footprint)
+'   - holders = the remaining thick elongated plates
 ' Within each pair the higher one (Z, then volume) is the ID/top side.
 Private Sub ClassifyPotBlockPlatesFromCad()
     gIdxTCP = 0: gIdxBCP = 0: gIdxIDH = 0: gIdxODH = 0: gIdxIDP = 0: gIdxODP = 0
@@ -5997,17 +6001,25 @@ Private Sub ClassifyPotBlockPlatesFromCad()
     Dim ncl As Long, nho As Long, npo As Long
     ReDim cl(1 To PartCount): ReDim ho(1 To PartCount): ReDim po(1 To PartCount)
     ncl = 0: nho = 0: npo = 0
-    Dim i As Long, t As Double, w As Double, l As Double
+
+    Dim maxFp As Double, i As Long, t As Double, w As Double, l As Double, fp As Double
+    maxFp = 0#
+    For i = 1 To PartCount
+        fp = parts(i).Width * parts(i).Length
+        If fp > maxFp Then maxFp = fp
+    Next i
+
     For i = 1 To PartCount
         If IsPyropelPartIndex(i) Then GoTo NextPart
         t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
-        If t >= PLATE_MIN_THICKNESS And (w * l) >= PLATE_MIN_FOOTPRINT Then
+        fp = w * l
+        If t >= PLATE_MIN_THICKNESS And fp >= PLATE_MIN_FOOTPRINT Then
             If t <= CLAMP_THIN_RATIO * l Then
                 ncl = ncl + 1: cl(ncl) = i                       ' thin big plate = clamp / SMED
-            ElseIf w > 0 And (l / w) <= POT_MAX_ASPECT Then
-                npo = npo + 1: po(npo) = i                       ' blocky (L ~= W) = pot
+            ElseIf IsPotBlockGeometry(t, w, l, maxFp) Then
+                npo = npo + 1: po(npo) = i                       ' thick chunky smaller block = pot
             Else
-                nho = nho + 1: ho(nho) = i                       ' elongated (L >> W) = holder
+                nho = nho + 1: ho(nho) = i                       ' elongated / remaining = holder
             End If
         End If
 NextPart:
@@ -6019,6 +6031,33 @@ NextPart:
             " IDholder=" & gIdxIDH & " ODholder=" & gIdxODH & _
             " IDpot=" & gIdxIDP & " ODpot=" & gIdxODP
 End Sub
+
+' Pots are easy to tell from mold plates:
+'   thick (>= 3"), blocky aspect, chunky (not flat), footprint << mold base.
+Private Function IsPotBlockGeometry(ByVal t As Double, ByVal w As Double, ByVal l As Double, _
+                                    ByVal maxFp As Double) As Boolean
+    IsPotBlockGeometry = False
+    If t < POT_MIN_THICKNESS Then Exit Function
+    If w <= 0# Or l <= 0# Then Exit Function
+    If (l / w) > POT_MAX_ASPECT Then Exit Function
+
+    Dim fp As Double, dimMax As Double, dimMin As Double
+    fp = w * l
+    If maxFp > 0# Then
+        If fp >= POT_MAX_FOOTPRINT_FRAC * maxFp Then Exit Function
+    End If
+
+    dimMax = t
+    If w > dimMax Then dimMax = w
+    If l > dimMax Then dimMax = l
+    dimMin = t
+    If w < dimMin Then dimMin = w
+    If l < dimMin Then dimMin = l
+    If dimMax <= 0# Then Exit Function
+    If (dimMin / dimMax) < POT_MIN_CUBE_RATIO Then Exit Function
+
+    IsPotBlockGeometry = True
+End Function
 
 Private Sub AssignPairTopBottom(ByRef lst() As Long, ByVal n As Long, ByRef topIdx As Long, ByRef botIdx As Long)
     topIdx = 0: botIdx = 0
@@ -6630,9 +6669,9 @@ Private Function CountFullFootprintPlates() As Long
 End Function
 
 ' Detect whether this job is a standard base (vs pot/holder block).
-' Order matters: explicit BMS markers win, then BOM pot-block names, then
-' standard BOM/geometry. Never use ClassifyPotBlockPlatesFromCad gIdx* alone —
-' that subroutine labels normal A/B plates as "pots" and rails as "holders".
+' Shop rule: most BMS jobs have "BMS" (or Tempcraft/Howmet/pot-block) in the
+' folder or CAD file name — trust that first. Without a BMS name signal,
+' prefer STANDARD when geometry/BOM look like a multi-plate mold stack.
 Private Function DetectBaseTypeIsStandard() As Boolean
     If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
     If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
@@ -6640,21 +6679,21 @@ Private Function DetectBaseTypeIsStandard() As Boolean
     Dim nFull As Long
     nFull = CountFullFootprintPlates()
 
-    ' Explicit BMS / Tempcraft folder markers always keep the pot-block flow.
+    ' 1) BMS / Tempcraft / pot-block in folder or CAD file name — strongest signal.
     If LooksLikeBmsJobFromName() Then
         DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from job/folder/customer name (nFull=" & nFull & ")"
+        LogLine "Base type forced POT/BMS from job/folder/CAD file name (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
+    ' 2) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
     If LooksLikeBmsJobFromBom() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' BOM that names several standard structural plates -> standard base.
+    ' 3) BOM that names several standard structural plates -> standard base.
     Dim i As Long, nStd As Long
     nStd = 0
     For i = 1 To BomCount
@@ -6666,33 +6705,42 @@ Private Function DetectBaseTypeIsStandard() As Boolean
         Exit Function
     End If
 
-    ' Geometry: 3+ full-footprint plates = standard mold stack.
-    ' Pot-blocks only have ~2 clamp plates plus smaller holders/pots.
+    ' 4) Geometry: 3+ full-footprint plates = standard mold stack.
     If nFull >= 3 Then
         DetectBaseTypeIsStandard = True
         LogLine "Base type STANDARD from geometry (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' Geometry-only pot-block (generic asm_objects, no BMS in folder / BOM).
-    ' Only when the stack is NOT a multi-plate standard base.
+    ' 5) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
+    '    Requires distinguishable pots (thick + small footprint), not A/B plates.
     If LooksLikeBmsJobFromGeometry() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    DetectBaseTypeIsStandard = False
-    LogLine "Base type default POT/BMS (insufficient standard signals; nFull=" & nFull & ")"
+    ' 6) No BMS name and no pot-block geometry -> default STANDARD (Dynacast/DME).
+    DetectBaseTypeIsStandard = True
+    LogLine "Base type default STANDARD (no BMS name / pot-block signal; nFull=" & nFull & ")"
 End Function
 
-' Folder / customer / job-name BMS markers only (no geometry, no gIdx*).
+' Folder / customer / CAD-file BMS markers. Most BMS jobs have "BMS" in the name.
 Private Function LooksLikeBmsJobFromName() As Boolean
     LooksLikeBmsJobFromName = False
     Dim blob As String
     blob = UCase$(CurrentJobNumber & "|" & CustomerJobNumber & "|" & CustomerPrefix & "|" & _
                   CustomerDisplayName & "|" & gExactJobFolderName & "|" & NetworkJobFolder & "|" & _
                   CurrentJobFolder & "|" & gHandoffAttachDir & "|" & JobBaseName)
+
+    ' Also include the open CAD file path/title — BMS is often in the .sldasm name.
+    On Error Resume Next
+    If Not swModel Is Nothing Then
+        blob = blob & "|" & UCase$(swModel.GetTitle)
+        blob = blob & "|" & UCase$(swModel.GetPathName)
+    End If
+    On Error GoTo 0
+
     If InStr(blob, "BMS") > 0 Then LooksLikeBmsJobFromName = True: Exit Function
     If InStr(blob, "POTBLOCK") > 0 Or InStr(blob, "POT-BLOCK") > 0 Or InStr(blob, "POT_BLOCK") > 0 Then
         LooksLikeBmsJobFromName = True: Exit Function
@@ -6733,9 +6781,9 @@ Private Function LooksLikeBmsJobFromBom() As Boolean
     Next i
 End Function
 
-' Geometry-only pot-block: ~2 thin full clamps + >=2 thick non-full holders + sheets/pots.
-' NEVER use gIdxIDH/ODH/IDP/ODP — ClassifyPotBlockPlatesFromCad runs on every job
-' and mislabels standard A/B plates as pots and rails as holders.
+' Geometry-only pot-block: ~2 thin full clamps + >=2 thick non-full holders
+' + distinguishable pots (thick, chunky, footprint << mold) and/or 0.25" sheets.
+' NEVER use gIdxIDH/ODH/IDP/ODP alone — those can be wrong on standard molds.
 Private Function LooksLikeBmsJobFromGeometry() As Boolean
     LooksLikeBmsJobFromGeometry = False
     If PartCount < 6 Then Exit Function
@@ -6761,12 +6809,13 @@ Private Function LooksLikeBmsJobFromGeometry() As Boolean
             nThickInner = nThickInner + 1
         End If
         If Abs(parts(i2).Thickness - 0.25) <= 0.06 Then nThinSheet = nThinSheet + 1
-        If parts(i2).Thickness >= 3# And parts(i2).Width >= 3# And parts(i2).Length >= 3# And fp < 0.55 * maxFp Then
+        If IsPotBlockGeometry(parts(i2).Thickness, parts(i2).Width, parts(i2).Length, maxFp) Then
             nPotLike = nPotLike + 1
         End If
     Next i2
 
-    If nFullThin <= 2 And nThickInner >= 2 And (nThinSheet >= 2 Or nPotLike >= 2) Then
+    ' Prefer real pots; insulation sheets alone are not enough without holders.
+    If nFullThin <= 2 And nThickInner >= 2 And (nPotLike >= 2 Or (nThinSheet >= 2 And nPotLike >= 1)) Then
         LooksLikeBmsJobFromGeometry = True
     End If
 End Function

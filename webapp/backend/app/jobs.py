@@ -332,11 +332,11 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
 
 
 def _folder_looks_like_bms(folder: Path) -> bool:
-    """Detect Tempcraft / BMS pot-block jobs that must never get A/B/rail AI roles.
+    """Detect BMS / Tempcraft pot-block jobs primarily from folder/file *names*.
 
-    Only use folder/file *names* — do not scan arbitrary CSV/log text for
-    'ID HOLDER' / 'SMED' tokens (those can appear in unrelated notes and
-    falsely tag standard Dynacast/DME jobs as BMS).
+    Shop rule: most BMS jobs have "BMS" (or Tempcraft/Howmet/pot-block) in the
+    folder or CAD filename. Do not scan arbitrary CSV/log text for SMED/holder
+    tokens — that falsely tags standard Dynacast/DME jobs.
     """
     blob = folder.name.lower()
     if any(m in blob for m in ("bms", "tempcraft", "howmet", "potblock", "pot-block", "pot_block")):
@@ -344,22 +344,29 @@ def _folder_looks_like_bms(folder: Path) -> bool:
     # Whole-token HTE customer prefix in folder name.
     if re.search(r"(^|[^a-z0-9])hte([^a-z0-9]|$)", blob):
         return True
+
+    bms_name_tokens = (
+        "bms",
+        "tempcraft",
+        "howmet",
+        "potblock",
+        "pot-block",
+        "pot_block",
+        "rfq_mb_asm",
+        "mb_asm",
+    )
+    cad_exts = {".sldasm", ".sldprt", ".x_t", ".x_b", ".step", ".stp", ".iges", ".igs"}
     try:
         for path in folder.rglob("*"):
             if not path.is_file():
                 continue
             low = path.name.lower()
-            if any(
-                m in low
-                for m in (
-                    "rfq_mb_asm",
-                    "mb_asm",
-                    "smed",
-                    "holder block",
-                    "pot block",
-                    "id holder",
-                    "od holder",
-                )
+            # Strongest: BMS / Tempcraft / pot-block in any file name (esp. CAD).
+            if any(m in low for m in bms_name_tokens):
+                return True
+            # CAD files named with holder/pot block are also BMS.
+            if path.suffix.lower() in cad_exts and any(
+                m in low for m in ("holder block", "pot block", "id holder", "od holder", "smed")
             ):
                 return True
             # Only trust the macro's own base-type log line — not free-text BOM dumps.
@@ -374,6 +381,8 @@ def _folder_looks_like_bms(folder: Path) -> bool:
                 if "BASE TYPE: POT" in text or "BASE TYPE FORCED POT/BMS" in text:
                     return True
                 if "BASE TYPE: STANDARD" in text or "BASE TYPE STANDARD FROM" in text:
+                    return False
+                if "BASE TYPE DEFAULT STANDARD" in text:
                     return False
     except Exception:
         pass
@@ -419,10 +428,32 @@ def _hoist_macro_deliverables(src: Path, job_dir: Path) -> dict:
     return copied
 
 
+def _is_pot_block_dims(t: float, w: float, l: float, max_fp: float) -> bool:
+    """Pots are thick, chunky, and clearly smaller than the mold footprint.
+
+    Full-size A/B plates fail this (flat + large footprint).
+    """
+    if t < 3.0 or w <= 0 or l <= 0:
+        return False
+    if (l / w) > 1.7:
+        return False
+    fp = w * l
+    if max_fp > 0 and fp >= 0.55 * max_fp:
+        return False
+    dim_max = max(t, w, l)
+    dim_min = min(t, w, l)
+    if dim_max <= 0:
+        return False
+    if (dim_min / dim_max) < 0.35:
+        return False
+    return True
+
+
 def _xt_looks_like_pot_block(job_dir: Path) -> bool:
-    """Geometry heuristic: 2 thin full clamps + thick non-full holders + 0.25\" sheets.
+    """Geometry heuristic: 2 thin full clamps + thick holders + distinguishable pots.
 
     Must NEVER fire on a standard mold stack (5+ full-footprint plates).
+    Prefer real pot cubes over insulation sheets alone.
     """
     xt = job_dir / "XT_Export_CAD_Dimensions.csv"
     if not xt.exists():
@@ -475,13 +506,12 @@ def _xt_looks_like_pot_block(job_dir: Path) -> bool:
         if p[0] >= 3.0 and p[3] < max_fp * 0.85 and p[3] >= max_fp * 0.15
     ]
     thin_sheets = [p for p in parsed if abs(p[0] - 0.25) <= 0.06]
-    pot_like = [
-        p for p in parsed
-        if p[0] >= 3.0 and p[1] >= 3.0 and p[2] >= 3.0 and p[3] < max_fp * 0.55
-    ]
-    # Pot-block signature: ~2 clamp plates, >=2 thick holders, insulation sheets,
-    # and usually pot cubes — never a 5+ full-footprint standard stack.
-    if len(full_thin) <= 2 and len(thick_inner) >= 2 and (len(thin_sheets) >= 2 or len(pot_like) >= 2):
+    pot_like = [p for p in parsed if _is_pot_block_dims(p[0], p[1], p[2], max_fp)]
+
+    # Prefer real pots; sheets alone without pots are not enough.
+    if len(full_thin) <= 2 and len(thick_inner) >= 2 and (
+        len(pot_like) >= 2 or (len(thin_sheets) >= 2 and len(pot_like) >= 1)
+    ):
         return True
     return False
 

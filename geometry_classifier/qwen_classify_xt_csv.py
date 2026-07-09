@@ -324,8 +324,9 @@ def looks_like_pot_block_geometry(rows) -> bool:
     """Detect BMS / Tempcraft pot-block stacks that must NOT get A/B/rail roles.
 
     Signature: ~2 thin full-footprint clamps, >=2 thick non-full holders,
-    plus 0.25\" insulation sheets and/or pot-like cubes. Generic asm_objects
-    names (e.g. 822200009) still match this pattern.
+    plus distinguishable pot cubes (thick, chunky, footprint << mold) and/or
+    0.25\" insulation with at least one pot. Generic asm_objects names still match.
+    Full-size A/B plates are never pots.
     """
     if not rows or len(rows) < 6:
         return False
@@ -341,10 +342,21 @@ def looks_like_pot_block_geometry(rows) -> bool:
         if r["t"] >= 3.0 and (r["w"] * r["l"]) < max_fp * 0.85 and (r["w"] * r["l"]) >= max_fp * 0.15
     ]
     thin_sheets = [r for r in rows if abs(r["t"] - 0.25) <= 0.06]
-    pot_like = [
-        r for r in rows
-        if r["t"] >= 3.0 and r["w"] >= 3.0 and r["l"] >= 3.0 and (r["w"] * r["l"]) < max_fp * 0.55
-    ]
+
+    def _is_pot(r) -> bool:
+        t, w, l = r["t"], r["w"], r["l"]
+        if t < 3.0 or w <= 0 or l <= 0:
+            return False
+        if (l / w) > 1.7:
+            return False
+        fp = w * l
+        if fp >= 0.55 * max_fp:
+            return False
+        dim_max = max(t, w, l)
+        dim_min = min(t, w, l)
+        return dim_max > 0 and (dim_min / dim_max) >= 0.35
+
+    pot_like = [r for r in rows if _is_pot(r)]
     full_plates = [
         r for r in rows
         if r["w"] >= max_w * 0.85 and r["l"] >= max_l * 0.85 and r["t"] >= 0.5
@@ -354,7 +366,7 @@ def looks_like_pot_block_geometry(rows) -> bool:
     return (
         len(full_thin) <= 2
         and len(thick_inner) >= 2
-        and (len(thin_sheets) >= 2 or len(pot_like) >= 2)
+        and (len(pot_like) >= 2 or (len(thin_sheets) >= 2 and len(pot_like) >= 1))
     )
 
 

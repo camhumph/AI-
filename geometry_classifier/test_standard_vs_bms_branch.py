@@ -76,6 +76,33 @@ def test_pot_block_geometry_still_detected():
     assert jobs._xt_looks_like_pot_block(job) is True
 
 
+def test_folder_bms_from_cad_filename():
+    """BMS in the CAD filename is enough even if the folder is a plain C-number."""
+    from webapp.backend.app import jobs
+
+    root = Path(tempfile.mkdtemp(prefix="cms_bms_cad_name_"))
+    job = root / "C18620"
+    job.mkdir()
+    (job / "BMS-863700102-RFQ.sldasm").write_bytes(b"x")
+    assert jobs._folder_looks_like_bms(job) is True
+
+    std = root / "C18080"
+    std.mkdir()
+    (std / "Dynacast_Mold_Base.sldasm").write_bytes(b"x")
+    assert jobs._folder_looks_like_bms(std) is False
+
+
+def test_a_plate_not_counted_as_pot():
+    """Full-footprint A/B plates must fail the pot geometry check."""
+    from webapp.backend.app.jobs import _is_pot_block_dims
+
+    # Typical A plate: 2.375 x 15.875 x 23.75 on a 15.875x23.75 mold
+    max_fp = 15.875 * 23.75
+    assert _is_pot_block_dims(2.375, 15.875, 23.75, max_fp) is False
+    # Real pot: ~5 x 6 x 7 on same mold
+    assert _is_pot_block_dims(5.0, 6.0, 6.845, max_fp) is True
+
+
 def test_folder_bms_not_from_random_csv_text():
     """Standard Dynacast folder must not become BMS just because a CSV mentions SMED."""
     from webapp.backend.app import jobs
@@ -202,6 +229,8 @@ if __name__ == "__main__":
     test_standard_stack_not_pot_block()
     test_pot_block_geometry_still_detected()
     test_folder_bms_not_from_random_csv_text()
+    test_folder_bms_from_cad_filename()
+    test_a_plate_not_counted_as_pot()
     test_folder_bms_from_macro_log_pot_line()
     test_poll_completion_accepts_done_log()
     test_classifier_standard_stack_not_bms_guard()
