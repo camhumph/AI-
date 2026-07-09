@@ -210,7 +210,10 @@ def extract_json(text):
     # those first, then extract the first JSON object.
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
     text = text.replace("\b", "")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I)
+    text = re.sub(r"`[^`]*`", "", text, flags=re.S)
+    text = re.sub(r"(?i)done thinking\.\s*", "", text)
     text = re.sub(r"^Thinking\.\.\..*?(?=\{)", "", text, flags=re.S)
     text = text.strip()
     if text.startswith("{"):
@@ -238,6 +241,19 @@ def round_bar_diameter(row):
 
 def name_key(row):
     return str(row.get("name", "")).upper().replace("\\", "/")
+
+
+def _shop_token_locked(roles: dict, idx: str) -> bool:
+    """True when a strong shop-name token already assigned this index."""
+    if idx not in roles:
+        return False
+    _role, conf, reason, _quote = roles[idx]
+    return conf == "HIGH" and "shop token" in str(reason).lower()
+
+
+def _set_role_if_unlocked(roles: dict, idx: str, role: str, conf: str, reason: str, quote: bool) -> None:
+    if not _shop_token_locked(roles, idx):
+        roles[idx] = (role, conf, reason, quote)
 
 
 LATCH_LOCK_TOKENS = (
@@ -294,6 +310,8 @@ def apply_strong_shop_name_hints(rows, roles):
             roles[idx] = ("bottom_ejector_plate", "HIGH", "Strong shop token EJ-BACKUP-PLATE; thicker/lower backing plate in ejector stack. CMS naming: Bottom Ejector Plate (never Ejector Retainer Plate).", True)
         elif "EJ-RET-PLATE" in name or "EJ_RET_PLATE" in name:
             roles[idx] = ("ejector_plate", "HIGH", "Strong shop token EJ-RET-PLATE; thinner plate in ejector stack. CMS naming: Ejector Plate.", True)
+        elif ("EJECTOR PLATE" in name or "EJECTOR-PLATE" in name) and "BACKUP" not in name:
+            roles[idx] = ("ejector_plate", "HIGH", "Strong shop token EJECTOR PLATE in component name.", True)
         elif "RAIL-" in name or "_RAIL" in name or "/RAIL" in name:
             roles[idx] = ("rail", "HIGH", "Strong shop token RAIL; long side rail/support block.", True)
         elif "LDR-PIN" in name or "LDR_PIN" in name:
@@ -352,12 +370,14 @@ def classify_geometry(rows):
                 )
     else:
         for row in full_plates:
-            roles[str(row["i"])] = (
-                "full_footprint_plate",
-                "MEDIUM",
-                "Full-footprint plate, but fewer than 5 full plates were found so standard stack role was not forced.",
-                True,
-            )
+            idx = str(row["i"])
+            if idx not in roles:
+                roles[idx] = (
+                    "full_footprint_plate",
+                    "MEDIUM",
+                    "Full-footprint plate, but fewer than 5 full plates were found so standard stack role was not forced.",
+                    True,
+                )
 
     if len(full_plates) == 2:
         axes = {
@@ -367,13 +387,17 @@ def classify_geometry(rows):
         }
         die_axis = max(axes, key=axes.get)
         hi_full, lo_full = sorted(full_plates, key=lambda r: r[die_axis], reverse=True)
-        roles[str(lo_full["i"])] = (
+        _set_role_if_unlocked(
+            roles,
+            str(lo_full["i"]),
             "bottom_clamp_plate",
             "HIGH",
             "Two-half mold pattern: lower full-footprint plate along stack axis is BCP.",
             True,
         )
-        roles[str(hi_full["i"])] = (
+        _set_role_if_unlocked(
+            roles,
+            str(hi_full["i"]),
             "top_clamp_plate",
             "MEDIUM",
             "Two-half mold pattern: opposite full-footprint clamp plate.",
@@ -383,6 +407,7 @@ def classify_geometry(rows):
         non_full_blocks = [
             r for r in rows
             if str(r["i"]) not in roles
+            and not _shop_token_locked(roles, str(r["i"]))
             and r["t"] >= 3.0
             and r["w"] >= max_w * 0.30
             and r["l"] >= max_l * 0.30
@@ -390,13 +415,17 @@ def classify_geometry(rows):
         non_full_blocks.sort(key=lambda r: r["v"], reverse=True)
         if len(non_full_blocks) >= 2:
             high_inner, low_inner = sorted(non_full_blocks[:2], key=lambda r: r[die_axis], reverse=True)
-            roles[str(high_inner["i"])] = (
+            _set_role_if_unlocked(
+                roles,
+                str(high_inner["i"]),
                 "a_plate",
                 "MEDIUM",
                 "Two-half mold pattern: larger inner block on high side of stack axis.",
                 True,
             )
-            roles[str(low_inner["i"])] = (
+            _set_role_if_unlocked(
+                roles,
+                str(low_inner["i"]),
                 "b_plate",
                 "MEDIUM",
                 "Two-half mold pattern: matching inner block on low side of stack axis.",

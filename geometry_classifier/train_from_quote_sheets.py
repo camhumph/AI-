@@ -358,6 +358,8 @@ def match_components(xt_rows: list[dict], plates: list[dict]) -> list[dict]:
             ("CLAMP-PLATE", "bottom_clamp_plate"),
             ("EJ-BACKUP-PLATE", "bottom_ejector_plate"),
             ("EJ-RET-PLATE", "ejector_plate"),
+            ("EJECTOR PLATE", "ejector_plate"),
+            ("EJECTOR-PLATE", "ejector_plate"),
             ("LDR-PIN", "leader_pin"),
             ("LATCH-LOCK", "latch_lock"),
             ("RAIL", "rail"),

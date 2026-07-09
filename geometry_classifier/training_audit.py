@@ -1111,6 +1111,8 @@ def _run_audit_worker(
             entry["qwen_elapsed_sec"] = qwen_out.get("elapsed_sec", 0)
             if qwen_out.get("error"):
                 entry["qwen_error"] = qwen_out["error"]
+            if qwen_out.get("raw_output"):
+                entry["qwen_raw_output"] = qwen_out["raw_output"]
             if qwen_out.get("cancelled"):
                 results.append(entry)
                 summary = _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
@@ -1122,12 +1124,21 @@ def _run_audit_worker(
             qwen_json_path.write_text(json.dumps(qwen_out.get("data", {}), indent=2), encoding="utf-8")
             entry["qwen_output"] = str(qwen_json_path)
 
-            if proc.get("output") and Path(proc["output"]).exists():
+            if proc.get("output") and Path(proc["output"]).exists() and qwen_out.get("qwen_ran"):
                 q_audit = audit_qwen_against_correct_me(
                     Path(proc["output"]), qwen_out.get("data", {}), Path(xt_path)
                 )
                 entry["qwen_audit"] = q_audit
                 entry["qwen_accuracy_pct"] = q_audit.get("accuracy_pct", 0)
+            elif qwen_out.get("qwen_ran") is False:
+                entry["qwen_audit"] = {
+                    "compared": 0,
+                    "correct": 0,
+                    "mismatches": [],
+                    "accuracy_pct": 0,
+                    "note": "Qwen did not return valid JSON — see qwen_raw_output or qwen_error",
+                }
+                entry["qwen_accuracy_pct"] = 0
 
         results.append(entry)
         _flush_progress_results(
