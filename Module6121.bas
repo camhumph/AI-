@@ -52,9 +52,14 @@ Private Const WRITE_PCS_NAMING_ANALYSIS As Boolean = True
 Private Const RUN_SOLIDWORKS_INVISIBLE As Boolean = True
 Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
 
-Private Const CREATE_ISO_JPEGS As Boolean = True
-Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = True
+' Fast quote mode: skip slow ISO JPEGs / visual inspection / per-plate STLs.
+' Whole-assembly STL is ALWAYS written (required for quoted-vs-final compare).
+Private Const FAST_QUOTE_MODE As Boolean = True
+Private Const CREATE_ISO_JPEGS As Boolean = False
+Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = False
 Private Const CREATE_DIM_DXF As Boolean = False   ' DIM DXF removed per request
+Private Const EXPORT_PER_PLATE_STLS As Boolean = False
+Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False  ' skip .easm/.igs when True=False for speed
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
 Private Const CMS_BASE_TOP_VIEW_NAME As String = "*Bottom"
@@ -1199,9 +1204,13 @@ On Error GoTo ErrHandler
     ExportBasePackage CurrentJobFolder & "\base"
     LogDone "Export base package"
 
-    LogStart "Visual mold inspection"
-    RunVisualMoldInspection
-    LogDone "Visual mold inspection"
+    If RUN_VISUAL_MOLD_INSPECTION And Not FAST_QUOTE_MODE Then
+        LogStart "Visual mold inspection"
+        RunVisualMoldInspection
+        LogDone "Visual mold inspection"
+    Else
+        LogLine "Fast quote: skipped visual mold inspection"
+    End If
 
     If isStd Then
         ClassifyStandardBasePlates
@@ -2313,29 +2322,40 @@ On Error GoTo ErrHandler
     dxfPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".dxf")
     stlPath = GetUniqueFilePath(outputFolder & "\" & baseName & ".stl")
 
-    ' Native + neutral formats of the whole base.
-    SaveModelAs swModel, sldPath
-    If swModel.GetType = swDocASSEMBLY Then SaveModelAs swModel, easmPath
-    SaveModelAs swModel, igsPath
-    SaveModelAs swModel, xtPath
-    ' STL of the base for the comparison. Force ONE STL for the whole assembly
-    ' (otherwise SolidWorks writes a separate STL per component - dozens of files).
+    ' WHOLE-ASSEMBLY STL first (one file for the entire mold — required).
+    ' Force ONE STL for the whole assembly (otherwise SW writes per-component STLs).
     On Error Resume Next
     swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
     On Error GoTo ErrHandler
     SaveModelAs swModel, stlPath
+    LogLine "Whole-assembly STL written: " & stlPath
 
-    ' Per-plate STLs (TCP, BCP, ID/OD Holder, ID/OD Pot) in a dedicated "stl" folder.
-    ExportPlateStlsForComparison CurrentJobFolder & "\stl"
+    ' Native SolidWorks copy of the whole base.
+    SaveModelAs swModel, sldPath
+    SaveModelAs swModel, xtPath
+    If EXPORT_HEAVY_NEUTRALS Then
+        If swModel.GetType = swDocASSEMBLY Then SaveModelAs swModel, easmPath
+        SaveModelAs swModel, igsPath
+    Else
+        LogLine "Fast quote: skipped .easm/.igs (EXPORT_HEAVY_NEUTRALS=False)"
+    End If
+
+    ' Per-plate STLs (TCP, BCP, ID/OD Holder, ID/OD Pot) — optional / slow.
+    If EXPORT_PER_PLATE_STLS And Not FAST_QUOTE_MODE Then
+        ExportPlateStlsForComparison CurrentJobFolder & "\stl"
+    End If
 
     ' Front + back ISO JPGs go in the MAIN job folder (not the base subfolder).
-    If CREATE_ISO_JPEGS Then ExportFrontAndBackIsoJpegs CurrentJobFolder, baseName
+    If CREATE_ISO_JPEGS And Not FAST_QUOTE_MODE Then
+        ExportFrontAndBackIsoJpegs CurrentJobFolder, baseName
+    End If
 
-    ' Base DXF (4 projected views, solid). No dimensioned DXF.
-    ' Gemini1 rule: build the DXF from the saved native file because X_T
-    ' does not preserve CMS_TOP / redefined standard views. Also isolate the
-    ' real base components so Pyropel sheets never get into the base DXF.
-    CreateBaseDxfWithoutPyropel sldPath, dxfPath
+    ' Base DXF (4 projected views). Skip in fast mode — STL + X_T are enough for quoting.
+    If Not FAST_QUOTE_MODE Then
+        CreateBaseDxfWithoutPyropel sldPath, dxfPath
+    Else
+        LogLine "Fast quote: skipped base DXF"
+    End If
 
     ApplyCmsTopView swModel
     Exit Sub
@@ -5540,9 +5560,11 @@ On Error GoTo ErrHandler
                 If found(i) Then
                     ws.Cells(writeRow, 1).value = 1
                     ws.Cells(writeRow, 2).value = names(i)
-                    ws.Cells(writeRow, 3).value = ft(i)
-                    ws.Cells(writeRow, 5).value = fw(i)
-                    ws.Cells(writeRow, 7).value = fl(i)
+                    ' CMS steel sheet layout: C=Thickness/Height, E=Width, G=Length
+                    ' (from SortThreeDimensions: Largest=Length, Middle=Width, Smallest=Thickness)
+                    ws.Cells(writeRow, 3).value = ft(i)   ' C = Thickness / Height
+                    ws.Cells(writeRow, 5).value = fw(i)   ' E = Width
+                    ws.Cells(writeRow, 7).value = fl(i)   ' G = Length
                     ws.Cells(writeRow, 8).value = POTBLOCK_STEEL_TYPE
                     writeRow = writeRow + 1
                 End If

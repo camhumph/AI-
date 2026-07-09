@@ -239,3 +239,19 @@ Why B Plate is B Plate:
 - `T001015_B-PLATE` is an exact shop token.
 - Primary leader pins are centered at roughly the same stack position as B Plate.
 - `SC-RETAINER` and `SC-BACKUP` are extra sequenced plates below B, not replacements for B.
+
+## BMS / Pot-Block Steel Sheet Dimensions (W × L × H)
+
+BMS jobs do **not** use the AI classifier. The macro fills the J000 Steel Order /
+Machining Sheet from CAD bbox dims via `SortThreeDimensions` (always **L ≥ W ≥ T**).
+
+| Steel sheet column | Meaning | CAD source |
+|---|---|---|
+| **C** | **Thickness / Height** | Smallest bbox dim (`Thickness`) |
+| **E** | **Width** | Middle bbox dim (`Width`) |
+| **G** | **Length** | Largest bbox dim (`Length`) |
+| H | Steel type | `#2 4140` |
+
+Never swap Width and Length. Never put thickness into the Length column.
+QuoteWorksheet stock sizes add +0.25" to thickness; steel sheet keeps finished sizes.
+Training writes `geometry_classifier/data/training/bms_steel_dim_rules.md` when BMS jobs are scanned.

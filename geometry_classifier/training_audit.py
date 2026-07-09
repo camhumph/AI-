@@ -836,7 +836,14 @@ def _action_for_role(role: str) -> str:
 
 
 def process_bms_job(job_id: str, folder: Path) -> dict:
-    """Catalog BMS job for training manifest — no AI classification."""
+    """Catalog BMS job and learn steel-sheet W×L×H (T) column mapping vs CAD.
+
+    CMS J000 steel sheet rule (must match Module6121 FillJ000SteelSheet):
+      Col C = Thickness / Height   (smallest CAD bbox dim)
+      Col E = Width                (middle CAD bbox dim)
+      Col G = Length               (largest CAD bbox dim)
+    Macro SortThreeDimensions always assigns L≥W≥T from the CAD bounding box.
+    """
     steel = train_from_quote_sheets.find_workbook(folder, train_from_quote_sheets.STEEL_CANDIDATES)
     quote = train_from_quote_sheets.find_workbook(folder, train_from_quote_sheets.QUOTE_CANDIDATES)
     bom_files = [
@@ -850,8 +857,55 @@ def process_bms_job(job_id: str, folder: Path) -> dict:
     elif quote:
         plates = train_from_quote_sheets.read_sheet_plates(quote)
 
+    # Match steel dims to XT CAD when available — verify T/W/L column mapping.
+    xt_path = train_from_quote_sheets.find_xt_csv(folder)
+    dim_checks: list[dict] = []
+    mapping_ok = 0
+    mapping_fail = 0
+    if xt_path and plates:
+        xt_rows = train_from_quote_sheets.read_xt_rows(xt_path)
+        # Build role -> best XT row using the same scorer as standard training.
+        for plate in plates:
+            best_row = None
+            best_score = -1.0
+            for row in xt_rows:
+                score = train_from_quote_sheets._match_plate_to_row_score(plate, row)
+                if score > best_score:
+                    best_score = score
+                    best_row = row
+            if not best_row or best_score < 5:
+                continue
+            cad_t = train_from_quote_sheets.safe_float(best_row.get("Thickness"))
+            cad_w = train_from_quote_sheets.safe_float(best_row.get("Width"))
+            cad_l = train_from_quote_sheets.safe_float(best_row.get("Length"))
+            # Expected: steel C≈CAD T, E≈CAD W, G≈CAD L (sorted L≥W≥T)
+            t_ok = train_from_quote_sheets._size_close(plate["thickness"], cad_t)
+            w_ok = train_from_quote_sheets._size_close(plate["width"], cad_w)
+            l_ok = train_from_quote_sheets._size_close(plate["length"], cad_l)
+            ok = t_ok and w_ok and l_ok
+            if ok:
+                mapping_ok += 1
+            else:
+                mapping_fail += 1
+            dim_checks.append(
+                {
+                    "plate": plate.get("sheet_name"),
+                    "role": plate.get("role"),
+                    "steel_T_H": plate.get("thickness"),
+                    "steel_W": plate.get("width"),
+                    "steel_L": plate.get("length"),
+                    "cad_T": cad_t,
+                    "cad_W": cad_w,
+                    "cad_L": cad_l,
+                    "mapping_ok": ok,
+                    "match_score": best_score,
+                }
+            )
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     manifest_path = OUT_DIR / f"{job_id}_BMS_TRAINING.json"
+    dim_rule = train_from_quote_sheets.BMS_STEEL_COL_MAP
     payload = {
         "job_id": job_id,
         "base_type": "bms",
@@ -860,12 +914,49 @@ def process_bms_job(job_id: str, folder: Path) -> dict:
         "steel_sheet": str(steel) if steel else "",
         "quote_sheet": str(quote) if quote else "",
         "plates_from_sheet": plates,
+        "steel_dim_layout": dim_rule,
+        "dim_mapping_checks": dim_checks,
+        "dim_mapping_ok": mapping_ok,
+        "dim_mapping_fail": mapping_fail,
         "macro_guidance": (
             "Use BOM-driven pot-block flow in Module6121. "
+            "FillJ000SteelSheet writes C=Thickness/Height, E=Width, G=Length "
+            "(from SortThreeDimensions: L≥W≥T). "
             "RunAiBridgeClassification must skip classify and call AiBridgeNotifyBms only."
         ),
     }
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    # Append / refresh shared BMS dim rules file for the shop.
+    rules_path = BASE / "bms_steel_dim_rules.md"
+    rules_path.write_text(
+        "\n".join(
+            [
+                "# BMS / Pot-Block Steel Sheet Dimension Rules",
+                "",
+                "Learned from finished J000 Steel Order / Machining Sheet jobs.",
+                "",
+                "## Where Width, Length, and Height go",
+                "",
+                "| Steel sheet column | Meaning | CAD source |",
+                "|---|---|---|",
+                "| **C** (col 3) | **Thickness / Height** | Smallest bbox dim (`parts.Thickness`) |",
+                "| **E** (col 5) | **Width** | Middle bbox dim (`parts.Width`) |",
+                "| **G** (col 7) | **Length** | Largest bbox dim (`parts.Length`) |",
+                "| H (col 8) | Steel type | `#2 4140` |",
+                "",
+                "Macro `SortThreeDimensions` always sorts CAD bbox as **L ≥ W ≥ T**.",
+                "Never put thickness into Length, and never swap Width/Length.",
+                "",
+                "QuoteWorksheet stock sizes: Thickness gets +0.25\" stock allowance;",
+                "Width/Length round up to nickel. Steel Order keeps **finished** sizes.",
+                "",
+                f"Last BMS job checked: `{job_id}` — mapping ok={mapping_ok} fail={mapping_fail}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     return {
         "job_id": job_id,
@@ -873,7 +964,10 @@ def process_bms_job(job_id: str, folder: Path) -> dict:
         "base_type": "bms",
         "bom_files": len(bom_files),
         "plates_found": len(plates),
+        "dim_mapping_ok": mapping_ok,
+        "dim_mapping_fail": mapping_fail,
         "output": str(manifest_path),
+        "dim_rules": str(rules_path),
         "macro_guidance": payload["macro_guidance"],
     }
 

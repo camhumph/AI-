@@ -109,10 +109,11 @@ try {
 
     $moduleNames = @("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
     $ext = [System.IO.Path]::GetExtension($MacroPath).ToLowerInvariant()
-    if ($ext -eq ".swp") {
-        $procedureNames = @($Procedure)
-    } else {
-        $procedureNames = @($Procedure, "RunFromLauncher", "main")
+    # Same procedure order as RunTrainingXtLauncher / CMS_Launcher:
+    # requested procedure first, then main (which routes via handoff files).
+    $procedureNames = @($Procedure, "main", "RunFromLauncher")
+    if ($ext -eq ".swp" -and $Procedure -eq "RunFromLauncher") {
+        $procedureNames = @("RunFromLauncher", "main")
     }
 
     $ran = $false

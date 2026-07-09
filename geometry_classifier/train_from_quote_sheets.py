@@ -48,6 +48,35 @@ PLATE_NAME_TO_ROLE = {
     "rail": "rail",
     "rail top": "rail",
     "rail bottom": "rail",
+    # BMS / pot-block steel-sheet names (J000 Steel Order / Machining Sheet)
+    "tcp": "tcp",
+    "top clamping": "tcp",
+    "bcp": "bcp",
+    "bottom clamping": "bcp",
+    "id holder": "id_holder",
+    "od holder": "od_holder",
+    "id pot": "id_pot",
+    "od pot": "od_pot",
+    "id pot block": "id_pot",
+    "od pot block": "od_pot",
+}
+
+# CMS J000 steel sheet column layout (1-based Excel columns, rows start at 19):
+#   A(1)=Qty  B(2)=Name  C(3)=Thickness/Height  E(5)=Width  G(7)=Length  H(8)=Steel type
+# QuoteWorksheet #2 4140 block uses: C=Qty D=Thickness E=Width F=Length
+BMS_STEEL_COL_MAP = {
+    "qty_col": 1,
+    "name_col": 2,
+    "thickness_height_col": 3,  # Height on steel sheet = plate thickness (smallest bbox dim)
+    "width_col": 5,
+    "length_col": 7,
+    "steel_type_col": 8,
+    "first_data_row": 19,
+    "rule": (
+        "CAD bbox dims are sorted Largest→Middle→Smallest as Length, Width, Thickness. "
+        "On the J000 steel sheet: Col C = Thickness/Height, Col E = Width, Col G = Length. "
+        "Never swap Width and Length; never put thickness into the Length column."
+    ),
 }
 
 HARDWARE_NAME_TO_ROLE = {
@@ -161,8 +190,15 @@ def _parse_fraction_inch(val) -> float:
 
 
 def _extract_plates_from_rows(row_values_list: list, sheet_name: str) -> list[dict]:
-    """Shared plate extraction from a list of row cell lists."""
+    """Shared plate extraction from a list of row cell lists.
+
+    CMS J000 Steel Order / Machining Sheet layout (1-based):
+      A=Qty B=Name C=Thickness/Height  E=Width  G=Length  H=Steel
+    QuoteWorksheet #2 block: C=Qty D=Thickness E=Width F=Length
+    Empty spacer columns are skipped when collecting numeric dims.
+    """
     found: list[dict] = []
+    is_steel = any(k in (sheet_name or "").lower() for k in ("steel", "machining"))
     for row in row_values_list:
         if not row:
             continue
@@ -174,24 +210,32 @@ def _extract_plates_from_rows(row_values_list: list, sheet_name: str) -> list[di
             role = role_for_sheet_name(cell)
             if role and not name:
                 name = cell
-                nums = [
-                    _parse_fraction_inch(c)
-                    for c in cells[i + 1 : i + 8]
-                    if _parse_fraction_inch(c) > 0
-                ]
+                # Prefer fixed CMS steel columns when present (C/E/G = indices 2/4/6).
                 t = w = l = 0.0
-                if len(nums) >= 3:
-                    t, w, l = nums[0], nums[1], nums[2]
-                elif len(nums) == 2:
-                    w, l = nums[0], nums[1]
+                if is_steel and len(cells) > 6:
+                    t = _parse_fraction_inch(cells[2] if len(cells) > 2 else "")
+                    w = _parse_fraction_inch(cells[4] if len(cells) > 4 else "")
+                    l = _parse_fraction_inch(cells[6] if len(cells) > 6 else "")
+                if t <= 0 or w <= 0 or l <= 0:
+                    nums = [
+                        _parse_fraction_inch(c)
+                        for c in cells[i + 1 : i + 10]
+                        if _parse_fraction_inch(c) > 0
+                    ]
+                    if len(nums) >= 3:
+                        t, w, l = nums[0], nums[1], nums[2]
+                    elif len(nums) == 2:
+                        w, l = nums[0], nums[1]
                 found.append(
                     {
                         "sheet_name": name,
                         "role": role,
-                        "thickness": t or _parse_fraction_inch(cells[i + 2] if i + 2 < len(cells) else 0),
+                        "thickness": t,
                         "width": w,
                         "length": l,
+                        "height": t,  # CMS steel sheet: Height column = Thickness
                         "source_sheet": sheet_name,
+                        "dim_layout": "C=T/H E=W G=L" if is_steel else "sequential",
                     }
                 )
                 break
@@ -207,7 +251,9 @@ def _extract_plates_from_rows(row_values_list: list, sheet_name: str) -> list[di
                             "thickness": nums[0] if len(nums) > 0 else 0,
                             "width": nums[1] if len(nums) > 1 else 0,
                             "length": nums[2] if len(nums) > 2 else 0,
+                            "height": nums[0] if len(nums) > 0 else 0,
                             "source_sheet": sheet_name,
+                            "dim_layout": "sequential",
                         }
                     )
                     break

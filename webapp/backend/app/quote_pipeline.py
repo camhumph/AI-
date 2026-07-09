@@ -109,19 +109,31 @@ def _deploy_launcher_assets() -> None:
                 pass
 
 
-def run_dme_price_lookup() -> bool:
-    """Refresh DME prices in Purchased Components Prices.csv (same as launcher)."""
+def run_dme_price_lookup(wait: bool = False) -> bool:
+    """Refresh DME prices in Purchased Components Prices.csv (same as launcher).
+
+    By default starts in the background so SolidWorks can launch immediately.
+    Pass wait=True only when prices must be ready before the macro reads them.
+    """
     script = _find_python_script("cms_price_lookup.py")
     if not script:
         set_status("_system", last_price_lookup="skipped_no_script")
         return False
     try:
-        subprocess.run(
-            ["python", str(script), "--all"],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        if wait:
+            subprocess.run(
+                ["python", str(script), "--all"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        else:
+            subprocess.Popen(
+                ["python", str(script), "--all"],
+                close_fds=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         return True
     except Exception as e:
         set_status("_system", last_price_lookup_error=str(e))
@@ -157,11 +169,11 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     set_status(
         quote_id,
         phase="starting",
-        message="Updating DME purchased-component prices...",
+        message="Starting SolidWorks + Module6121 (price lookup in background)...",
         attach_dir=attach_dir,
     )
 
-    run_dme_price_lookup()
+    run_dme_price_lookup(wait=False)
 
     set_status(quote_id, phase="launching", message="Starting SolidWorks + Module6121...")
 

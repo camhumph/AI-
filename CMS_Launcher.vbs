@@ -332,32 +332,30 @@ End Sub
 ' LAUNCH SOLIDWORKS + MACRO
 ' ============================================================
 Function LaunchSolidWorksAndMacro()
-    Dim shell, sw, tries, macroPath, macroFolder, ps1, cmd, ret, macroErr
+    ' Same SolidWorks 2023 + Module6121.swp launch path as RunTrainingXtLauncher.vbs
+    ' (the path that successfully opens CAD during training).
+    Dim shell, sw, tries, macroPath, macroPaths(), mpIdx, pathCount
+    Dim modNames, mi, okRun, ran, procNames, pi, macroErr
     Set shell = CreateObject("WScript.Shell")
     LaunchSolidWorksAndMacro = False
 
-    macroFolder = fso.GetParentFolderName(WScript.ScriptFullName)
-    macroPath = SW_MACRO
-    If Not fso.FileExists(macroPath) Then macroPath = LOCAL_WORKSPACE_ROOT & "\Module6121.swp"
-    If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swp"
-    If Not fso.FileExists(macroPath) Then
-        LogStep "Module6121.swp not found at " & SW_MACRO & " — copy compiled macro to C:\CMS_Local_Workspace\"
+    pathCount = 0
+    If fso.FileExists(LOCAL_WORKSPACE_ROOT & "\Module6121.swp") Then
+        ReDim macroPaths(0)
+        macroPaths(0) = LOCAL_WORKSPACE_ROOT & "\Module6121.swp"
+        pathCount = 1
+        LogStep "using compiled macro: Module6121.swp"
+    ElseIf fso.FileExists(SW_MACRO) Then
+        ReDim macroPaths(0)
+        macroPaths(0) = SW_MACRO
+        pathCount = 1
+        LogStep "using compiled macro: " & SW_MACRO
+    Else
+        LogStep "ERROR: Module6121.swp not found at " & LOCAL_WORKSPACE_ROOT & " — copy compiled .swp there"
         Exit Function
     End If
-    LogStep "using compiled macro: " & macroPath
 
-    ps1 = LOCAL_WORKSPACE_ROOT & "\RunSolidWorksMacro.ps1"
-    If fso.FileExists(ps1) Then
-        cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File """ & ps1 & """ -MacroPath """ & macroPath & """ -SwExe """ & SW_EXE & """ -ProgId """ & SW_PROGID & """ -Procedure RunFromLauncher"
-        LogStep "starting macro via RunSolidWorksMacro.ps1"
-        ret = shell.Run(cmd, 0, True)
-        If ret = 0 Then
-            LaunchSolidWorksAndMacro = True
-            LogStep "macro started via PowerShell runner"
-            Exit Function
-        End If
-        LogStep "PowerShell macro runner exit code " & ret & " — trying inline RunMacro2"
-    End If
+    LogStep "sw exe: " & SW_EXE & "  progid: " & SW_PROGID
 
     On Error Resume Next
     Set sw = GetObject(, SW_PROGID)
@@ -383,7 +381,7 @@ Function LaunchSolidWorksAndMacro()
             LogStep "SolidWorks 2023 did not start in time"
             Exit Function
         End If
-        LogStep "connected to SolidWorks 2023 (" & SW_PROGID & ")"
+        LogStep "connected to SolidWorks 2023"
     Else
         LogStep "using existing SolidWorks 2023 session"
     End If
@@ -405,32 +403,47 @@ Function LaunchSolidWorksAndMacro()
     sw.CommandInProgress = False
     On Error GoTo 0
 
-    Dim modNames, mi, okRun, ran
+    ' Same module/procedure search order as training launcher.
+    ' RunFromLauncher first (handoff quoting); main() also routes to RunFromLauncher when cms_handoff.txt exists.
     modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
+    procNames = Array("RunFromLauncher", "main")
     ran = False
-    For mi = 0 To UBound(modNames)
-        okRun = False
-        macroErr = 0
-        On Error Resume Next
-        sw.CommandInProgress = True
-        okRun = sw.RunMacro(macroPath, modNames(mi), "RunFromLauncher")
-        If Err.Number = 0 And okRun <> True Then
-            okRun = sw.RunMacro2(macroPath, modNames(mi), "RunFromLauncher", 1, macroErr)
+
+    For mpIdx = 0 To pathCount - 1
+        macroPath = macroPaths(mpIdx)
+        LogStep "macro path: " & macroPath
+        If Not fso.FileExists(macroPath) Then
+            LogStep "macro missing: " & macroPath
+        Else
+            For pi = 0 To UBound(procNames)
+                For mi = 0 To UBound(modNames)
+                    okRun = False
+                    macroErr = 0
+                    On Error Resume Next
+                    sw.CommandInProgress = True
+                    okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
+                    If Err.Number = 0 And okRun <> True Then
+                        okRun = sw.RunMacro2(macroPath, modNames(mi), procNames(pi), 1, macroErr)
+                    End If
+                    sw.CommandInProgress = False
+                    If Err.Number = 0 And okRun = True Then
+                        On Error GoTo 0
+                        ran = True
+                        LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi) & " path=" & macroPath
+                        Exit For
+                    End If
+                    LogStep "RunMacro(2) failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number & " macroErr=" & macroErr
+                    Err.Clear
+                    On Error GoTo 0
+                Next
+                If ran Then Exit For
+            Next
         End If
-        sw.CommandInProgress = False
-        If Err.Number = 0 And okRun = True Then
-            On Error GoTo 0
-            ran = True
-            LogStep "macro started via module '" & modNames(mi) & "' from " & macroPath
-            Exit For
-        End If
-        LogStep "RunMacro(2) failed module '" & modNames(mi) & "' err=" & Err.Number & " macroErr=" & macroErr
-        Err.Clear
-        On Error GoTo 0
+        If ran Then Exit For
     Next
 
     If Not ran Then
-        LogStep "RunMacro(2) could not start RunFromLauncher from: " & macroPath
+        LogStep "RunMacro(2) could not start RunFromLauncher/main from Module6121.swp"
     End If
     LaunchSolidWorksAndMacro = ran
 End Function
