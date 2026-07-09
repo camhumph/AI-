@@ -168,6 +168,14 @@ export default function SettingsPage() {
                 </Badge>
               </div>
 
+              {trainingStatus.jobs_ok === 0 && (trainingStatus.jobs_processed ?? 0) > 0 && (
+                <p className="text-xs text-accent-amber">
+                  All jobs skipped or failed. Common fixes: install <code className="text-ink-300">xlrd</code>{" "}
+                  (<code className="text-ink-300">pip install xlrd</code>), use .xls steel sheets in each subfolder,
+                  and add <code className="text-ink-300">XT_Export_CAD_Dimensions.csv</code> for full match training.
+                </p>
+              )}
+
               {trainingStatus.results && trainingStatus.results.length > 0 && (
                 <div className="scrollbar-thin max-h-48 overflow-y-auto rounded border border-ink-700/30">
                   <table className="w-full text-left text-xs">
@@ -176,6 +184,7 @@ export default function SettingsPage() {
                         <th className="px-3 py-2">Job</th>
                         <th className="px-3 py-2">Type</th>
                         <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Why / notes</th>
                         <th className="px-3 py-2">Rules %</th>
                       </tr>
                     </thead>
@@ -185,6 +194,9 @@ export default function SettingsPage() {
                           <td className="px-3 py-2 font-mono text-ink-200">{r.job_id}</td>
                           <td className="px-3 py-2 uppercase text-ink-400">{r.base_type || "—"}</td>
                           <td className="px-3 py-2 text-ink-400">{r.status}</td>
+                          <td className="max-w-xs truncate px-3 py-2 text-[10px] text-ink-500" title={r.reason}>
+                            {r.reason || "—"}
+                          </td>
                           <td className="px-3 py-2 text-ink-300">
                             {r.rules_accuracy_pct ?? r.accuracy_pct ?? "—"}
                           </td>

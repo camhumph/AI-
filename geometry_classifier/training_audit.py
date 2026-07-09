@@ -417,7 +417,7 @@ def run_full_audit(jobs_root: str | None = None, manifest_path: str | None = Non
 
     summary = {
         "jobs_processed": len(results),
-        "jobs_ok": sum(1 for r in results if r.get("status") in ("ok", "ok_bms")),
+        "jobs_ok": sum(1 for r in results if r.get("status") in ("ok", "ok_bms", "ok_steel_only")),
         "jobs_skipped": sum(1 for r in results if r.get("status") == "skipped"),
         "bms_jobs": sum(1 for r in results if r.get("base_type") == "bms"),
         "standard_jobs": sum(1 for r in results if r.get("base_type") == "standard"),

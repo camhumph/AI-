@@ -160,64 +160,107 @@ def _parse_fraction_inch(val) -> float:
     return safe_float(s)
 
 
+def _extract_plates_from_rows(row_values_list: list, sheet_name: str) -> list[dict]:
+    """Shared plate extraction from a list of row cell lists."""
+    found: list[dict] = []
+    for row in row_values_list:
+        if not row:
+            continue
+        cells = [str(c).strip() if c is not None and str(c).strip() else "" for c in row]
+        if not any(cells):
+            continue
+        name = ""
+        for i, cell in enumerate(cells):
+            role = role_for_sheet_name(cell)
+            if role and not name:
+                name = cell
+                nums = [safe_float(c) for c in cells[i + 1 : i + 8] if _parse_fraction_inch(c) > 0]
+                t = w = l = 0.0
+                if len(nums) >= 3:
+                    t, w, l = nums[0], nums[1], nums[2]
+                elif len(nums) == 2:
+                    w, l = nums[0], nums[1]
+                found.append(
+                    {
+                        "sheet_name": name,
+                        "role": role,
+                        "thickness": t or _parse_fraction_inch(cells[i + 2] if i + 2 < len(cells) else 0),
+                        "width": w,
+                        "length": l,
+                        "source_sheet": sheet_name,
+                    }
+                )
+                break
+        if not name:
+            for cell in cells:
+                role = role_for_sheet_name(cell)
+                if role:
+                    nums = [_parse_fraction_inch(c) for c in cells if _parse_fraction_inch(c) > 0]
+                    found.append(
+                        {
+                            "sheet_name": cell,
+                            "role": role,
+                            "thickness": nums[0] if len(nums) > 0 else 0,
+                            "width": nums[1] if len(nums) > 1 else 0,
+                            "length": nums[2] if len(nums) > 2 else 0,
+                            "source_sheet": sheet_name,
+                        }
+                    )
+                    break
+    return found
+
+
+def _sheet_name_matches(sheet_name: str) -> bool:
+    target_sheets = ("QuoteWorksheet", "Steel Order", "Machining Sheet", "Quote", "Steel")
+    if sheet_name in target_sheets:
+        return True
+    low = sheet_name.lower()
+    return any(k in low for k in ("quote", "steel", "machining", "grind"))
+
+
+def _read_sheet_plates_xls(path: Path) -> list[dict]:
+    """Read legacy Excel .xls (97-2003) — common on CMS steel/quote sheets."""
+    try:
+        import xlrd  # type: ignore
+    except ImportError:
+        return []
+    plates: list[dict] = []
+    try:
+        book = xlrd.open_workbook(str(path))
+    except Exception:
+        return []
+    for sheet_name in book.sheet_names():
+        if not _sheet_name_matches(sheet_name):
+            continue
+        sh = book.sheet_by_name(sheet_name)
+        rows = [sh.row_values(i) for i in range(min(250, sh.nrows))]
+        plates.extend(_extract_plates_from_rows(rows, sheet_name))
+    return _dedupe_plates(plates)
+
+
 def read_sheet_plates(xlsx_path: Path) -> list[dict]:
-    """Extract named plate rows from quote or steel Excel workbooks."""
+    """Extract named plate rows from quote or steel Excel workbooks (.xls or .xlsx)."""
+    suffix = xlsx_path.suffix.lower()
+    if suffix == ".xls":
+        return _read_sheet_plates_xls(xlsx_path)
+
     try:
         import openpyxl  # type: ignore
     except ImportError:
         return _read_sheet_plates_csv_fallback(xlsx_path)
 
-    wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
     plates: list[dict] = []
-    target_sheets = ("QuoteWorksheet", "Steel Order", "Machining Sheet", "Quote", "Steel")
+    try:
+        wb = openpyxl.load_workbook(xlsx_path, read_only=True, data_only=True)
+    except Exception:
+        return _read_sheet_plates_csv_fallback(xlsx_path)
+
     for sheet_name in wb.sheetnames:
-        if sheet_name not in target_sheets and not any(
-            k in sheet_name.lower() for k in ("quote", "steel", "machining")
-        ):
+        if not _sheet_name_matches(sheet_name):
             continue
         ws = wb[sheet_name]
-        for row in ws.iter_rows(min_row=1, max_row=200, values_only=True):
-            if not row:
-                continue
-            cells = [str(c).strip() if c is not None else "" for c in row]
-            name = ""
-            t = w = l = 0.0
-            for i, cell in enumerate(cells):
-                role = role_for_sheet_name(cell)
-                if role and not name:
-                    name = cell
-                    nums = [safe_float(c) for c in cells[i + 1 : i + 8] if _parse_fraction_inch(c) > 0]
-                    if len(nums) >= 3:
-                        t, w, l = nums[0], nums[1], nums[2]
-                    elif len(nums) == 2:
-                        w, l = nums[0], nums[1]
-                    plates.append(
-                        {
-                            "sheet_name": name,
-                            "role": role,
-                            "thickness": t or _parse_fraction_inch(cells[i + 2] if i + 2 < len(cells) else 0),
-                            "width": w,
-                            "length": l,
-                            "source_sheet": sheet_name,
-                        }
-                    )
-                    break
-            if not name:
-                for cell in cells:
-                    role = role_for_sheet_name(cell)
-                    if role:
-                        nums = [_parse_fraction_inch(c) for c in cells if _parse_fraction_inch(c) > 0]
-                        plates.append(
-                            {
-                                "sheet_name": cell,
-                                "role": role,
-                                "thickness": nums[0] if len(nums) > 0 else 0,
-                                "width": nums[1] if len(nums) > 1 else 0,
-                                "length": nums[2] if len(nums) > 2 else 0,
-                                "source_sheet": sheet_name,
-                            }
-                        )
-                        break
+        rows = list(ws.iter_rows(min_row=1, max_row=250, values_only=True))
+        plates.extend(_extract_plates_from_rows(rows, sheet_name))
     wb.close()
     return _dedupe_plates(plates)
 
@@ -349,20 +392,39 @@ def process_job(
     steel_sheet: str = "",
 ) -> dict:
     xt_path = find_xt_csv(folder, xt_csv)
-    if not xt_path:
-        return {"job_id": job_id, "status": "skipped", "reason": "no XT CSV"}
-
     steel_path = find_workbook(folder, STEEL_CANDIDATES, steel_sheet)
     quote_path = find_workbook(folder, QUOTE_CANDIDATES, quote_sheet)
     sheet_path = steel_path or quote_path
-    if not sheet_path:
-        return {"job_id": job_id, "status": "skipped", "reason": "no quote/steel sheet"}
 
-    xt_rows = read_xt_rows(xt_path)
+    if not sheet_path:
+        return {"job_id": job_id, "status": "skipped", "reason": "no quote/steel sheet (.xls or .xlsx) found"}
+
     plates = read_sheet_plates(sheet_path)
     if not plates:
-        return {"job_id": job_id, "status": "skipped", "reason": "no plate names parsed from sheet"}
+        return {
+            "job_id": job_id,
+            "status": "skipped",
+            "reason": f"steel/quote sheet found ({sheet_path.name}) but no plate names parsed — check sheet format",
+            "sheet": str(sheet_path),
+        }
 
+    if not xt_path:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        labels_path = OUT_DIR / f"{job_id}_STEEL_LABELS.json"
+        labels_path.write_text(
+            json.dumps({"job_id": job_id, "plates": plates, "sheet": str(sheet_path)}, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "job_id": job_id,
+            "status": "ok_steel_only",
+            "reason": "steel sheet OK — add XT_Export_CAD_Dimensions.csv (run macro once) for full training",
+            "sheet": str(sheet_path),
+            "plates_found": len(plates),
+            "output": str(labels_path),
+        }
+
+    xt_rows = read_xt_rows(xt_path)
     training = match_components(xt_rows, plates)
     matched = sum(1 for r in training if r["CorrectRole"])
 
@@ -432,7 +494,7 @@ def run_training(
 
     summary = {
         "jobs_processed": len(results),
-        "jobs_ok": sum(1 for r in results if r.get("status") == "ok"),
+        "jobs_ok": sum(1 for r in results if r.get("status") in ("ok", "ok_bms", "ok_steel_only")),
         "jobs_skipped": sum(1 for r in results if r.get("status") == "skipped"),
         "results": results,
         "output_dir": str(OUT_DIR),

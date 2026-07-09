@@ -207,6 +207,7 @@ export interface TrainingJobResult {
   total_components?: number;
   macro_guidance?: string;
   detection_signals?: string[];
+  reason?: string;
 }
 
 export interface TrainingReport {
