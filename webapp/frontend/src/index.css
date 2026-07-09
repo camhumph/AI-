@@ -4,12 +4,12 @@
   --font-sans: "Inter Variable", "Inter", -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
 
-  /* Dark SpaceX base — low numbers = deep space */
-  --color-ink-950: #050508;
-  --color-ink-900: #0a0a10;
-  --color-ink-850: #101018;
-  --color-ink-800: #181822;
-  --color-ink-700: #252530;
+  /* Dark SpaceX base — lifted slightly for readability */
+  --color-ink-950: #0e0e14;
+  --color-ink-900: #14141c;
+  --color-ink-850: #1a1a24;
+  --color-ink-800: #22222e;
+  --color-ink-700: #2e2e3a;
   --color-ink-600: #4a4a58;
   --color-ink-500: #7a7a88;
   --color-ink-400: #a8a8b4;
@@ -46,9 +46,9 @@ body::before {
   pointer-events: none;
   z-index: 0;
   background:
-    radial-gradient(ellipse 90% 70% at 0% -10%, rgba(10, 132, 255, 0.14), transparent 55%),
-    radial-gradient(ellipse 70% 60% at 100% 110%, rgba(255, 255, 255, 0.05), transparent 50%),
-    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(10, 132, 255, 0.03), transparent 70%);
+    radial-gradient(ellipse 90% 70% at 0% -10%, rgba(10, 132, 255, 0.12), transparent 55%),
+    radial-gradient(ellipse 70% 60% at 100% 110%, rgba(255, 255, 255, 0.07), transparent 50%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(10, 132, 255, 0.04), transparent 70%);
 }
 
 #root {
@@ -79,30 +79,30 @@ h1, h2, h3 {
 
 /* iOS liquid glass + SpaceX precision */
 .glass-panel {
-  background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.065);
+  border: 1px solid rgba(255, 255, 255, 0.11);
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.45) inset,
-    0 1px 0 rgba(255, 255, 255, 0.06) inset,
-    0 16px 48px rgba(0, 0, 0, 0.45);
+    0 0 0 1px rgba(0, 0, 0, 0.35) inset,
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 16px 48px rgba(0, 0, 0, 0.38);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
 }
 
 .glass-panel-strong {
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
   box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.5) inset,
-    0 1px 0 rgba(255, 255, 255, 0.1) inset,
-    0 20px 60px rgba(0, 0, 0, 0.55);
+    0 0 0 1px rgba(0, 0, 0, 0.4) inset,
+    0 1px 0 rgba(255, 255, 255, 0.12) inset,
+    0 20px 60px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(40px) saturate(180%);
   -webkit-backdrop-filter: blur(40px) saturate(180%);
 }
 
 .glass-input {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
@@ -129,7 +129,7 @@ h1, h2, h3 {
 }
 
 .inbox-row:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .inbox-row-selected {
@@ -159,7 +159,7 @@ h1, h2, h3 {
 
 /* Modal / overlay backdrop */
 .overlay-backdrop {
-  background: rgba(5, 5, 8, 0.72);
+  background: rgba(14, 14, 20, 0.65);
   backdrop-filter: blur(16px) saturate(140%);
   -webkit-backdrop-filter: blur(16px) saturate(140%);
 }

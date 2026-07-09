@@ -332,6 +332,11 @@ def api_quote_active():
     return quote_pipeline.list_active_quotes()
 
 
+@app.post("/api/quote/cancel/{quote_id}")
+def api_quote_cancel(quote_id: str):
+    return quote_pipeline.cancel_quote(quote_id)
+
+
 @app.get("/api/email/status")
 def api_email_status():
     view = credentials.public_view()

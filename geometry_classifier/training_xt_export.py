@@ -1,7 +1,7 @@
 """Launch Module6121 RunTrainingXtExport for training folders missing XT CSV.
 
 Windows + SolidWorks only. The webapp training scan writes cms_training_xt.txt,
-starts RunSolidWorksMacro.ps1 with procedure RunTrainingXtExport, and polls
+starts RunTrainingXtLauncher.vbs (same COM path as CMS_Launcher.vbs), and polls
 cms_training_xt_done.txt for completion.
 """
 from __future__ import annotations
@@ -68,7 +68,7 @@ _xt_cancel = False
 
 
 def request_xt_cancel() -> None:
-    """Break any in-progress XT export wait loop and kill the PowerShell launcher."""
+    """Break any in-progress XT export wait loop and kill the VBS launcher."""
     global _xt_cancel, _active_xt_proc
     _xt_cancel = True
     try:
@@ -88,15 +88,26 @@ def request_xt_cancel() -> None:
 
 
 def deploy_runtime_files() -> None:
-    """Copy macro + PS runner from repo into CMS_Local_Workspace when newer."""
+    """Copy macro + launchers from repo into CMS_Local_Workspace when newer."""
     if not is_windows():
         return
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
-    for name in ("Module6121.swb", "RunSolidWorksMacro.ps1"):
+    for name in ("Module6121.swb", "RunSolidWorksMacro.ps1", "RunTrainingXtLauncher.vbs"):
         src = REPO_ROOT / name
         dst = LOCAL_WORKSPACE / name
         if src.exists() and (not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime):
             shutil.copy2(src, dst)
+
+
+def find_training_launcher() -> Path | None:
+    deploy_runtime_files()
+    for p in (
+        LOCAL_WORKSPACE / "RunTrainingXtLauncher.vbs",
+        REPO_ROOT / "RunTrainingXtLauncher.vbs",
+    ):
+        if p.exists():
+            return p
+    return None
 
 
 def find_macro_path() -> Path | None:
@@ -142,11 +153,11 @@ def export_xt_via_macro(folder: Path, job_id: str, timeout_sec: int = 1200) -> d
         return {"ok": False, "status": "skipped", "reason": "no CAD files in folder"}
 
     macro = find_macro_path()
-    runner = find_runner_script()
+    launcher = find_training_launcher()
     if not macro:
         return {"ok": False, "status": "error", "reason": "Module6121.swb/.swp not found"}
-    if not runner:
-        return {"ok": False, "status": "error", "reason": "RunSolidWorksMacro.ps1 not found"}
+    if not launcher:
+        return {"ok": False, "status": "error", "reason": "RunTrainingXtLauncher.vbs not found"}
 
     output_csv = folder / "XT_Export_CAD_Dimensions.csv"
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -166,36 +177,21 @@ def export_xt_via_macro(folder: Path, job_id: str, timeout_sec: int = 1200) -> d
         encoding="utf-8",
     )
 
-    sw_exe = os.environ.get("CMS_SOLIDWORKS_EXE", SW_EXE_DEFAULT)
-    sw_progid = os.environ.get("CMS_SOLIDWORKS_PROGID", SW_PROGID_DEFAULT)
-    log_file = str(LOCAL_WORKSPACE / "CMS_Training_XT_Log.txt")
+    log_file = str(LOCAL_WORKSPACE / "CMS_Training_XT_Launcher_Log.txt")
 
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(runner),
-        "-MacroPath",
-        str(macro),
-        "-SwExe",
-        sw_exe,
-        "-ProgId",
-        sw_progid,
-        "-Procedure",
-        "RunTrainingXtExport",
-        "-LogFile",
-        log_file,
-    ]
-
+    # Same launch path as CMS_Launcher.vbs (wscript + COM), not PowerShell
     try:
-        _active_xt_proc = subprocess.Popen(cmd, close_fds=True)
+        _active_xt_proc = subprocess.Popen(
+            ["wscript", str(launcher)],
+            close_fds=True,
+            cwd=str(LOCAL_WORKSPACE),
+        )
     except Exception as exc:
         _active_xt_proc = None
         return {"ok": False, "status": "error", "reason": str(exc)}
 
     deadline = time.time() + timeout_sec
+    launch_grace = time.time() + 45
     while time.time() < deadline:
         if _xt_cancel:
             _active_xt_proc = None
@@ -219,6 +215,21 @@ def export_xt_via_macro(folder: Path, job_id: str, timeout_sec: int = 1200) -> d
                 "ok": False,
                 "status": "error",
                 "reason": done.get("Message") or f"XT export returned {status}",
+            }
+        # Launcher exited without writing done file — read log for clue
+        if _active_xt_proc and _active_xt_proc.poll() is not None and time.time() > launch_grace:
+            log_hint = ""
+            log_path = Path(log_file)
+            if log_path.exists():
+                try:
+                    log_hint = log_path.read_text(encoding="utf-8", errors="replace")[-400:]
+                except Exception:
+                    pass
+            _active_xt_proc = None
+            return {
+                "ok": False,
+                "status": "error",
+                "reason": f"SolidWorks 2023 launcher exited early. See {log_file}. {log_hint[-200:]}",
             }
         time.sleep(0.4)
 

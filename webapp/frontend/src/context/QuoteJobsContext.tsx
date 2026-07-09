@@ -20,6 +20,7 @@ export interface ActiveQuoteJob {
 interface QuoteJobsContextValue {
   jobs: ActiveQuoteJob[];
   startQuote: (quoteId: string, label: string, initialStatus?: QuoteRunStatus) => void;
+  cancelQuote: (quoteId: string) => Promise<void>;
   dismissQuote: (quoteId: string) => void;
   openQuote: (jobId: string) => void;
 }
@@ -72,6 +73,27 @@ export function QuoteJobsProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const cancelQuote = useCallback(async (quoteId: string) => {
+    try {
+      const st = await api.cancelQuote(quoteId);
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.quoteId === quoteId
+            ? { ...j, status: { ...st, phase: "cancelled", message: st.message || "Quote cancelled" } }
+            : j
+        )
+      );
+    } catch {
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.quoteId === quoteId
+            ? { ...j, status: { phase: "cancelled", message: "Quote cancelled" } }
+            : j
+        )
+      );
+    }
+  }, []);
+
   const dismissQuote = useCallback((quoteId: string) => {
     setJobs((prev) => prev.filter((j) => j.quoteId !== quoteId));
   }, []);
@@ -85,7 +107,7 @@ export function QuoteJobsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const active = jobs.filter(
-      (j) => !["completed", "error"].includes(j.status.phase)
+      (j) => !["completed", "error", "cancelled"].includes(j.status.phase)
     );
     if (active.length === 0) return;
 
@@ -105,8 +127,8 @@ export function QuoteJobsProvider({ children }: { children: ReactNode }) {
   }, [jobs]);
 
   const value = useMemo(
-    () => ({ jobs, startQuote, dismissQuote, openQuote }),
-    [jobs, startQuote, dismissQuote, openQuote]
+    () => ({ jobs, startQuote, cancelQuote, dismissQuote, openQuote }),
+    [jobs, startQuote, cancelQuote, dismissQuote, openQuote]
   );
 
   return <QuoteJobsContext.Provider value={value}>{children}</QuoteJobsContext.Provider>;

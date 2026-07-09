@@ -1,4 +1,4 @@
-import { CheckCircle2, Loader2, X, AlertCircle, ExternalLink } from "lucide-react";
+import { CheckCircle2, Loader2, X, AlertCircle, ExternalLink, Square } from "lucide-react";
 import { useQuoteJobs } from "../context/QuoteJobsContext";
 
 const PHASE_LABEL: Record<string, string> = {
@@ -7,11 +7,12 @@ const PHASE_LABEL: Record<string, string> = {
   launching: "SolidWorks",
   running: "Module6121 + AI",
   completed: "Complete",
+  cancelled: "Cancelled",
   error: "Failed",
 };
 
 export default function BackgroundQuoteBar() {
-  const { jobs, dismissQuote, openQuote } = useQuoteJobs();
+  const { jobs, cancelQuote, dismissQuote, openQuote } = useQuoteJobs();
   if (jobs.length === 0) return null;
 
   return (
@@ -20,6 +21,8 @@ export default function BackgroundQuoteBar() {
         const phase = job.status.phase;
         const done = phase === "completed";
         const failed = phase === "error";
+        const cancelled = phase === "cancelled";
+        const active = !done && !failed && !cancelled;
 
         return (
           <div
@@ -31,6 +34,8 @@ export default function BackgroundQuoteBar() {
                 <CheckCircle2 className="h-4 w-4 text-accent-green" />
               ) : failed ? (
                 <AlertCircle className="h-4 w-4 text-accent-rose" />
+              ) : cancelled ? (
+                <Square className="h-4 w-4 text-ink-500" />
               ) : (
                 <Loader2 className="h-4 w-4 animate-spin text-brand-400" />
               )}
@@ -53,13 +58,24 @@ export default function BackgroundQuoteBar() {
                 </button>
               )}
             </div>
-            <button
-              onClick={() => dismissQuote(job.quoteId)}
-              className="shrink-0 rounded-full p-1.5 text-ink-500 hover:bg-white/10 hover:text-ink-200"
-              title="Dismiss"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+            <div className="flex shrink-0 flex-col gap-1">
+              {active && (
+                <button
+                  onClick={() => cancelQuote(job.quoteId)}
+                  className="rounded-full p-1.5 text-accent-rose/80 hover:bg-accent-rose/10 hover:text-accent-rose"
+                  title="Cancel quote"
+                >
+                  <Square className="h-3.5 w-3.5" />
+                </button>
+              )}
+              <button
+                onClick={() => dismissQuote(job.quoteId)}
+                className="rounded-full p-1.5 text-ink-500 hover:bg-white/10 hover:text-ink-200"
+                title="Dismiss"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         );
       })}

@@ -22,8 +22,12 @@ from . import config, jobs
 LOCAL_WORKSPACE = Path(os.environ.get("CMS_LOCAL_WORKSPACE", r"C:\CMS_Local_Workspace"))
 HANDOFF_FILE = LOCAL_WORKSPACE / "cms_handoff.txt"
 EMAIL_OUTPUT_FILE = LOCAL_WORKSPACE / "cms_email.txt"
+CANCEL_FILE = LOCAL_WORKSPACE / "cms_quote_cancel.txt"
 STATUS_DIR = config.DATA_DIR / "quote_status"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+_active_launcher_procs: dict[str, subprocess.Popen] = {}
+_cancelled_quotes: set[str] = set()
 
 
 def _ensure_status_dir() -> None:
@@ -141,11 +145,16 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
 
     set_status(quote_id, phase="launching", message="Starting SolidWorks + Module6121...")
 
+    if quote_id in _cancelled_quotes:
+        set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
+        return {"launched": False, "cancelled": True, "quote_id": quote_id}
+
     launcher = _find_launcher()
     launched = False
     if launcher:
         try:
-            subprocess.Popen(["wscript", str(launcher), "/usemail"], close_fds=True)
+            proc = subprocess.Popen(["wscript", str(launcher), "/usemail"], close_fds=True)
+            _active_launcher_procs[quote_id] = proc
             launched = True
         except Exception as e:
             set_status(quote_id, phase="error", message=str(e))
@@ -237,9 +246,45 @@ def find_local_job_folder(c_number: str) -> Path | None:
     return None
 
 
+def is_quote_cancelled(quote_id: str) -> bool:
+    if quote_id in _cancelled_quotes:
+        return True
+    status = get_status(quote_id)
+    return bool(status and status.get("phase") == "cancelled")
+
+
+def cancel_quote(quote_id: str) -> dict:
+    """Stop a background quote run and mark it cancelled in the status file."""
+    _cancelled_quotes.add(quote_id)
+    proc = _active_launcher_procs.pop(quote_id, None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    try:
+        CANCEL_FILE.write_text(f"QuoteId={quote_id}\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    current = get_status(quote_id) or {"quote_id": quote_id}
+    set_status(
+        quote_id,
+        phase="cancelled",
+        message="Quote cancelled by user",
+        job_id=current.get("job_id") or quote_id,
+        dismissed=True,
+    )
+    return get_status(quote_id) or {"phase": "cancelled", "quote_id": quote_id}
+
+
 def poll_completion(quote_id: str) -> dict:
     """Check if macro has finished by looking for output files or status."""
     status = get_status(quote_id) or {"phase": "unknown", "quote_id": quote_id}
+    if status.get("phase") == "cancelled":
+        return status
     job_id = status.get("job_id") or status.get("c_number") or quote_id
 
     local = find_local_job_folder(job_id)
@@ -261,21 +306,6 @@ def poll_completion(quote_id: str) -> dict:
             status["local_folder"] = str(local)
 
     return status
-
-
-def list_active_quotes() -> list[dict]:
-    _ensure_status_dir()
-    active_phases = {"queued", "starting", "launching", "running"}
-    out: list[dict] = []
-    for path in sorted(STATUS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        phase = data.get("phase", "")
-        if phase in active_phases:
-            out.append(poll_completion(data.get("quote_id") or path.stem))
-    return out[:20]
 
 
 def list_active_quotes() -> list[dict]:

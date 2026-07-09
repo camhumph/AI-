@@ -268,6 +268,8 @@ export const api = {
       body: JSON.stringify({ folder_path, run_quote }),
     }),
   quoteStatus: (quoteId: string) => req<QuoteRunStatus>(`/quote/status/${encodeURIComponent(quoteId)}`),
+  cancelQuote: (quoteId: string) =>
+    req<QuoteRunStatus>(`/quote/cancel/${encodeURIComponent(quoteId)}`, { method: "POST", body: "{}" }),
   activeQuotes: () => req<QuoteRunStatus[]>("/quote/active"),
   getJob: (jobId: string) => req<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`),
   createJob: (job_id: string, display_name: string, customer: string) =>
