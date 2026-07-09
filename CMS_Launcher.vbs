@@ -55,8 +55,10 @@ Const EMAIL_OUTPUT_FILE = "C:\CMS_Local_Workspace\cms_email.txt"
 ' ============================================================
 Dim fso
 Set fso = CreateObject("Scripting.FileSystemObject")
-Dim gAttachDir
+Dim gAttachDir, gPreferredCNum, gCadPath
 gAttachDir = ""
+gPreferredCNum = ""
+gCadPath = ""
 
 ' Make sure the local workspace exists (handoff + email files live here)
 If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
@@ -66,8 +68,8 @@ If fso.FileExists(TRAINING_TRIGGER) Then
 End If
 LogStep "===== launcher started ====="
 
-' 1. No typing needed - the job number comes from the email and the
-'    quote number is assigned automatically from the proposals folder.
+' 1. Prefer an existing C-number (e.g. BMS-851100029-C18603 → C18603).
+'    Only assign a new quote number when no C##### is present.
 Dim cNum
 cNum = ""
 
@@ -107,17 +109,26 @@ If Not gotEmail Then
     LogStep "no Gmail quote email data found - continuing without a paste prompt"
 End If
 
-' 3. Assign the next quote number from the proposals folder
-Dim quoteNum
-quoteNum = GetNextQuoteNumber()
-If quoteNum = "" Then
-    If cNum <> "" Then quoteNum = "C-" & ExtractDigits(cNum) Else quoteNum = "C-00000"
+' 3. Prefer C-number already on the job (folder / subject / attachments).
+'    Example: BMS-851100029-C18603 → use C18603, do NOT assign C18635.
+Dim quoteNum, quoteNoHyphen, foundC
+foundC = ResolveExistingCNumber(custJobNum, gAttachDir)
+If foundC <> "" Then
+    cNum = foundC
+    quoteNoHyphen = foundC
+    If Left(UCase(foundC), 1) = "C" Then
+        quoteNum = "C-" & Mid(foundC, 2)
+    Else
+        quoteNum = "C-" & ExtractDigits(foundC)
+    End If
+    LogStep "using existing C-number from job/email: " & cNum
+Else
+    quoteNum = GetNextQuoteNumber()
+    If quoteNum = "" Then quoteNum = "C-00000"
+    quoteNoHyphen = Replace(quoteNum, "-", "")
+    cNum = quoteNoHyphen
+    LogStep "no existing C-number found — assigned new quote: " & quoteNum
 End If
-
-' 4. If no C-number was typed, the job IS the assigned quote number
-Dim quoteNoHyphen
-quoteNoHyphen = Replace(quoteNum, "-", "")
-If cNum = "" Then cNum = quoteNoHyphen
 
 ' 5. Create the job folder in the current month folder and drop the
 '    downloaded CAD/BOM files (from the email) into it.
@@ -137,33 +148,36 @@ If jobFolderPath = "" Then
     End If
 End If
 
-' 6. Write the handoff file for Module6121 (includes the month folder + job folder)
-WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir
+' 6. Find the CAD file NOW so SolidWorks can open it BEFORE the macro runs.
+gCadPath = FindBestCadInFolders(jobFolderPath, gAttachDir)
+If gCadPath <> "" Then
+    LogStep "CAD to open first: " & gCadPath
+Else
+    LogStep "WARNING: no CAD file found yet in job/attach folders"
+End If
+
+' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
+WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir, gCadPath
 
 Dim proposalPath
 proposalPath = ""
 LogStep "Quote=" & quoteNum & "  Job=" & jobFolderName & "  CustJob=" & custJobNum & _
-        "  Files=" & IIf(jobFolderPath <> "", "yes", "no") & "  Proposal=pending macro start"
+        "  Files=" & IIf(jobFolderPath <> "", "yes", "no") & "  CAD=" & IIf(gCadPath <> "", "yes", "no")
 
-' 7. Summary, then launch SolidWorks + macro - all in one unattended run
+' 8. Open SolidWorks → open the part/assembly FIRST → then run Module6121.swp
 Dim summary
 summary = "Quote #: " & quoteNum & " | Job folder: " & jobFolderName & _
           " | Month folder: " & monthFolder & " | Customer Job#: " & IIf(custJobNum <> "", custJobNum, "(not found)") & _
-          " | Similar to: " & IIf(similarTo  <> "", similarTo,  "(not found)") & _
-          " | Ship date: " & IIf(shipDate   <> "", shipDate,   "(not found)") & _
-          " | Job files: " & IIf(jobFolderPath <> "", jobFolderPath, "(share not reachable)") & _
-          " | Proposal: pending macro start"
+          " | CAD: " & IIf(gCadPath <> "", gCadPath, "(none)") & _
+          " | Job files: " & IIf(jobFolderPath <> "", jobFolderPath, "(share not reachable)")
 LogStep summary
 
-LogStep "updating purchased-component prices (DME lookup)"
-RunPriceLookup
-
-LogStep "launching SolidWorks + Module6121"
-If LaunchSolidWorksAndMacro() Then
+LogStep "launching SolidWorks, opening CAD, then Module6121.swp"
+If LaunchSolidWorksOpenCadThenMacro() Then
     proposalPath = FillProposal(cNum, quoteNum, custJobNum)
     LogStep "Proposal filled after macro start: " & IIf(proposalPath <> "", proposalPath, "skipped")
 Else
-    LogStep "Proposal skipped because SolidWorks macro did not start."
+    LogStep "Proposal skipped because SolidWorks / CAD / macro did not start."
 End If
 LogStep "===== launcher done ====="
 
@@ -312,7 +326,7 @@ End Function
 ' ============================================================
 ' HANDOFF FILE  (Module6121 reads this at startup)
 ' ============================================================
-Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobFolder, customerPrefix, customerName, attachDir)
+Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobFolder, customerPrefix, customerName, attachDir, cadPath)
     Dim f
     Set f = fso.CreateTextFile(HANDOFF_FILE, True)
     f.WriteLine "CNum="      & cNum
@@ -325,19 +339,167 @@ Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobF
     f.WriteLine "CustomerPrefix=" & customerPrefix
     f.WriteLine "CustomerName=" & customerName
     If attachDir <> "" Then f.WriteLine "AttachDir=" & attachDir
+    If cadPath <> "" Then f.WriteLine "CadPath=" & cadPath
     f.Close
 End Sub
 
-' ============================================================
-' LAUNCH SOLIDWORKS + MACRO
-' ============================================================
-Function LaunchSolidWorksAndMacro()
-    ' Same SolidWorks 2023 + Module6121.swp launch path as RunTrainingXtLauncher.vbs
-    ' (the path that successfully opens CAD during training).
+' Prefer C##### already present on the job (folder name, subject, attach path).
+' BMS-851100029-C18603 → C18603. Returns "" if none found.
+Function ResolveExistingCNumber(ByVal custJob, ByVal attachDir)
+    ResolveExistingCNumber = ""
+    Dim sources, i, hit
+    sources = Array(gPreferredCNum, custJob, attachDir)
+    ' Also scan cms_email.txt Subject / CustJob / AttachDir if present
+    If fso.FileExists(EMAIL_OUTPUT_FILE) Then
+        Dim ts, line, p, k, v
+        Set ts = fso.OpenTextFile(EMAIL_OUTPUT_FILE, 1)
+        Do Until ts.AtEndOfStream
+            line = ts.ReadLine
+            p = InStr(line, "=")
+            If p > 0 Then
+                k = UCase(Trim(Left(line, p - 1)))
+                v = Trim(Mid(line, p + 1))
+                If k = "SUBJECT" Or k = "CUSTJOB" Or k = "ATTACHDIR" Or k = "CNUM" Or k = "QUOTENUM" Then
+                    hit = ExtractCNumberToken(v)
+                    If hit <> "" Then
+                        ts.Close
+                        ResolveExistingCNumber = hit
+                        Exit Function
+                    End If
+                End If
+            End If
+        Loop
+        ts.Close
+    End If
+    For i = 0 To UBound(sources)
+        hit = ExtractCNumberToken(CStr(sources(i)))
+        If hit <> "" Then
+            ResolveExistingCNumber = hit
+            Exit Function
+        End If
+    Next
+End Function
+
+Function ExtractCNumberToken(s)
+    ExtractCNumberToken = ""
+    Dim u, p, i, ch, digits
+    u = UCase(CStr(s))
+    If u = "" Then Exit Function
+    ' Prefer -C##### or _C##### or trailing C#####
+    p = InStr(u, "-C")
+    If p = 0 Then p = InStr(u, "_C")
+    If p > 0 Then
+        i = p + 2
+        digits = ""
+        Do While i <= Len(u)
+            ch = Mid(u, i, 1)
+            If ch >= "0" And ch <= "9" Then
+                digits = digits & ch
+            Else
+                Exit Do
+            End If
+            i = i + 1
+        Loop
+        If Len(digits) >= 4 Then
+            ExtractCNumberToken = "C" & digits
+            Exit Function
+        End If
+    End If
+    ' Standalone C##### token
+    p = 1
+    Do While p <= Len(u)
+        If Mid(u, p, 1) = "C" And p < Len(u) Then
+            If Mid(u, p + 1, 1) >= "0" And Mid(u, p + 1, 1) <= "9" Then
+                If p = 1 Or Not ((Mid(u, p - 1, 1) >= "A" And Mid(u, p - 1, 1) <= "Z") Or (Mid(u, p - 1, 1) >= "0" And Mid(u, p - 1, 1) <= "9")) Then
+                    i = p + 1
+                    digits = ""
+                    Do While i <= Len(u)
+                        ch = Mid(u, i, 1)
+                        If ch >= "0" And ch <= "9" Then
+                            digits = digits & ch
+                        Else
+                            Exit Do
+                        End If
+                        i = i + 1
+                    Loop
+                    If Len(digits) >= 4 And Len(digits) <= 6 Then
+                        ExtractCNumberToken = "C" & digits
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+        p = p + 1
+    Loop
+End Function
+
+' Rank CAD files the same way the macro does (sldasm > step/x_t > sldprt).
+Function CadPriority(ext, fileName)
+    Dim e, bonus, u
+    e = LCase(ext)
+    u = UCase(fileName)
+    bonus = 0
+    If InStr(u, "MOLD") > 0 Or InStr(u, "BASE") > 0 Or InStr(u, "ASM") > 0 Then bonus = 20
+    Select Case e
+        Case "sldasm": CadPriority = 100 + bonus
+        Case "step", "stp": CadPriority = 80 + bonus
+        Case "x_t", "x_b": CadPriority = 75 + bonus
+        Case "igs", "iges": CadPriority = 70 + bonus
+        Case "sldprt": CadPriority = 50 + bonus
+        Case "prt": CadPriority = 45 + bonus
+        Case Else: CadPriority = 0
+    End Select
+End Function
+
+Function FindBestCadInFolder(folderPath)
+    FindBestCadInFolder = ""
+    If folderPath = "" Then Exit Function
+    If Not fso.FolderExists(folderPath) Then Exit Function
+    Dim bestPath, bestScore, f, sub1, score, hit
+    bestPath = "": bestScore = 0
+    On Error Resume Next
+    For Each f In fso.GetFolder(folderPath).Files
+        score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
+        If score > bestScore Then
+            bestScore = score
+            bestPath = f.Path
+        End If
+    Next
+    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+        If UCase(Left(sub1.Name, 1)) <> "_" Then
+            hit = FindBestCadInFolder(sub1.Path)
+            If hit <> "" Then
+                score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                If score > bestScore Then
+                    bestScore = score
+                    bestPath = hit
+                End If
+            End If
+        End If
+    Next
+    On Error GoTo 0
+    FindBestCadInFolder = bestPath
+End Function
+
+Function FindBestCadInFolders(jobFolder, attachDir)
+    Dim a, b, sa, sb
+    a = FindBestCadInFolder(jobFolder)
+    b = FindBestCadInFolder(attachDir)
+    If a = "" Then FindBestCadInFolders = b: Exit Function
+    If b = "" Then FindBestCadInFolders = a: Exit Function
+    sa = CadPriority(fso.GetExtensionName(a), fso.GetFileName(a))
+    sb = CadPriority(fso.GetExtensionName(b), fso.GetFileName(b))
+    If sb > sa Then FindBestCadInFolders = b Else FindBestCadInFolders = a
+End Function
+
+' Open SolidWorks 2023 → open the CAD part/assembly → THEN run Module6121.swp.
+' This matches how you work manually and avoids the empty welcome-screen hang.
+Function LaunchSolidWorksOpenCadThenMacro()
     Dim shell, sw, tries, macroPath, macroPaths(), mpIdx, pathCount
     Dim modNames, mi, okRun, ran, procNames, pi, macroErr
+    Dim errs, warns, importErrors, docType, ext, opened
     Set shell = CreateObject("WScript.Shell")
-    LaunchSolidWorksAndMacro = False
+    LaunchSolidWorksOpenCadThenMacro = False
 
     pathCount = 0
     If fso.FileExists(LOCAL_WORKSPACE_ROOT & "\Module6121.swp") Then
@@ -349,9 +511,8 @@ Function LaunchSolidWorksAndMacro()
         ReDim macroPaths(0)
         macroPaths(0) = SW_MACRO
         pathCount = 1
-        LogStep "using compiled macro: " & SW_MACRO
     Else
-        LogStep "ERROR: Module6121.swp not found at " & LOCAL_WORKSPACE_ROOT & " — copy compiled .swp there"
+        LogStep "ERROR: Module6121.swp not found at " & LOCAL_WORKSPACE_ROOT
         Exit Function
     End If
 
@@ -389,7 +550,7 @@ Function LaunchSolidWorksAndMacro()
     On Error Resume Next
     sw.Visible = True
     On Error GoTo 0
-    WScript.Sleep 1500
+    WScript.Sleep 2000
 
     tries = 0
     Do While tries < 45
@@ -403,49 +564,103 @@ Function LaunchSolidWorksAndMacro()
     sw.CommandInProgress = False
     On Error GoTo 0
 
-    ' Same module/procedure search order as training launcher.
-    ' RunFromLauncher first (handoff quoting); main() also routes to RunFromLauncher when cms_handoff.txt exists.
+    ' ---- OPEN THE CAD FIRST ----
+    opened = False
+    If gCadPath <> "" And fso.FileExists(gCadPath) Then
+        ext = LCase(fso.GetExtensionName(gCadPath))
+        errs = 0: warns = 0: importErrors = 0
+        LogStep "opening CAD before macro: " & gCadPath
+        On Error Resume Next
+        If ext = "sldasm" Then
+            sw.OpenDoc6 gCadPath, 2, 1, "", errs, warns   ' swDocASSEMBLY=2, Silent=1
+            If Err.Number = 0 Then opened = True
+        ElseIf ext = "sldprt" Then
+            sw.OpenDoc6 gCadPath, 1, 1, "", errs, warns   ' swDocPART=1
+            If Err.Number = 0 Then opened = True
+        Else
+            ' STEP / X_T / IGES — LoadFile4
+            sw.LoadFile4 gCadPath, "r", Nothing, importErrors
+            If Err.Number = 0 Then opened = True
+            If Not opened Then
+                Err.Clear
+                sw.LoadFile4 gCadPath, "", Nothing, importErrors
+                If Err.Number = 0 Then opened = True
+            End If
+            If Not opened Then
+                Err.Clear
+                sw.OpenDoc6 gCadPath, 2, 1, "", errs, warns
+                If Err.Number = 0 Then opened = True
+            End If
+        End If
+        Err.Clear
+        On Error GoTo 0
+        If opened Then
+            LogStep "CAD opened successfully — waiting for model to settle"
+            WScript.Sleep 3000
+            tries = 0
+            Do While tries < 60
+                On Error Resume Next
+                If Not sw.CommandInProgress Then Exit Do
+                On Error GoTo 0
+                WScript.Sleep 1000
+                tries = tries + 1
+            Loop
+            On Error Resume Next
+            sw.CommandInProgress = False
+            sw.Visible = True
+            On Error GoTo 0
+        Else
+            LogStep "WARNING: OpenDoc/LoadFile failed for " & gCadPath & " — macro will try to open it"
+        End If
+    Else
+        LogStep "WARNING: no CAD path to open first — macro will search job folder"
+    End If
+
+    ' ---- THEN RUN THE .SWP MACRO ----
+    ' Always start RunFromLauncher (reads handoff C-number). That entry point
+    ' detects an already-open CAD and quotes from it via RunActiveAssemblyWithHandoff.
     modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
-    procNames = Array("RunFromLauncher", "main")
+    procNames = Array("RunFromLauncher", "main", "RunActiveAssembly")
     ran = False
 
     For mpIdx = 0 To pathCount - 1
         macroPath = macroPaths(mpIdx)
-        LogStep "macro path: " & macroPath
-        If Not fso.FileExists(macroPath) Then
-            LogStep "macro missing: " & macroPath
-        Else
-            For pi = 0 To UBound(procNames)
-                For mi = 0 To UBound(modNames)
-                    okRun = False
-                    macroErr = 0
-                    On Error Resume Next
-                    sw.CommandInProgress = True
-                    okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
-                    If Err.Number = 0 And okRun <> True Then
-                        okRun = sw.RunMacro2(macroPath, modNames(mi), procNames(pi), 1, macroErr)
-                    End If
-                    sw.CommandInProgress = False
-                    If Err.Number = 0 And okRun = True Then
-                        On Error GoTo 0
-                        ran = True
-                        LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi) & " path=" & macroPath
-                        Exit For
-                    End If
-                    LogStep "RunMacro(2) failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number & " macroErr=" & macroErr
-                    Err.Clear
+        LogStep "running macro: " & macroPath
+        For pi = 0 To UBound(procNames)
+            For mi = 0 To UBound(modNames)
+                okRun = False
+                macroErr = 0
+                On Error Resume Next
+                sw.CommandInProgress = True
+                okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
+                If Err.Number = 0 And okRun <> True Then
+                    okRun = sw.RunMacro2(macroPath, modNames(mi), procNames(pi), 1, macroErr)
+                End If
+                sw.CommandInProgress = False
+                If Err.Number = 0 And okRun = True Then
                     On Error GoTo 0
-                Next
-                If ran Then Exit For
+                    ran = True
+                    LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi)
+                    Exit For
+                End If
+                LogStep "RunMacro(2) failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number & " macroErr=" & macroErr
+                Err.Clear
+                On Error GoTo 0
             Next
-        End If
+            If ran Then Exit For
+        Next
         If ran Then Exit For
     Next
 
     If Not ran Then
-        LogStep "RunMacro(2) could not start RunFromLauncher/main from Module6121.swp"
+        LogStep "ERROR: could not start Module6121.swp after opening CAD"
     End If
-    LaunchSolidWorksAndMacro = ran
+    LaunchSolidWorksOpenCadThenMacro = ran
+End Function
+
+' Legacy name kept for any external callers — routes to open-CAD-first path.
+Function LaunchSolidWorksAndMacro()
+    LaunchSolidWorksAndMacro = LaunchSolidWorksOpenCadThenMacro()
 End Function
 ' Show the Python job picker: a select-all list of unopened quote emails.
 Sub LaunchJobPicker()
@@ -518,6 +733,8 @@ Function RunGmailSearch(ByRef custJob, ByRef similar, ByRef ship)
             Select Case UCase(k)
                 Case "FOUND":     If v = "1" Then found = True
                 Case "CUSTJOB":   custJob = v
+                Case "CNUM":      gPreferredCNum = v
+                Case "QUOTENUM":  If gPreferredCNum = "" Then gPreferredCNum = Replace(v, "-", "")
                 Case "SIMILARTO": similar = v
                 Case "SHIPDATE":  ship = v
                 Case "ATTACHDIR": gAttachDir = v

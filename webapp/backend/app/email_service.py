@@ -469,6 +469,21 @@ def forward_message(message_id: str, to_addr: str, body: str = "") -> None:
             pass
 
 
+def extract_c_number(*texts: str) -> str:
+    """Prefer an existing CMS C-number like C18603 from BMS-...-C18603 names."""
+    for text in texts:
+        if not text:
+            continue
+        # Prefer -C##### / _C##### (BMS-851100029-C18603)
+        m = re.search(r"[-_]C(\d{4,6})\b", text, re.I)
+        if m:
+            return "C" + m.group(1)
+        m = re.search(r"\bC[- ]?(\d{4,6})\b", text, re.I)
+        if m:
+            return "C" + m.group(1)
+    return ""
+
+
 def _clean_job_token(token: str) -> str:
     token = (token or "").strip()
     if not token:
@@ -547,6 +562,7 @@ def extract_quote_info(msg: email.message.Message) -> dict:
     if not job:
         job = _first_job_token(text + "\n" + names_blob)
     job = _clean_job_token(job)
+    c_number = extract_c_number(names_blob, subject, text, job)
 
     ship_m = re.search(r"SHIP\s*DATE\s*[:#]?\s*([^\n\r]+)", text, re.I)
     similar_m = re.search(r"SIMILAR\s*TO\s*[:#]?\s*([^\n\r]+)", text, re.I)
@@ -554,6 +570,7 @@ def extract_quote_info(msg: email.message.Message) -> dict:
     return {
         "subject": subject,
         "cust_job": job,
+        "c_number": c_number,
         "similar_to": (similar_m.group(1).strip() if similar_m else ""),
         "ship_date": (ship_m.group(1).strip() if ship_m else ""),
         "attachment_names": attachment_names,
@@ -588,10 +605,17 @@ def _save_attachments(msg: email.message.Message, job_token: str) -> tuple[int, 
 
 def _write_email_handoff(info: dict, attach_dir: Path, attach_count: int) -> None:
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    c_number = info.get("c_number") or extract_c_number(
+        info.get("subject", ""),
+        info.get("cust_job", ""),
+        str(attach_dir),
+        " ".join(info.get("attachment_names") or []),
+    )
     lines = {
         "Found": "1",
         "Subject": info.get("subject", ""),
         "CustJob": info.get("cust_job", ""),
+        "CNum": c_number,
         "SimilarTo": info.get("similar_to", ""),
         "ShipDate": info.get("ship_date", ""),
         "Attachments": str(attach_count),
@@ -636,11 +660,19 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
 
     info = extract_quote_info(msg)
     tokens = guess_job_tokens(info["subject"])
-    job_token = info["cust_job"] or (tokens[0] if tokens else "")
+    # Prefer existing C-number (BMS-...-C18603) for folder/job id when present.
+    c_number = info.get("c_number") or extract_c_number(
+        info["subject"], info["cust_job"], " ".join(info.get("attachment_names") or [])
+    )
+    job_token = c_number or info["cust_job"] or (tokens[0] if tokens else "")
     if not job_token:
         job_token = f"EMAIL-{message_id}"
 
     attach_count, attach_dir = _save_attachments(msg, job_token)
+    # Re-scan attach path for C-number (folder names often carry BMS-...-C#####)
+    if not c_number:
+        c_number = extract_c_number(str(attach_dir), job_token)
+        info["c_number"] = c_number
     _write_email_handoff(info, attach_dir, attach_count)
 
     jobs.create_job(job_token, display_name=info["subject"][:80], customer=info["cust_job"])
@@ -654,7 +686,7 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
                 shutil.copy2(src, dest)
 
     launched = False
-    quote_id = info["cust_job"] or job_token
+    quote_id = c_number or info["cust_job"] or job_token
     if launch_macro:
         from . import quote_pipeline
 
@@ -663,6 +695,7 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
             phase="queued",
             message="Preparing quote — downloading attachments done.",
             cust_job=info["cust_job"],
+            c_number=c_number,
         )
         result = quote_pipeline.launch_full_quote(
             quote_id,
@@ -670,6 +703,7 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
             {
                 "subject": info["subject"],
                 "cust_job": info["cust_job"],
+                "c_number": c_number,
                 "similar_to": info["similar_to"],
                 "ship_date": info["ship_date"],
                 "attachments": attach_count,
@@ -683,6 +717,7 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
         "quote_id": quote_id,
         "subject": info["subject"],
         "cust_job": info["cust_job"],
+        "c_number": c_number,
         "attachments_saved": attach_count,
         "attach_dir": str(attach_dir),
         "launcher_started": launched,

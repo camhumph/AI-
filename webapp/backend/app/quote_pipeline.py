@@ -151,10 +151,25 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             pass
 
     info = email_info or {}
+    c_number = (info.get("c_number") or "").strip().upper()
+    if not c_number:
+        # Prefer C##### from subject / cust_job / attach path (BMS-...-C18603)
+        blob = " ".join(
+            [
+                str(info.get("subject", "")),
+                str(info.get("cust_job", "")),
+                str(attach_dir),
+                str(quote_id),
+            ]
+        )
+        m = re.search(r"[-_]C(\d{4,6})\b", blob, re.I) or re.search(r"\bC[- ]?(\d{4,6})\b", blob, re.I)
+        if m:
+            c_number = "C" + m.group(1)
     lines = {
         "Found": "1",
         "Subject": info.get("subject", ""),
         "CustJob": info.get("cust_job", ""),
+        "CNum": c_number,
         "SimilarTo": info.get("similar_to", ""),
         "ShipDate": info.get("ship_date", ""),
         "Attachments": str(info.get("attachments", 0)),
@@ -169,13 +184,14 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     set_status(
         quote_id,
         phase="starting",
-        message="Starting SolidWorks + Module6121 (price lookup in background)...",
+        message="Opening CAD in SolidWorks, then running Module6121.swp...",
         attach_dir=attach_dir,
+        c_number=c_number or None,
     )
 
     run_dme_price_lookup(wait=False)
 
-    set_status(quote_id, phase="launching", message="Starting SolidWorks + Module6121...")
+    set_status(quote_id, phase="launching", message="Opening CAD in SolidWorks first, then Module6121.swp...")
 
     if quote_id in _cancelled_quotes:
         set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
@@ -193,12 +209,13 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             return {"launched": False, "error": str(e)}
 
     # Give launcher a moment to write cms_handoff.txt with assigned C-number.
-    c_num = ""
-    for _ in range(20):
+    c_num = c_number
+    handoff: dict = {}
+    for _ in range(30):
         time.sleep(0.5)
         handoff = _read_handoff()
-        c_num = handoff.get("CNum", "") or handoff.get("QuoteNum", "").replace("-", "")
-        if c_num:
+        c_num = handoff.get("CNum", "") or handoff.get("QuoteNum", "").replace("-", "") or c_num
+        if c_num and handoff.get("JobFolder"):
             break
 
     if c_num:
@@ -206,7 +223,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         set_status(
             quote_id,
             phase="running",
-            message="Module6121 is quoting in SolidWorks (AI runs for standard bases)...",
+            message=f"SolidWorks opened CAD — Module6121 quoting {c_num}...",
             c_number=c_num,
             job_id=c_num,
             handoff=handoff if c_num else {},
@@ -215,7 +232,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         set_status(
             quote_id,
             phase="running",
-            message="SolidWorks macro started — waiting for C-number assignment...",
+            message="SolidWorks opening CAD, then Module6121.swp...",
             job_id=quote_id,
         )
 

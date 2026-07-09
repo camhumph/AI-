@@ -399,6 +399,7 @@ Private Type HandoffInfo
     CustomerPrefix As String
     CustomerName As String
     AttachDir As String
+    CadPath As String
 End Type
 
 Private Const HANDOFF_FILE As String = "C:\CMS_Local_Workspace\cms_handoff.txt"
@@ -576,25 +577,38 @@ On Error GoTo ErrHandler
     JobBaseName = CleanFileName(GetFileBaseName(modelTitle))
     If JobBaseName = "" Then JobBaseName = CleanFileName(modelTitle)
     If JobBaseName = "" Then JobBaseName = "ActiveCad"
-    CurrentJobNumber = JobBaseName
-    CustomerJobNumber = ""
-    CustomerPrefix = ""
-    CustomerDisplayName = ""
-    AssignedQuoteNumber = ""
-    SimilarToJob = ""
-    ShipDateText = ""
-    gExactJobFolderName = ""
-    NetworkJobFolder = ""
-    LocalJobFolder = ""
+    ' Prefer C-number from launcher handoff (e.g. C18603) over CAD file name.
+    If Not gProcessingHandoff Or CurrentJobNumber = "" Then
+        CurrentJobNumber = JobBaseName
+    End If
+    If Not gProcessingHandoff Then
+        CustomerJobNumber = ""
+        CustomerPrefix = ""
+        CustomerDisplayName = ""
+        AssignedQuoteNumber = ""
+        SimilarToJob = ""
+        ShipDateText = ""
+        gExactJobFolderName = ""
+    End If
+    If Not gProcessingHandoff Then
+        NetworkJobFolder = ""
+        LocalJobFolder = ""
+    End If
     gDiagBomPath = ""
     gEmailStatus = ""
 
-    If modelPath <> "" Then
+    If modelPath <> "" And NetworkJobFolder = "" Then
         NetworkJobFolder = fso.GetParentFolderName(modelPath)
     End If
     If NetworkJobFolder = "" Then NetworkJobFolder = LOCAL_WORKSPACE_ROOT
-    CurrentJobFolder = NetworkJobFolder & "\CMS_ACTIVE_QUOTE_" & JobBaseName & "_" & Format(Now, "yyyymmdd_hhnnss")
-    EnsureFolderDeep CurrentJobFolder
+    ' Use C-number folder when quoting from launcher (stable path for outputs).
+    If gProcessingHandoff And CurrentJobNumber <> "" Then
+        CurrentJobFolder = LOCAL_WORKSPACE_ROOT & "\" & CleanFileName(CurrentJobNumber)
+        EnsureFolderDeep CurrentJobFolder
+    Else
+        CurrentJobFolder = NetworkJobFolder & "\CMS_ACTIVE_QUOTE_" & JobBaseName & "_" & Format(Now, "yyyymmdd_hhnnss")
+        EnsureFolderDeep CurrentJobFolder
+    End If
     RunLogPath = CurrentJobFolder & "\CMS_Base_Export_Log.txt"
 
     LogLine "========================================"
@@ -884,9 +898,10 @@ On Error GoTo ErrHandler
 
     Set swApp = Application.SldWorks
 
-    If RUN_SOLIDWORKS_INVISIBLE Then
-        On Error Resume Next: swApp.Visible = False: On Error GoTo ErrHandler
-    End If
+    ' Keep SolidWorks visible when CAD was opened by the launcher first.
+    On Error Resume Next
+    swApp.Visible = True
+    On Error GoTo ErrHandler
 
     MacroStartTime = Now
     StartupLogPath = DOWNLOADS_FOLDER & "\CMS_Base_Export_Log.txt"
@@ -914,6 +929,33 @@ On Error GoTo ErrHandler
     If handoff.CustJob  <> "" Then LogLine "Customer job #:    " & handoff.CustJob
     If handoff.SimilarTo <> "" Then LogLine "Similar to:        " & handoff.SimilarTo
     If handoff.ShipDate <> "" Then LogLine "Ship date:         " & handoff.ShipDate
+    If handoff.CadPath <> "" Then LogLine "CadPath from handoff: " & handoff.CadPath
+
+    ' If the launcher already opened the CAD, quote from the active document
+    ' (same path as RunActiveAssembly) instead of searching/re-opening.
+    If ActiveCadIsOpen() Then
+        LogLine "CAD already open in SolidWorks — quoting from active document"
+        RunActiveAssemblyWithHandoff handoff
+        GoTo NormalEnd
+    End If
+
+    ' If CadPath was provided but not open yet, open it now then quote active.
+    If handoff.CadPath <> "" Then
+        If fsoTrain.FileExists(handoff.CadPath) Then
+            LogLine "Opening CadPath from handoff before ProcessOneJob: " & handoff.CadPath
+            Set swModel = OpenCadFile(handoff.CadPath)
+            If Not swModel Is Nothing Then
+                MainCadOpenedByMacro = True
+                MainCadTitleForClose = swModel.GetTitle
+                Dim errsOpen As Long
+                swApp.ActivateDoc3 swModel.GetTitle, False, 0, errsOpen
+                LogLine "CAD opened from handoff — quoting from active document"
+                RunActiveAssemblyWithHandoff handoff
+                GoTo NormalEnd
+            End If
+            LogLine "OpenCadFile failed for handoff CadPath — falling back to ProcessOneJob"
+        End If
+    End If
 
     Dim completed As Collection, failed As Collection
     Set completed = New Collection: Set failed = New Collection
@@ -924,7 +966,7 @@ On Error GoTo ErrHandler
 
     CloseAllDocumentsSafely
     On Error Resume Next
-    If Not RUN_SOLIDWORKS_INVISIBLE Then swApp.Visible = True
+    swApp.Visible = True
     On Error GoTo ErrHandler
 
     LogLine BuildBatchSummary(completed, failed)
@@ -935,7 +977,7 @@ NormalEnd:
     On Error Resume Next
     RestoreMainViewportGraphics
     CloseAllDocumentsSafely
-    If Not swApp Is Nothing And Not RUN_SOLIDWORKS_INVISIBLE Then swApp.Visible = True
+    If Not swApp Is Nothing Then swApp.Visible = True
     Exit Sub
 ErrHandler:
     LogLine "RunFromLauncher error: " & Err.Description
@@ -943,6 +985,48 @@ ErrHandler:
     RestoreMainViewportGraphics
     CloseAllDocumentsSafely
     If Not SUPPRESS_USER_PROMPTS Then MsgBox "Macro error: " & Err.Description & vbCrLf & RunLogPath, vbCritical
+End Sub
+
+' Quote from the already-open CAD, but keep launcher C-number / customer info.
+Private Sub RunActiveAssemblyWithHandoff(ByRef h As HandoffInfo)
+On Error GoTo ErrHandler
+    AssignedQuoteNumber = h.QuoteNum
+    CustomerJobNumber = h.CustJob
+    CustomerPrefix = h.CustomerPrefix
+    CustomerDisplayName = h.CustomerName
+    SimilarToJob = h.SimilarTo
+    ShipDateText = h.ShipDate
+    gExactJobFolderName = h.JobFolder
+    gHandoffAttachDir = h.AttachDir
+    gProcessingHandoff = True
+
+    If h.CNum <> "" Then
+        CurrentJobNumber = UCase(Trim(h.CNum))
+    End If
+
+    ' Prefer the staged job folder / attach dir as output root when available.
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If h.RootPath <> "" And h.JobFolder <> "" Then
+        Dim cand As String
+        cand = h.RootPath & "\" & h.JobFolder
+        If fso.FolderExists(cand) Then
+            NetworkJobFolder = cand
+        End If
+    End If
+    If NetworkJobFolder = "" And h.AttachDir <> "" Then
+        If fso.FolderExists(h.AttachDir) Then NetworkJobFolder = h.AttachDir
+    End If
+
+    RunActiveAssembly
+
+    gProcessingHandoff = False
+    gHandoffAttachDir = ""
+    Exit Sub
+ErrHandler:
+    gProcessingHandoff = False
+    gHandoffAttachDir = ""
+    LogLine "RunActiveAssemblyWithHandoff error: " & Err.Description
 End Sub
 
 Private Function ReadHandoffFile() As HandoffInfo
@@ -970,6 +1054,7 @@ On Error GoTo eh
                 Case "CUSTOMERPREFIX": ReadHandoffFile.CustomerPrefix = v
                 Case "CUSTOMERNAME": ReadHandoffFile.CustomerName = v
                 Case "ATTACHDIR": ReadHandoffFile.AttachDir = v
+                Case "CADPATH": ReadHandoffFile.CadPath = v
             End Select
         End If
     Loop
