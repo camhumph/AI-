@@ -174,7 +174,11 @@ def _extract_plates_from_rows(row_values_list: list, sheet_name: str) -> list[di
             role = role_for_sheet_name(cell)
             if role and not name:
                 name = cell
-                nums = [safe_float(c) for c in cells[i + 1 : i + 8] if _parse_fraction_inch(c) > 0]
+                nums = [
+                    _parse_fraction_inch(c)
+                    for c in cells[i + 1 : i + 8]
+                    if _parse_fraction_inch(c) > 0
+                ]
                 t = w = l = 0.0
                 if len(nums) >= 3:
                     t, w, l = nums[0], nums[1], nums[2]
@@ -276,7 +280,7 @@ def _read_sheet_plates_csv_fallback(path: Path) -> list[dict]:
             for cell in row:
                 role = role_for_sheet_name(cell)
                 if role:
-                    nums = [safe_float(c) for c in row if safe_float(c) > 0]
+                    nums = [_parse_fraction_inch(c) for c in row if _parse_fraction_inch(c) > 0]
                     plates.append(
                         {
                             "sheet_name": cell,
@@ -309,6 +313,60 @@ def _size_close(a: float, b: float, tol: float = 0.06) -> bool:
     return abs(a - b) <= tol or abs(a - b) / max(a, b) <= 0.03
 
 
+def _sorted_positive_dims(*vals: float) -> list[float]:
+    return sorted(v for v in vals if v > 0)
+
+
+def _match_plate_to_row_score(plate: dict, row: dict) -> float:
+    """Score how well a steel-sheet plate row matches one XT component.
+
+    Steel sheets often list W×L×T in varying column order and use fractions
+    like 1 3/8 — compare sorted dimension triplets, not fixed T/W/L columns.
+    """
+    t = safe_float(row.get("Thickness"))
+    w = safe_float(row.get("Width"))
+    l = safe_float(row.get("Length"))
+    pt = plate["thickness"]
+    pw = plate["width"]
+    pl = plate["length"]
+
+    score = 0.0
+    plate_sorted = _sorted_positive_dims(pt, pw, pl)
+    row_sorted = _sorted_positive_dims(t, w, l)
+    if len(plate_sorted) == 3 and len(row_sorted) == 3:
+        if all(_size_close(a, b) for a, b in zip(plate_sorted, row_sorted)):
+            score += 9
+
+    # Best oriented assignment (handles steel column order differences)
+    from itertools import permutations
+
+    plate_vals = [v for v in (pt, pw, pl) if v > 0]
+    if len(plate_vals) == 3:
+        for ot, ow, ol in set(permutations(plate_vals)):
+            oriented = 0.0
+            if _size_close(t, ot):
+                oriented += 3
+            if _size_close(w, ow) or _size_close(w, ol):
+                oriented += 2
+            if _size_close(l, ol) or _size_close(l, ow):
+                oriented += 2
+            score = max(score, oriented)
+    elif len(plate_vals) == 2:
+        matched = 0
+        for pv in plate_vals:
+            for rv in (t, w, l):
+                if _size_close(pv, rv):
+                    matched += 1
+                    break
+        score = max(score, float(matched * 3))
+
+    comp_name = _norm_name(row.get("Component", ""))
+    role_phrase = plate["role"].replace("_", " ")
+    if role_phrase in comp_name or _norm_name(plate["sheet_name"]) in comp_name:
+        score += 4
+    return score
+
+
 def match_components(xt_rows: list[dict], plates: list[dict]) -> list[dict]:
     """Match CAD components to steel-sheet plate names by dimensions."""
     assignments: dict[str, str] = {}
@@ -324,23 +382,11 @@ def match_components(xt_rows: list[dict], plates: list[dict]) -> list[dict]:
             idx = row.get("Index", "")
             if idx in used_indices:
                 continue
-            t = safe_float(row.get("Thickness"))
-            w = safe_float(row.get("Width"))
-            l = safe_float(row.get("Length"))
-            score = 0
-            if _size_close(t, plate["thickness"]):
-                score += 3
-            if _size_close(w, plate["width"]) or _size_close(w, plate["length"]):
-                score += 2
-            if _size_close(l, plate["length"]) or _size_close(l, plate["width"]):
-                score += 2
-            comp_name = _norm_name(row.get("Component", ""))
-            if role.replace("_", " ") in comp_name or plate["sheet_name"].lower() in comp_name:
-                score += 4
+            score = _match_plate_to_row_score(plate, row)
             if score > best_score:
                 best_score = score
                 best_idx = idx
-        if best_idx and best_score >= 3:
+        if best_idx and best_score >= 5:
             assignments[best_idx] = role
             used_indices.add(best_idx)
 
