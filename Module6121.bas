@@ -37,20 +37,27 @@ Private Const FORCE_LOCAL_PUBLISH As Boolean = False         ' True = always use
 Private Const PUBLISH_OUTPUTS As Boolean = True              ' copy signature/sheets/images to the matching folder for Elgin
 Private Const DELETE_EXTRACTED_ZIP_AFTER_FLATTEN As Boolean = True
 Private Const SYNC_COMPLETED_JOB_TO_NETWORK As Boolean = True  ' completed local package copied back to the source job folder
-Private Const WRITE_PCS_NAMING_ANALYSIS As Boolean = True
+Private Const WRITE_PCS_NAMING_ANALYSIS As Boolean = False
 
 Private Const RUN_SOLIDWORKS_INVISIBLE As Boolean = True
 Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
 
-' Deliverable exports: always write STL + DXF + IGS + EASM + ISO JPGs.
-' Per-plate STLs and visual inspection stay optional (slower).
-Private Const FAST_QUOTE_MODE As Boolean = False
+' Deliverable exports: always write STL + DXF + ISO JPGs.
+' FAST_QUOTE_MODE skips the slowest steps on large assemblies:
+'   - ResolveAllLightWeight / Unsuppress-all before export
+'   - assembly->temp-part STL merge (uses direct one-file STL instead)
+'   - EASM + IGS (heavy neutrals)
+'   - visual inspection / PCS naming analysis
+Private Const FAST_QUOTE_MODE As Boolean = True
 Private Const CREATE_ISO_JPEGS As Boolean = True
 Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = False
 Private Const CREATE_DIM_DXF As Boolean = False   ' DIM DXF removed per request
 Private Const EXPORT_PER_PLATE_STLS As Boolean = False
-Private Const EXPORT_HEAVY_NEUTRALS As Boolean = True   ' write .easm + .igs
+' Heavy neutrals are slow on 200+ part STEP imports; off in fast mode.
+Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
+' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow).
+Private Const STL_MERGE_MAX_PARTS As Long = 40
 Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
@@ -733,10 +740,17 @@ On Error GoTo ErrHandler
         LogDone "Set BMS pot-block TCP/top orientation (active CAD)"
     End If
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
-    UnsuppressAllAssemblyComponents swModel
-    ShowAllAssemblyComponents swModel
+    If (Not FAST_QUOTE_MODE) Or (Not gJobIsStandardBase) Then
+        UnsuppressAllAssemblyComponents swModel
+        ShowAllAssemblyComponents swModel
+    Else
+        LogLine "FAST QUOTE: skipped Unsuppress-all (active CAD, standard)"
+        On Error Resume Next
+        ShowAllAssemblyComponents swModel
+        On Error GoTo ErrHandler
+    End If
     ApplyCmsTopView swModel
-    StabilizeActiveView swModel, 100
+    StabilizeActiveView swModel, 50
 
     If isStd Then
         LogStart "Classify STANDARD mold base from active CAD"
@@ -746,7 +760,9 @@ On Error GoTo ErrHandler
     End If
 
     BuildPullcoreList
-    If WRITE_PCS_NAMING_ANALYSIS Then WritePcsNamingAnalysis CurrentJobFolder & "\PCS_Naming_Analysis.csv", isStd
+    If WRITE_PCS_NAMING_ANALYSIS And Not FAST_QUOTE_MODE Then
+        WritePcsNamingAnalysis CurrentJobFolder & "\PCS_Naming_Analysis.csv", isStd
+    End If
     DoEvents
 
     If FILL_QUOTE_WORKBOOK Then
@@ -1378,35 +1394,20 @@ On Error GoTo ErrHandler
     ' gemini1: capture corrected *Front matrix so merged STL post-rotates correctly.
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
 
-    On Error Resume Next
-    swModel.ResolveAllLightWeightComponents True
-    On Error GoTo ErrHandler
-
-    UnsuppressAllAssemblyComponents swModel
-    ShowAllAssemblyComponents swModel
-    ApplyCmsTopView swModel
-    StabilizeActiveView swModel, 100
-
-    LogStart "Export base package"
-    ExportBasePackage CurrentJobFolder & "\base"
-    LogDone "Export base package"
-
-    If RUN_VISUAL_MOLD_INSPECTION And Not FAST_QUOTE_MODE Then
-        LogStart "Visual mold inspection"
-        RunVisualMoldInspection
-        LogDone "Visual mold inspection"
-    Else
-        LogLine "Fast quote: skipped visual mold inspection"
-    End If
-
+    ' Quote/steel FIRST so the webapp has numbers even if export is still running.
+    ' (Previously export ran before ClassifyStandardBasePlates — quote waited on STL/DXF.)
     If isStd Then
+        LogStart "Classify STANDARD mold base plates"
         ClassifyStandardBasePlates
         CaptureStandardPurchasedFromCadIfNeeded
+        LogDone "Classify STANDARD mold base plates"
     End If
 
     BuildPullcoreList
 
-    If WRITE_PCS_NAMING_ANALYSIS Then WritePcsNamingAnalysis CurrentJobFolder & "\PCS_Naming_Analysis.csv", isStd
+    If WRITE_PCS_NAMING_ANALYSIS And Not FAST_QUOTE_MODE Then
+        WritePcsNamingAnalysis CurrentJobFolder & "\PCS_Naming_Analysis.csv", isStd
+    End If
 
     If FILL_QUOTE_WORKBOOK Then
         LogStart "Fill Quote workbook"
@@ -1420,8 +1421,33 @@ On Error GoTo ErrHandler
     End If
 
     ComputePullcoreQuote
-
     ComputePurchasedQuote
+
+    ' Heavy SolidWorks prep only when needed (BMS hide-list / non-fast).
+    If (Not FAST_QUOTE_MODE) Or (Not gJobIsStandardBase) Then
+        On Error Resume Next
+        swModel.ResolveAllLightWeightComponents True
+        On Error GoTo ErrHandler
+        UnsuppressAllAssemblyComponents swModel
+        ShowAllAssemblyComponents swModel
+    Else
+        LogLine "FAST QUOTE: skipped ResolveAllLightWeight / Unsuppress-all (standard)"
+        On Error Resume Next
+        ShowAllAssemblyComponents swModel
+        On Error GoTo ErrHandler
+    End If
+    ApplyCmsTopView swModel
+    StabilizeActiveView swModel, 50
+
+    LogStart "Export base package"
+    ExportBasePackage CurrentJobFolder & "\base"
+    LogDone "Export base package"
+
+    If RUN_VISUAL_MOLD_INSPECTION And Not FAST_QUOTE_MODE Then
+        LogStart "Visual mold inspection"
+        RunVisualMoldInspection
+        LogDone "Visual mold inspection"
+    End If
 
     OrganizeJobFiles
 
@@ -2543,10 +2569,40 @@ On Error GoTo ErrHandler
     Dim stlBasePath As String
     stlBasePath = GetUniqueFilePath(outputFolder & "\" & baseName & ".stl")
 
-    ' gemini1: ONE merged STL (assembly -> temp part -> Combine Add -> STL).
-    LogStart "Export merged full-assembly STL (gemini1)"
+    ' Native SolidWorks copy first (DXF needs the .sldasm path).
+    SaveModelAs swModel, sldPath
+    SaveModelAs swModel, xtPath
+
+    ' Fast path: ISO + DXF before STL so the job folder fills quickly.
+    If CREATE_ISO_JPEGS Then
+        If gJobIsStandardBase Then
+            ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
+            LogLine "ISO JPGs written to job folder (STANDARD full assembly — no Pyropel isolation)"
+        Else
+            ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
+            LogLine "ISO JPGs written to job folder (BMS Pyropel hidden)"
+        End If
+    End If
+
+    If EXPORT_BASE_DXF Then
+        If gJobIsStandardBase Then
+            LogLine "STANDARD BASE DXF: full assembly (no Pyropel isolation / no pot-block keep-list)"
+            CreateProjectedDxfFromNativePath sldPath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
+        Else
+            CreateBaseDxfWithoutPyropel sldPath, dxfPath
+        End If
+        LogLine "DXF written: " & dxfPath
+    End If
+
+    ' STL last (largest mesh write). Large assemblies skip temp-part merge.
+    LogStart "Export full-assembly STL"
     If swModel.GetType = swDocASSEMBLY Then
-        SaveAssemblyAsMergedPartStl swModel, stlPath
+        If FAST_QUOTE_MODE Or PartCount > STL_MERGE_MAX_PARTS Or gJobIsStandardBase Then
+            LogLine "STL: direct one-file assembly export (skip temp-part merge; PartCount=" & PartCount & ")"
+            SaveFullAssemblyStlFromAssembly swModel, stlPath
+        Else
+            SaveAssemblyAsMergedPartStl swModel, stlPath
+        End If
     Else
         SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
     End If
@@ -2558,49 +2614,22 @@ On Error GoTo ErrHandler
         If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
     End If
     On Error GoTo ErrHandler
-    LogDone "Export merged full-assembly STL (gemini1)"
+    LogDone "Export full-assembly STL"
 
-    ' Native SolidWorks copy of the whole base + required deliverables.
-    SaveModelAs swModel, sldPath
-    SaveModelAs swModel, xtPath
-    If EXPORT_HEAVY_NEUTRALS Then
+    If EXPORT_HEAVY_NEUTRALS And Not FAST_QUOTE_MODE Then
         If swModel.GetType = swDocASSEMBLY Then
             SaveModelAs swModel, easmPath
             LogLine "EASM written: " & easmPath
         End If
         SaveModelAs swModel, igsPath
         LogLine "IGS written: " & igsPath
+    Else
+        LogLine "FAST QUOTE: skipped EASM/IGS (heavy neutrals)"
     End If
 
     ' Per-plate STLs (TCP, BCP, ID/OD Holder, ID/OD Pot) — optional / slow.
     If EXPORT_PER_PLATE_STLS Then
         ExportPlateStlsForComparison CurrentJobFolder & "\stl"
-    End If
-
-    ' Front + back ISO JPGs.
-    ' Standard molds: full assembly (no Pyropel on these jobs).
-    ' BMS / pot-block: hide non-base (Pyropel) via keep-list.
-    If CREATE_ISO_JPEGS Then
-        If gJobIsStandardBase Then
-            ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
-            LogLine "ISO JPGs written to job folder (STANDARD full assembly — no Pyropel isolation)"
-        Else
-            ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
-            LogLine "ISO JPGs written to job folder (BMS Pyropel hidden)"
-        End If
-    End If
-
-    ' Base DXF (4 projected views).
-    ' Standard molds: full native assembly DXF — no TCP/holder/pot keep-list.
-    ' BMS: isolate base plates and hide Pyropel (gemini1 path).
-    If EXPORT_BASE_DXF Then
-        If gJobIsStandardBase Then
-            LogLine "STANDARD BASE DXF: full assembly (no Pyropel isolation / no pot-block keep-list)"
-            CreateProjectedDxfFromNativePath sldPath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
-        Else
-            CreateBaseDxfWithoutPyropel sldPath, dxfPath
-        End If
-        LogLine "DXF written: " & dxfPath
     End If
 
     ApplyCmsTopView swModel
