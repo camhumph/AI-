@@ -7054,10 +7054,23 @@ Private Function StdFullPlateNameFromGeometry(ByVal pos As Long, ByVal nFull As 
     ' Exact shop-standard tokens from imported STEP files are stronger than the
     ' generic stack pattern. Keep using geometry for generic/mixed names.
     Select Case NormalizeKey(hinted)
-        Case "APLATE", "BPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", "BOTTOMCLAMPPLATE"
+        Case "APLATE", "BPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", _
+             "BOTTOMCLAMPPLATE", "TOPCLAMPPLATE", "SUPPORTPLATE", "STRIPPERPLATE"
             StdFullPlateNameFromGeometry = hinted
             Exit Function
     End Select
+
+    ' Sequenced / latch-lock SC stack (Qwen + mold_geometry_knowledge):
+    ' A / B / SC Retainer / SC Backup / Bottom Clamp when no top clamp.
+    If gStdSequencedLatchLock And Not StdTopClampAppearsPresent(fullIdx, nFull) And nFull >= 5 Then
+        Select Case pos
+            Case 1: StdFullPlateNameFromGeometry = "A Plate": Exit Function
+            Case 2: StdFullPlateNameFromGeometry = "B Plate": Exit Function
+            Case 3: StdFullPlateNameFromGeometry = "SC Retainer Plate": Exit Function
+            Case 4: StdFullPlateNameFromGeometry = "SC Backup Plate": Exit Function
+            Case nFull: StdFullPlateNameFromGeometry = "Bottom Clamp Plate": Exit Function
+        End Select
+    End If
 
     If Not STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK Then
         StdFullPlateNameFromGeometry = guessed
@@ -7387,11 +7400,25 @@ End Function
 Private Sub BuildStdFromGeometry()
     If PartCount < 1 Then Exit Sub
 
-    ' Base footprint and base W/L from the largest-footprint part.
-    Dim i As Long, fp As Double, baseFoot As Double, baseW As Double, baseL As Double
-    baseFoot = 0: baseW = 0: baseL = 0
+    ' ================================================================
+    ' Qwen classify_geometry parity — full offline stack thinking:
+    '   1. Strong shop-name tokens (A-PLATE, LDR-PIN, LBB, RAIL, EJ-*, SC-*)
+    '   2. Full-footprint plates -> stack axis -> top-to-bottom order
+    '   3. Bottom-up orientation from rails/ejector (pins only if missing)
+    '   4. Two-half mold pattern when only 2 full plates
+    '   5. Zone-based rails + ejector plates near support/bottom
+    '   6. Round hardware by diameter/length + pin-bushing plane match
+    '   7. Latch-lock sequenced / SC stack naming
+    '   8. Measure pin top/bottom direction WITHOUT flipping A/B
+    ' ================================================================
+
+    Dim i As Long, j As Long, fp As Double, baseFoot As Double, baseW As Double, baseL As Double
+    Dim maxW As Double, maxL As Double
+    baseFoot = 0: baseW = 0: baseL = 0: maxW = 0: maxL = 0
     For i = 1 To PartCount
         fp = parts(i).Width * parts(i).Length
+        If parts(i).Width > maxW Then maxW = parts(i).Width
+        If parts(i).Length > maxL Then maxL = parts(i).Length
         If fp > baseFoot Then baseFoot = fp: baseW = parts(i).Width: baseL = parts(i).Length
     Next i
     If baseFoot <= 0 Then Exit Sub
@@ -7400,43 +7427,124 @@ Private Sub BuildStdFromGeometry()
     Dim railIdx(1 To 60) As Long, nRail As Long
     Dim ejIdx(1 To 60) As Long, nEj As Long
     Dim lpIdx(1 To 120) As Long, nLp As Long
-    nFull = 0: nRail = 0: nEj = 0: nLp = 0
+    Dim shopLocked() As Boolean
+    Dim shopPlateName As String
     Dim t As Double, w As Double, l As Double
-    Dim rr As String
+    Dim rr As String, uName As String
+    Dim already As Boolean
+    Dim alreadyFull As Boolean
+    nFull = 0: nRail = 0: nEj = 0: nLp = 0
+    ReDim shopLocked(1 To PartCount)
+
+    ' --- Pass 0: latch-lock / sequenced detection ---
+    For i = 1 To PartCount
+        If IsLatchLockName(parts(i).componentName) Then
+            gStdSequencedLatchLock = True
+            Exit For
+        End If
+    Next i
+
+    ' --- Pass 1: collect candidates; shop tokens lock roles early ---
     For i = 1 To PartCount
         t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
+        uName = UCase(parts(i).componentName)
+        shopPlateName = StandardPlateNameStd(parts(i).componentName)
+        fp = w * l
+
+        ' Latch-lock hardware
+        If IsLatchLockName(parts(i).componentName) Then
+            SetStdCadRole i, "Latch Lock / Safety Strap"
+            shopLocked(i) = True
+        End If
+
+        ' Shop-token rails
+        If (InStr(uName, "RAIL-") > 0 Or InStr(uName, "_RAIL") > 0 Or InStr(uName, "/RAIL") > 0 Or _
+            InStr(uName, " RAIL") > 0) And NormalizeKey(shopPlateName) <> "APLATE" Then
+            If nRail < UBound(railIdx) Then
+                nRail = nRail + 1: railIdx(nRail) = i
+                SetStdCadRole i, "Rails"
+                shopLocked(i) = True
+            End If
+            GoTo nextCollect
+        End If
+
+        ' Shop-token ejector stack plates
+        If NormalizeKey(shopPlateName) = "EJECTORPLATE" Or NormalizeKey(shopPlateName) = "BOTTOMEJECTORPLATE" Then
+            If nEj < UBound(ejIdx) Then
+                nEj = nEj + 1: ejIdx(nEj) = i
+                SetStdCadRole i, shopPlateName
+                shopLocked(i) = True
+            End If
+            GoTo nextCollect
+        End If
+
+        ' Shop-token structural plates (A/B/SC/clamp/support) — lock role even
+        ' when footprint is under the full-plate threshold (Qwen applies tokens
+        ' before geometry filters). Only add to fullIdx when footprint qualifies.
+        If shopPlateName <> "" Then
+            Select Case NormalizeKey(shopPlateName)
+                Case "APLATE", "BPLATE", "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
+                     "SUPPORTPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", "STRIPPERPLATE"
+                    SetStdCadRole i, shopPlateName
+                    shopLocked(i) = True
+                    If (w >= maxW * 0.85 And l >= maxL * 0.85 And t >= 0.5) Or _
+                       (fp >= (1 - STD_FOOTPRINT_TOL) * baseFoot And t >= STD_MIN_PLATE_THICKNESS) Then
+                        alreadyFull = False
+                        For j = 1 To nFull
+                            If fullIdx(j) = i Then alreadyFull = True: Exit For
+                        Next j
+                        If Not alreadyFull And nFull < UBound(fullIdx) Then
+                            nFull = nFull + 1
+                            fullIdx(nFull) = i
+                        End If
+                    End If
+                    GoTo nextCollect
+            End Select
+        End If
+
         If t >= STD_MIN_PLATE_THICKNESS Then
-            fp = w * l
-            If fp >= (1 - STD_FOOTPRINT_TOL) * baseFoot Then
+            ' Full-footprint: Qwen uses >= 85% of max W AND max L; macro uses footprint tol.
+            If (w >= maxW * 0.85 And l >= maxL * 0.85 And t >= 0.5) Or _
+               (fp >= (1 - STD_FOOTPRINT_TOL) * baseFoot And t >= STD_MIN_PLATE_THICKNESS) Then
                 If nFull < UBound(fullIdx) Then
                     nFull = nFull + 1
                     fullIdx(nFull) = i
                 End If
-            ElseIf IsStandardRailCandidate(i, baseW, baseL) Then
+            ElseIf Not shopLocked(i) And IsStandardRailCandidate(i, baseW, baseL) Then
                 If nRail < UBound(railIdx) Then
                     nRail = nRail + 1
                     railIdx(nRail) = i
                 End If
-            ElseIf IsStandardEjectorPlateCandidate(i, baseW, baseL, baseFoot) Then
+            ElseIf Not shopLocked(i) And IsStandardEjectorPlateCandidate(i, baseW, baseL, baseFoot) Then
                 If nEj < UBound(ejIdx) Then
                     nEj = nEj + 1
                     ejIdx(nEj) = i
                 End If
             End If
         End If
+
+        ' Round guide hardware (leader / bushing / return / pillar)
         If IsRoundBarLike(i) Then
             rr = NormalizeKey(StandardRoundComponentRole(i))
-            If rr = "LEADERPIN" Or rr = "LEADERPINBUSHING" Or rr = "GUIDEDEJECTORBUSHING" Then
-                If nLp < UBound(lpIdx) Then
-                    nLp = nLp + 1
-                    lpIdx(nLp) = i
+            If rr = "LEADERPIN" Or rr = "LEADERPINBUSHING" Or rr = "GUIDEDEJECTORBUSHING" Or _
+               rr = "RETURNPIN" Or rr = "EJECTORRETURNPIN" Or rr = "SUPPORTPILLAR" Then
+                If rr = "LEADERPIN" Or rr = "LEADERPINBUSHING" Or rr = "GUIDEDEJECTORBUSHING" Then
+                    If nLp < UBound(lpIdx) Then
+                        nLp = nLp + 1
+                        lpIdx(nLp) = i
+                    End If
+                End If
+                If InStr(uName, "LDR-PIN") > 0 Or InStr(uName, "LDR_PIN") > 0 Or _
+                   InStr(uName, "LBB_") > 0 Or InStr(uName, "/LBB_") > 0 Then
+                    shopLocked(i) = True
                 End If
             End If
         End If
+nextCollect:
     Next i
     If nFull < 1 Then Exit Sub
 
-    ' Stack axis = axis with greatest center spread among full plates.
+    ' --- Stack axis = greatest center spread among full plates (Qwen) ---
     Dim ax As Integer, bestRange As Double, a As Integer, mn As Double, mx As Double, v As Double
     bestRange = -1: ax = 3
     For a = 1 To 3
@@ -7451,28 +7559,13 @@ Private Sub BuildStdFromGeometry()
 
     StdSortByAxisDesc fullIdx, nFull, ax
 
-    ' Pre-classify leader-pin PRIMARY/SECONDARY sets before orientation so
-    ' guided-ejector (secondary) pins cannot flip the stack (Qwen rule).
+    ' Pre-classify leader-pin PRIMARY/SECONDARY before orientation.
     Dim supportPosGuess As Double
     supportPosGuess = 0#
-    If nFull >= 4 Then
-        ' Rough support = second-from-bottom full plate before roles are assigned.
-        supportPosGuess = PartAxisCenter(fullIdx(nFull - 1), ax)
-    End If
+    If nFull >= 4 Then supportPosGuess = PartAxisCenter(fullIdx(nFull - 1), ax)
     If nLp > 0 Then ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPosGuess
 
-    ' Detect latch-lock / sequenced base early (shop tokens).
-    For i = 1 To PartCount
-        If IsLatchLockName(parts(i).componentName) Then
-            gStdSequencedLatchLock = True
-            Exit For
-        End If
-    Next i
-
-    ' Direction: the end nearer the ejector plates/rails is the B/ejector side
-    ' and therefore the bottom. If those anchors are not in the model, use
-    ' end-plate hints and standard clamp thickness behavior so unnamed standard
-    ' stacks do not flip top/bottom.
+    ' --- Orientation: rails/ejector first; pins only if missing (Qwen) ---
     Dim topIsFirst As Boolean
     topIsFirst = True
     Dim leaderOriented As Boolean
@@ -7480,20 +7573,17 @@ Private Sub BuildStdFromGeometry()
     If nEj > 0 Or nRail > 0 Then
         Dim anchorMean As Double
         Dim anchorCount As Long
-        anchorMean = 0
-        anchorCount = 0
+        anchorMean = 0: anchorCount = 0
         If nEj > 0 Then
             For i = 1 To nEj
                 anchorMean = anchorMean + PartAxisCenter(ejIdx(i), ax)
                 anchorCount = anchorCount + 1
             Next i
         Else
-            If nRail > 0 Then
-                For i = 1 To nRail
-                    anchorMean = anchorMean + PartAxisCenter(railIdx(i), ax)
-                    anchorCount = anchorCount + 1
-                Next i
-            End If
+            For i = 1 To nRail
+                anchorMean = anchorMean + PartAxisCenter(railIdx(i), ax)
+                anchorCount = anchorCount + 1
+            Next i
         End If
         If anchorCount > 0 Then
             anchorMean = anchorMean / anchorCount
@@ -7502,13 +7592,11 @@ Private Sub BuildStdFromGeometry()
         End If
     ElseIf StdLeaderPinOrientationTopIsFirst(fullIdx, nFull, lpIdx, nLp, ax, topIsFirst) Then
         leaderOriented = True
-        LogLine "Standard orientation rule: leader pins/bushings set topIsFirst=" & CStr(topIsFirst)
+        LogLine "Standard orientation rule: PRIMARY leader pins/bushings set topIsFirst=" & CStr(topIsFirst)
     Else
-        Dim firstNm As String
-        Dim lastNm As String
+        Dim firstNm As String, lastNm As String
         firstNm = StandardPlateNameStd(parts(fullIdx(1)).componentName)
         lastNm = StandardPlateNameStd(parts(fullIdx(nFull)).componentName)
-
         If InStr(UCase(firstNm), "BOTTOM CLAMP") > 0 Or InStr(UCase(lastNm), "TOP CLAMP") > 0 Then
             topIsFirst = False
         ElseIf InStr(UCase(firstNm), "TOP CLAMP") > 0 Or InStr(UCase(lastNm), "BOTTOM CLAMP") > 0 Then
@@ -7522,15 +7610,34 @@ Private Sub BuildStdFromGeometry()
     If Not topIsFirst Then StdReverse fullIdx, nFull
     gStdStackAxis = ax
     gStdTopIsFirst = topIsFirst
+
+    Dim roleName As String
+    Dim topPos As Double, bottomPos As Double, supportPos As Double
+    Dim retainerIdx As Long
+    Dim minEjT As Double
+    Dim ejRole As String
+    Dim nLatch As Long
+
+    ' --- TWO-HALF mold pattern (Qwen: len(full_plates) == 2) ---
+    If nFull = 2 Then
+        BuildStdTwoHalfMoldPattern fullIdx, nFull, ax, maxW, maxL, baseFoot, railIdx, nRail, ejIdx, nEj
+        gStdDmeStackFamily = "Two-half mold pattern" & IIf(nRail > 0, " + rails", "") & IIf(nEj > 0, " + ejector", "")
+        LogLine "Standard DME stack family: " & gStdDmeStackFamily
+        GoTo afterPlates
+    End If
+
     gStdDmeStackFamily = StdDmeStackFamilyName(nFull, StdTopClampAppearsPresent(fullIdx, nFull), (nRail > 0), (nEj > 0), nLp)
+    If gStdSequencedLatchLock Then gStdDmeStackFamily = gStdDmeStackFamily & " + latch-lock sequenced"
     LogLine "Standard DME stack family: " & gStdDmeStackFamily
 
-    ' Name full plates top -> bottom. Geometry/stack order is primary; CAD names
-    ' are accepted only as a label hint for the already-positioned plate.
-    Dim roleName As String
+    ' --- Name full plates top -> bottom (shop tokens win; else stack pattern / SC) ---
     For i = 1 To nFull
-        roleName = StdFullPlateNameFromGeometry(i, nFull, fullIdx(i), fullIdx, (nRail > 0), (nEj > 0))
-        SetStdCadRole fullIdx(i), roleName
+        If shopLocked(fullIdx(i)) And StdCadRole(fullIdx(i)) <> "" Then
+            roleName = StdCadRole(fullIdx(i))
+        Else
+            roleName = StdFullPlateNameFromGeometry(i, nFull, fullIdx(i), fullIdx, (nRail > 0), (nEj > 0))
+            SetStdCadRole fullIdx(i), roleName
+        End If
         Select Case NormalizeKey(roleName)
             Case "APLATE", "CAVITYPLATE"
                 gStdCavityCadIndex = fullIdx(i)
@@ -7541,29 +7648,63 @@ Private Sub BuildStdFromGeometry()
         LogLine "Standard full plate rule: pos " & i & "/" & nFull & _
                 " idx " & fullIdx(i) & " -> " & roleName & _
                 " | T=" & parts(fullIdx(i)).Thickness & " W=" & parts(fullIdx(i)).Width & " L=" & parts(fullIdx(i)).Length & _
-                " | name=" & parts(fullIdx(i)).componentName
+                " | name=" & parts(fullIdx(i)).componentName & _
+                IIf(shopLocked(fullIdx(i)), " [SHOP TOKEN]", "")
     Next i
+
+afterPlates:
     StdSetPartingLineFromRoles ax
 
-    ' Rails (one line, qty = number of rail blocks).
+    ' Quote any shop-token structural plates that were locked but not already
+    ' added via the full-footprint naming loop (e.g. SC plates under footprint).
+    For i = 1 To PartCount
+        If shopLocked(i) Then
+            roleName = StdCadRole(i)
+            Select Case NormalizeKey(roleName)
+                Case "APLATE", "BPLATE", "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
+                     "SUPPORTPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", "STRIPPERPLATE"
+                    If FindStdByName(roleName) = 0 Then
+                        AddStdPlateFromCad i, roleName
+                        Select Case NormalizeKey(roleName)
+                            Case "APLATE": gStdCavityCadIndex = i
+                            Case "BPLATE": gStdCoreCadIndex = i
+                        End Select
+                        LogLine "Shop-token plate (non-full or unlocked stack): idx " & i & " -> " & roleName
+                    End If
+            End Select
+        End If
+    Next i
+
+    ' --- Zone-based rail / ejector refinement (Qwen side_offset / centered) ---
+    topPos = PartAxisCenter(fullIdx(1), ax)
+    bottomPos = PartAxisCenter(fullIdx(nFull), ax)
+    supportPos = 0#
+    For i = 1 To nFull
+        rr = NormalizeKey(StdCadRole(fullIdx(i)))
+        If rr = "SUPPORTPLATE" Or rr = "SCBACKUPPLATE" Then
+            supportPos = PartAxisCenter(fullIdx(i), ax)
+            Exit For
+        End If
+    Next i
+    If supportPos = 0# And nFull >= 2 Then supportPos = PartAxisCenter(fullIdx(nFull - 1), ax)
+
+    RefineRailsAndEjectorsByZone ax, maxW, maxL, topPos, bottomPos, supportPos, _
+                                 railIdx, nRail, ejIdx, nEj, shopLocked
+
+    ' Rails
     If nRail > 0 Then
         For i = 1 To nRail
-            SetStdCadRole railIdx(i), "Rails"
+            If Not shopLocked(railIdx(i)) Or StdCadRole(railIdx(i)) = "" Then SetStdCadRole railIdx(i), "Rails"
         Next i
         AddStdPlate "Rails", parts(railIdx(1)).Thickness, parts(railIdx(1)).Width, parts(railIdx(1)).Length, nRail
         LogLine "Standard rail rule: qty " & nRail & " using idx " & railIdx(1) & _
                 " | T=" & parts(railIdx(1)).Thickness & " W=" & parts(railIdx(1)).Width & " L=" & parts(railIdx(1)).Length
     End If
 
-    ' Ejector stack naming (CMS rule from J8420): the THINNER plate is always
-    ' the "Ejector Plate"; the THICKER/LOWER plate is the "Bottom Ejector
-    ' Plate". Never name the thinner plate "Ejector Retainer Plate".
+    ' Ejector stack: thinner = Ejector Plate; thicker/lower = Bottom Ejector Plate
     If nEj > 0 Then
         StdSortByAxisDesc ejIdx, nEj, ax
         If Not topIsFirst Then StdReverse ejIdx, nEj
-        Dim j As Long
-        Dim retainerIdx As Long
-        Dim minEjT As Double
         retainerIdx = ejIdx(1)
         minEjT = parts(ejIdx(1)).Thickness
         For j = 2 To nEj
@@ -7572,10 +7713,11 @@ Private Sub BuildStdFromGeometry()
                 retainerIdx = ejIdx(j)
             End If
         Next j
-
-        Dim ejRole As String
         For j = 1 To nEj
-            If ejIdx(j) = retainerIdx Then
+            ' Preserve shop-token EJ-RET / EJ-BACKUP names when present.
+            If shopLocked(ejIdx(j)) And StdCadRole(ejIdx(j)) <> "" Then
+                ejRole = StdCadRole(ejIdx(j))
+            ElseIf ejIdx(j) = retainerIdx Then
                 ejRole = "Ejector Plate"
             Else
                 ejRole = "Bottom Ejector Plate"
@@ -7587,15 +7729,31 @@ Private Sub BuildStdFromGeometry()
         Next j
     End If
 
-    If nLp > 0 Then
-        For i = 1 To nLp
-            SetStdCadRole lpIdx(i), StandardRoundComponentRole(lpIdx(i))
-        Next i
-        LogLine "Standard leader-pin stack rule: round leader/bushing components=" & nLp
-    End If
+    ' Round hardware roles (all guide / return / pillar)
+    For i = 1 To PartCount
+        If IsRoundBarLike(i) Then
+            rr = StandardRoundComponentRole(i)
+            If rr <> "" Then
+                If StdCadRole(i) = "" Or Not shopLocked(i) Then SetStdCadRole i, rr
+                If NormalizeKey(rr) = "LEADERPIN" Or NormalizeKey(rr) = "LEADERPINBUSHING" Or _
+                   NormalizeKey(rr) = "GUIDEDEJECTORBUSHING" Then
+                    already = False
+                    For j = 1 To nLp
+                        If lpIdx(j) = i Then already = True: Exit For
+                    Next j
+                    If Not already And nLp < UBound(lpIdx) Then
+                        nLp = nLp + 1: lpIdx(nLp) = i
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    If nLp > 0 Then LogLine "Standard leader-pin stack rule: round leader/bushing components=" & nLp
 
-    ' Tag latch-lock / PLC / safety-strap hardware (sequenced bases).
-    Dim nLatch As Long
+    ' Qwen: short bushings above support = leader_pin_bushing; below = guided_ejector_bushing
+    ClassifyBushingsBySupportZone ax, supportPos
+
+    ' Latch-lock tags
     nLatch = 0
     For i = 1 To PartCount
         If IsLatchLockName(parts(i).componentName) Then
@@ -7608,23 +7766,247 @@ Private Sub BuildStdFromGeometry()
         LogLine "Standard latch-lock rule: " & nLatch & " PLC/latch-lock/safety-strap parts (sequenced base; must not flip A/B)"
     End If
 
-    ' Re-run pin/bushing plane match with the real support-plate position, then
-    ' measure top-vs-bottom pin direction WITHOUT flipping confirmed A/B.
-    Dim supportPos As Double
-    supportPos = 0#
-    For i = 1 To nFull
-        If NormalizeKey(StdCadRole(fullIdx(i))) = "SUPPORTPLATE" Or _
-           NormalizeKey(StdCadRole(fullIdx(i))) = "SCBACKUPPLATE" Then
-            supportPos = PartAxisCenter(fullIdx(i), ax)
-            Exit For
-        End If
-    Next i
+    ' Pin-bushing plane match + top/bottom direction (never flips A/B)
     ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPos
     MeasureLeaderPinTopBottomDirection ax
     BuildStdStackAnalysisText ax, nFull, nRail, nEj, nLp
 
     LogLine "Standard base (geometry): full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " leaderStack=" & nLp & " (stack axis " & StdStackAxisName(ax) & ")"
     LogLine "Standard parting_line: " & gStdPartingLineText
+End Sub
+
+' Qwen two-half mold pattern: 2 full-footprint clamps + large inner A/B blocks
+' + thin rails + ejector-stack plates from remaining thin-large parts.
+Private Sub BuildStdTwoHalfMoldPattern(ByRef fullIdx() As Long, ByVal nFull As Long, _
+                                       ByVal ax As Integer, ByVal maxW As Double, ByVal maxL As Double, _
+                                       ByVal baseFoot As Double, _
+                                       ByRef railIdx() As Long, ByRef nRail As Long, _
+                                       ByRef ejIdx() As Long, ByRef nEj As Long)
+    Dim i As Long, j As Long
+    Dim hiFull As Long, loFull As Long
+    Dim roleName As String
+
+    If PartAxisCenter(fullIdx(1), ax) >= PartAxisCenter(fullIdx(2), ax) Then
+        hiFull = fullIdx(1): loFull = fullIdx(2)
+    Else
+        hiFull = fullIdx(2): loFull = fullIdx(1)
+    End If
+
+    ' Lower full plate = BCP; opposite = top clamp (Qwen).
+    SetStdCadRole loFull, "Bottom Clamp Plate"
+    AddStdPlateFromCad loFull, "Bottom Clamp Plate"
+    SetStdCadRole hiFull, "Top Clamp Plate"
+    AddStdPlateFromCad hiFull, "Top Clamp Plate"
+    LogLine "Two-half: full clamps hi=" & hiFull & " (Top Clamp) lo=" & loFull & " (Bottom Clamp)"
+
+    ' Largest non-full thick blocks -> A (high) / B (low) along stack axis.
+    Dim blockIdx(1 To 40) As Long, nBlock As Long
+    Dim t As Double, w As Double, l As Double, fp As Double
+    nBlock = 0
+    For i = 1 To PartCount
+        If i = hiFull Or i = loFull Then GoTo nextBlk
+        If StdCadRole(i) <> "" Then GoTo nextBlk
+        t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
+        If t < 3# Then GoTo nextBlk
+        If w < maxW * 0.3 Or l < maxL * 0.3 Then GoTo nextBlk
+        If nBlock < UBound(blockIdx) Then
+            nBlock = nBlock + 1
+            blockIdx(nBlock) = i
+        End If
+nextBlk:
+    Next i
+
+    ' Sort blocks by volume desc, take top 2, then assign by axis.
+    Dim tmp As Long
+    For i = 1 To nBlock - 1
+        For j = i + 1 To nBlock
+            If parts(blockIdx(j)).BBoxVolume > parts(blockIdx(i)).BBoxVolume Then
+                tmp = blockIdx(i): blockIdx(i) = blockIdx(j): blockIdx(j) = tmp
+            End If
+        Next j
+    Next i
+
+    If nBlock >= 2 Then
+        Dim aIdx As Long, bIdx As Long
+        If PartAxisCenter(blockIdx(1), ax) >= PartAxisCenter(blockIdx(2), ax) Then
+            aIdx = blockIdx(1): bIdx = blockIdx(2)
+        Else
+            aIdx = blockIdx(2): bIdx = blockIdx(1)
+        End If
+        SetStdCadRole aIdx, "A Plate"
+        AddStdPlateFromCad aIdx, "A Plate"
+        gStdCavityCadIndex = aIdx
+        SetStdCadRole bIdx, "B Plate"
+        AddStdPlateFromCad bIdx, "B Plate"
+        gStdCoreCadIndex = bIdx
+        LogLine "Two-half: inner A idx=" & aIdx & " B idx=" & bIdx
+    End If
+
+    ' Thin large remaining -> rails (first 2) then ejector plates (next 2).
+    Dim thinIdx(1 To 40) As Long, nThin As Long
+    nThin = 0
+    For i = 1 To PartCount
+        If StdCadRole(i) <> "" Then GoTo nextThin
+        t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
+        If t > 0.75 Then GoTo nextThin
+        If l < maxL * 0.35 Or w < maxW * 0.2 Then GoTo nextThin
+        If nThin < UBound(thinIdx) Then
+            nThin = nThin + 1
+            thinIdx(nThin) = i
+        End If
+nextThin:
+    Next i
+    For i = 1 To nThin - 1
+        For j = i + 1 To nThin
+            If parts(thinIdx(j)).BBoxVolume > parts(thinIdx(i)).BBoxVolume Then
+                tmp = thinIdx(i): thinIdx(i) = thinIdx(j): thinIdx(j) = tmp
+            End If
+        Next j
+    Next i
+
+    nRail = 0: nEj = 0
+    If nThin >= 2 Then
+        For i = 1 To 2
+            If nRail < UBound(railIdx) Then
+                nRail = nRail + 1
+                railIdx(nRail) = thinIdx(i)
+                SetStdCadRole thinIdx(i), "Rails"
+            End If
+        Next i
+        LogLine "Two-half: rails from thin-large qty=" & nRail
+    End If
+    If nThin >= 4 Then
+        Dim ejA As Long, ejB As Long
+        ejA = thinIdx(3): ejB = thinIdx(4)
+        If parts(ejA).Thickness <= parts(ejB).Thickness Then
+            SetStdCadRole ejA, "Ejector Plate"
+            SetStdCadRole ejB, "Bottom Ejector Plate"
+        Else
+            SetStdCadRole ejB, "Ejector Plate"
+            SetStdCadRole ejA, "Bottom Ejector Plate"
+        End If
+        nEj = 2
+        ejIdx(1) = ejA: ejIdx(2) = ejB
+        LogLine "Two-half: ejector stack from remaining thin-large"
+    End If
+End Sub
+
+' Qwen zone rules: rails = long narrow side-offset in ejector/rail zone;
+' ejector plates = long centered medium-width between bottom and support.
+Private Sub RefineRailsAndEjectorsByZone(ByVal ax As Integer, ByVal maxW As Double, ByVal maxL As Double, _
+                                         ByVal topPos As Double, ByVal bottomPos As Double, ByVal supportPos As Double, _
+                                         ByRef railIdx() As Long, ByRef nRail As Long, _
+                                         ByRef ejIdx() As Long, ByRef nEj As Long, _
+                                         ByRef shopLocked() As Boolean)
+    Dim i As Long
+    Dim axisPos As Double
+    Dim sideOffset As Double
+    Dim longFull As Boolean
+    Dim narrowWidth As Boolean
+    Dim ejectorWidth As Boolean
+    Dim sideBlock As Boolean
+    Dim centeredSide As Boolean
+    Dim already As Boolean
+    Dim j As Long
+    Dim t As Double, w As Double, l As Double
+    Dim a1 As Double, a2 As Double
+
+    For i = 1 To PartCount
+        If shopLocked(i) Then GoTo nextZone
+        If StdCadRole(i) <> "" Then
+            ' Skip already-named full plates / latch locks
+            Select Case NormalizeKey(StdCadRole(i))
+                Case "APLATE", "BPLATE", "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", "SUPPORTPLATE", _
+                     "SCRETAINERPLATE", "SCBACKUPPLATE", "STRIPPERPLATE", "LATCHLOCK/SAFETYSTRAP", "LATCHLOCKSAFETYSTRAP"
+                    GoTo nextZone
+            End Select
+        End If
+        t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
+        If t < 0.4 Or l <= 0 Or w <= 0 Then GoTo nextZone
+
+        longFull = (l >= maxL * 0.85)
+        If Not longFull Then GoTo nextZone
+
+        ' Lateral offset from mold center in the two non-stack axes.
+        Select Case ax
+            Case 1: a1 = parts(i).AsmCenterY: a2 = parts(i).AsmCenterZ
+            Case 2: a1 = parts(i).AsmCenterX: a2 = parts(i).AsmCenterZ
+            Case Else: a1 = parts(i).AsmCenterX: a2 = parts(i).AsmCenterY
+        End Select
+        sideOffset = Abs(a1)
+        If Abs(a2) > sideOffset Then sideOffset = Abs(a2)
+
+        narrowWidth = (w >= maxW * 0.18 And w <= maxW * 0.72)
+        ejectorWidth = (w >= maxW * 0.58 And w <= maxW * 0.86)
+        sideBlock = (sideOffset >= maxW * 0.25)
+        centeredSide = (sideOffset <= maxW * 0.15)
+        axisPos = PartAxisCenter(i, ax)
+
+        already = False
+        For j = 1 To nRail
+            If railIdx(j) = i Then already = True: Exit For
+        Next j
+        For j = 1 To nEj
+            If ejIdx(j) = i Then already = True: Exit For
+        Next j
+
+        If longFull And narrowWidth And sideBlock And _
+           axisPos >= bottomPos - 0.5 And axisPos <= supportPos + 1# Then
+            If Not already And nRail < UBound(railIdx) Then
+                nRail = nRail + 1
+                railIdx(nRail) = i
+                LogLine "Zone rail: idx " & i & " sideOffset=" & FormatNumberForCsv(sideOffset)
+            End If
+        ElseIf longFull And ejectorWidth And centeredSide And _
+               axisPos >= bottomPos - 0.5 And axisPos <= supportPos + 2# Then
+            If Not already And nEj < UBound(ejIdx) Then
+                nEj = nEj + 1
+                ejIdx(nEj) = i
+                LogLine "Zone ejector: idx " & i & " T=" & FormatNumberForCsv(t)
+            End If
+        End If
+nextZone:
+    Next i
+End Sub
+
+' Qwen: short round cylinders at/above support = leader_pin_bushing;
+' below support = guided_ejector_bushing. Does not override LDR-PIN/LBB tokens.
+Private Sub ClassifyBushingsBySupportZone(ByVal ax As Integer, ByVal supportPos As Double)
+    Dim i As Long
+    Dim dia As Double, axisLen As Double, ratio As Double
+    Dim roleKey As String
+    Dim axisPos As Double
+    If supportPos = 0# Then Exit Sub
+
+    For i = 1 To PartCount
+        If Not IsRoundBarLike(i) Then GoTo nextBush
+        dia = RoundBarDiameter(i)
+        axisLen = RoundBarAxisLength(i)
+        If dia <= 0# Or dia > 4# Then GoTo nextBush
+        ratio = axisLen / dia
+        ' Short cylinder only
+        If ratio > 2# Or ratio < 0.6 Then GoTo nextBush
+        If dia < 1# Or dia > 2.6 Then GoTo nextBush
+
+        roleKey = NormalizeKey(StdCadRole(i))
+        If roleKey = "" Then roleKey = NormalizeKey(StandardRoundComponentRole(i))
+        ' Don't reclassify long pins / pillars / shop-token LDR-PIN
+        If roleKey = "LEADERPIN" Or roleKey = "SUPPORTPILLAR" Or roleKey = "RETURNPIN" Or _
+           roleKey = "EJECTORRETURNPIN" Or roleKey = "EJECTORPIN" Then GoTo nextBush
+        If InStr(UCase(parts(i).componentName), "LDR-PIN") > 0 Or InStr(UCase(parts(i).componentName), "LDR_PIN") > 0 Then GoTo nextBush
+        If InStr(UCase(parts(i).componentName), "LBB_") > 0 Or InStr(UCase(parts(i).componentName), "/LBB_") > 0 Then
+            SetStdCadRole i, "Leader Pin Bushing"
+            GoTo nextBush
+        End If
+
+        axisPos = PartAxisCenter(i, ax)
+        If axisPos >= supportPos Then
+            SetStdCadRole i, "Leader Pin Bushing"
+        Else
+            SetStdCadRole i, "Guided Ejector Bushing"
+        End If
+nextBush:
+    Next i
 End Sub
 
 Private Function StdSteelTypeFor(ByVal grade As String) As String
@@ -9652,11 +10034,25 @@ Private Function StandardRoundComponentRole(ByVal idx As Long) As String
 
     ' Geometry first. CAD component names in customer files are often copied,
     ' swapped, or stale. The stack logic needs the physical shape, not the label.
+    ' Thresholds mirror qwen_classify_xt_csv.round_bar_diameter role rules.
     If dia > 0# Then
         If dia > 4# Then Exit Function
 
-        If dia >= 2.5 And ratio >= 2# Then
+        ' Support pillar: large long round post (dia 2.5-4, length >= 6)
+        If dia >= 2.5 And axisLen >= 6# Then
             StandardRoundComponentRole = "Support Pillar"
+            Exit Function
+        End If
+
+        ' Leader pin: long smaller round bar (dia 1.35-2.2, length >= 10)
+        If ratio >= 1.6 And dia >= 1.35 And dia <= 2.2 And axisLen >= 10# Then
+            StandardRoundComponentRole = "Leader Pin"
+            Exit Function
+        End If
+
+        ' Return pin: long ~1" class round pin (dia 0.9-1.35, length >= 8)
+        If ratio >= 1.6 And dia >= 0.9 And dia < 1.35 And axisLen >= 8# Then
+            StandardRoundComponentRole = "Ejector Return Pin"
             Exit Function
         End If
 
@@ -9669,7 +10065,8 @@ Private Function StandardRoundComponentRole(ByVal idx As Long) As String
             Exit Function
         End If
 
-        If ratio <= 2# And dia >= 1.25 And dia <= 2.75 And parts(idx).BBoxVolume <= 150# Then
+        ' Short cylinder bushing-size (dia 1.0-2.6); zone pass refines leader vs guided-ejector
+        If ratio <= 2# And ratio >= 0.6 And dia >= 1# And dia <= 2.6 And parts(idx).BBoxVolume <= 150# Then
             StandardRoundComponentRole = "Leader Pin Bushing"
             Exit Function
         End If
@@ -9926,13 +10323,18 @@ Private Sub BuildStdStackAnalysisText(ByVal ax As Integer, ByVal nFull As Long, 
     gStdStackRules = "Full-footprint plates were sorted by " & axisName & " from top to bottom."
     gStdStackRules = gStdStackRules & "|Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation."
     gStdStackRules = gStdStackRules & "|Ejector-stack plates: thinner = Ejector Plate, thicker/lower = Bottom Ejector Plate."
+    gStdStackRules = gStdStackRules & "|Rails detected as long narrow side-offset blocks in the ejector/rail zone; ejector plates as centered medium-width plates near rails."
     gStdStackRules = gStdStackRules & "|Round guide hardware separated by diameter/length; primary leader pins matched to shoulder/LBB bushings on the same center plane."
     gStdStackRules = gStdStackRules & "|Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) applied before geometry-only rules."
+    If nFull = 2 Then
+        gStdStackRules = gStdStackRules & "|Two-half mold pattern: 2 full clamps + inner A/B blocks + thin rails/ejector from remaining thin-large parts."
+    End If
     If gStdSequencedLatchLock Then
         gStdPartingLineText = "Primary parting line between a_plate and b_plate from the full-footprint stack order. " & _
             "Latch-lock/PLC/safety-strap hardware detected: plate-sequenced/latch-lock standard base with secondary opening/parting lines at latch attachment points."
         gStdStackRules = gStdStackRules & "|Latch-lock/PLC/safety-strap tokens detected. Latch locks mark secondary parting lines and do not set guide direction. " & _
             "Reversed/seated leader pins were not allowed to flip the A/B assignment."
+        gStdStackRules = gStdStackRules & "|Sequenced/SC stack naming used when top clamp missing: A / B / SC Retainer / SC Backup / Bottom Clamp."
     End If
     If gStdLeaderPinFromKnown Then
         gStdStackRules = gStdStackRules & "|Leader pins enter from the " & IIf(gStdLeaderPinFromTop, "TOP/A", "BOTTOM/B") & " side" & _
