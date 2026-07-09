@@ -7,27 +7,17 @@ Option Explicit
 ' Type one or more C numbers (e.g. C18454). For each one this:
 '   1. Finds the BMS-...-C##### job folder by the C number.
 '   2. Copies it local, extracts any ZIP, opens the CAD.
-'   3. Orients to CMS_TOP and saves the WHOLE BASE into a
-'      "base" subfolder of the job folder:
-'        base\<job> .sldasm   (native)
-'        base\<job> .easm
-'        base\<job> .igs
-'        base\<job> .x_t
-'        base\<job> .stl          (for quoted-vs-final 3D comparison)
-'        base\<job> .dxf          (base, 4 projected views)
-'        base\<job> ISO.jpg       (front isometric)
-'        base\<job> BACK ISO.jpg  (back isometric - 180 about vertical)
-'   4. Scans CAD parts (size + mass + location) and writes:
-'        XT_Export_CAD_Dimensions.csv
-'        XT_Export_BOM_Match_Report.csv   (BOM read from Excel/PDF)
-'   5. Pulls the Quote and J000 steel-sheet templates from the
-'      Downloads folder, copies each into the job folder, and
-'      fills the pot-block plate sizes directly into them:
-'        Quote #2 4140 block: TCP, BCP, ID/OD Holder, ID/OD Pot
-'        J000 Steel Order + Machining Sheet: same plates
+'   3. Orients to CMS_TOP (gemini1 holder/pot/ins/TCP -> *Top/*Front) and saves
+'      the WHOLE BASE into the job folder:
+'        base\<job> .sldasm / .easm / .igs / .x_t
+'        <job> .stl               (gemini1 merged one-file STL, oriented)
+'        <job> .dxf               (4 views, Pyropel hidden)
+'        <job> ISO.jpg / BACK ISO.jpg  (Pyropel hidden)
+'   4. Scans CAD parts and writes XT_Export_CAD_Dimensions.csv + BOM match report.
+'   5. Fills Quote (#2 4140) and J000 steel sheet from CAD/BOM sizes.
 '
 ' NO prints folder, NO individual part X_T/DXF, NO J Block,
-' NO Pull Core, NO Pyropel, NO dimensioned DXF.
+' NO Pyropel on JPEG/DXF, NO dimensioned DXF.
 ' ============================================================
 
 ' ============================================================
@@ -105,12 +95,39 @@ Private Const swOpenDocOptions_ReadOnly As Long = 2
 Private Const swSaveAsCurrentVersion As Long = 0
 Private Const swSaveAsOptions_Silent As Long = 1
 Private Const swSaveAsOptions_Copy As Long = 2
-' swUserPreferenceToggle_e.swSTLComponentsIntoOneFile = export one STL for the
-' whole assembly instead of one file per component.
-Private Const swSTLComponentsIntoOneFile As Long = 217
+' swUserPreferenceToggle_e.swSTLComponentsIntoOneFile (gemini1 = 248 for SW2023).
+Private Const swSTLComponentsIntoOneFile As Long = 248
+' swUserPreferenceIntegerValue_e.swSaveAssemblyAsPartOptions
+Private Const swSaveAssemblyAsPartOptions As Long = 201
+Private Const swSaveAsmAsPart_AllComponents As Long = 1
+' swBodyOperationType_e.SWBODYADD = Combine -> Add (union of bodies).
+Private Const SWBODYADD As Long = 15903
+' After merge-STL export, rotate mesh into corrected *Front/*Top frame (gemini1).
+Private Const POST_ROTATE_STL_TO_CORRECTED_FRONT As Boolean = True
 Private Const swSolidBody As Long = 0
 Private Const swComponentHidden As Long = 0
 Private Const swComponentVisible As Long = 1
+
+' Binary STL layout for post-rotate (ported from gemini1).
+Private Type BinaryStlHeader
+    HeaderText As String * 80
+    TriangleCount As Long
+End Type
+Private Type BinaryStlTriangle
+    nx As Single
+    ny As Single
+    nz As Single
+    x1 As Single
+    y1 As Single
+    z1 As Single
+    x2 As Single
+    y2 As Single
+    z2 As Single
+    x3 As Single
+    y3 As Single
+    z3 As Single
+    AttributeByteCount As Integer
+End Type
 
 ' ============================================================
 ' GLOBALS
@@ -138,6 +155,10 @@ Private LastJobFailReason As String
 
 Private DxfFreezeDoc As Object
 Private CurrentDxfForce1to1 As Boolean
+
+' Final corrected *Front orientation matrix for STL post-rotate (gemini1).
+Private FinalStlCoordFrameReady As Boolean
+Private FinalStlCoordM(0 To 8) As Double
 
 ' ============================================================
 ' POT-BLOCK ENGINE ADDITIONS  (scan + BOM read/match + Excel fill)
@@ -622,9 +643,11 @@ On Error GoTo ErrHandler
     LogLine "========================================"
 
     JobStartTime = Now
-    ' In active-CAD mode keep SolidWorks untouched. Do not activate views,
-    ' hide/show components, rebuild, export, or redefine standard views here.
-    ' This mode opens/uses an XT and runs quote sheets from the scanned geometry.
+    FinalStlCoordFrameReady = False
+    Dim stlCoordI As Long
+    For stlCoordI = 0 To 8
+        FinalStlCoordM(stlCoordI) = 0#
+    Next stlCoordI
     MainViewportGraphicsDisabled = False
     DoEvents
 
@@ -690,6 +713,22 @@ On Error GoTo ErrHandler
     LogStart "AI bridge classification"
     RunAiBridgeClassification CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv", isStd
     LogDone "AI bridge classification"
+
+    ' gemini1 orientation BEFORE exports (active-CAD path previously skipped this).
+    If isStd Then
+        LogStart "Set STANDARD mold base orientation (active CAD)"
+        SetStandardBaseOrientation swModel
+        LogDone "Set STANDARD mold base orientation (active CAD)"
+    Else
+        LogStart "Set BMS pot-block TCP/top orientation (active CAD)"
+        EnsureCmsTopOrientationFromMatchedTcpBcp swModel, PERSIST_CMS_TOP_AS_STANDARD_VIEWS_BEFORE_BASE_SAVE
+        LogDone "Set BMS pot-block TCP/top orientation (active CAD)"
+    End If
+    CaptureFinalStandardViewsForStlCoordinateSystem swModel
+    UnsuppressAllAssemblyComponents swModel
+    ShowAllAssemblyComponents swModel
+    ApplyCmsTopView swModel
+    StabilizeActiveView swModel, 100
 
     If isStd Then
         LogStart "Classify STANDARD mold base from active CAD"
@@ -1150,6 +1189,11 @@ On Error GoTo ErrHandler
 
     CurrentJobNumber = UCase(Trim(jobSearchText))
     JobStartTime = Now
+    FinalStlCoordFrameReady = False
+    Dim stlCoordI As Long
+    For stlCoordI = 0 To 8
+        FinalStlCoordM(stlCoordI) = 0#
+    Next stlCoordI
     If Not gProcessingHandoff Then
         CustomerJobNumber = ""
         CustomerPrefix = ""
@@ -1321,6 +1365,9 @@ On Error GoTo ErrHandler
         EnsureCmsTopOrientationFromMatchedTcpBcp swModel, PERSIST_CMS_TOP_AS_STANDARD_VIEWS_BEFORE_BASE_SAVE
         LogDone "Set BMS pot-block TCP/top orientation from matched holder/pot/TCP"
     End If
+
+    ' gemini1: capture corrected *Front matrix so merged STL post-rotates correctly.
+    CaptureFinalStandardViewsForStlCoordinateSystem swModel
 
     On Error Resume Next
     swModel.ResolveAllLightWeightComponents True
@@ -2474,14 +2521,14 @@ On Error GoTo ErrHandler
     Dim stlBasePath As String
     stlBasePath = GetUniqueFilePath(outputFolder & "\" & baseName & ".stl")
 
-    ' WHOLE-ASSEMBLY STL first (one file for the entire mold — required).
-    ' Force ONE STL for the whole assembly (otherwise SW writes per-component STLs).
-    On Error Resume Next
-    swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
-    On Error GoTo ErrHandler
-    SaveModelAs swModel, stlPath
+    ' gemini1: ONE merged STL (assembly -> temp part -> Combine Add -> STL).
+    LogStart "Export merged full-assembly STL (gemini1)"
+    If swModel.GetType = swDocASSEMBLY Then
+        SaveAssemblyAsMergedPartStl swModel, stlPath
+    Else
+        SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
+    End If
     LogLine "Whole-assembly STL written: " & stlPath
-    ' Also keep a copy under base\ for the comparison package.
     On Error Resume Next
     If LCase(stlPath) <> LCase(stlBasePath) Then
         Dim fsoStl As Object
@@ -2489,6 +2536,7 @@ On Error GoTo ErrHandler
         If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
     End If
     On Error GoTo ErrHandler
+    LogDone "Export merged full-assembly STL (gemini1)"
 
     ' Native SolidWorks copy of the whole base + required deliverables.
     SaveModelAs swModel, sldPath
@@ -2507,13 +2555,13 @@ On Error GoTo ErrHandler
         ExportPlateStlsForComparison CurrentJobFolder & "\stl"
     End If
 
-    ' Front + back ISO JPGs in the MAIN job folder.
+    ' Front + back ISO JPGs with Pyropel hidden (same keep-list as DXF).
     If CREATE_ISO_JPEGS Then
-        ExportFrontAndBackIsoJpegs CurrentJobFolder, baseName
-        LogLine "ISO JPGs written to job folder"
+        ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
+        LogLine "ISO JPGs written to job folder (Pyropel hidden)"
     End If
 
-    ' Base DXF (4 projected views) in the MAIN job folder.
+    ' Base DXF (4 projected views) with Pyropel hidden — gemini1 selected-components path.
     If EXPORT_BASE_DXF Then
         CreateBaseDxfWithoutPyropel sldPath, dxfPath
         LogLine "DXF written: " & dxfPath
@@ -2768,18 +2816,39 @@ eh:
 End Function
 
 ' ============================================================
-' FRONT + BACK ISO JPGs
+' FRONT + BACK ISO JPGs  (Pyropel hidden — same keep-list as BASE DXF / gemini1)
 ' ============================================================
-Private Sub ExportFrontAndBackIsoJpegs(ByVal outputFolder As String, ByVal baseName As String)
+Private Sub ExportFrontAndBackIsoJpegsWithoutPyropel(ByVal outputFolder As String, ByVal baseName As String)
 On Error GoTo ErrHandler
     If swModel Is Nothing Then Exit Sub
     If baseName = "" Then baseName = CurrentJobNumber
     EnsureFolderDeep outputFolder
 
+    Dim hiddenNames As Collection
+    Set hiddenNames = Nothing
+    Dim keepNames As Collection
+    Set keepNames = Nothing
+
+    If swModel.GetType = swDocASSEMBLY Then
+        Set keepNames = BuildBaseDxfKeepComponentNames()
+        If Not keepNames Is Nothing Then
+            If keepNames.Count > 0 Then
+                Set hiddenNames = New Collection
+                If HideAllExceptComponentNamesOnce(swModel, keepNames, hiddenNames) Then
+                    LogLine "ISO JPG: Pyropel/non-base components hidden (keep=" & keepNames.Count & ")"
+                Else
+                    LogLine "ISO JPG: could not isolate base components; capturing with all visible."
+                    Set hiddenNames = Nothing
+                End If
+            End If
+        End If
+    End If
+
     On Error Resume Next
     swApp.Visible = True
     On Error GoTo ErrHandler
     RestoreMainViewportGraphics
+    ApplyCmsTopView swModel
 
     Dim isoPath As String
     Dim backIsoPath As String
@@ -2790,11 +2859,9 @@ On Error GoTo ErrHandler
     swModel.ViewZoomtofit2
     swModel.GraphicsRedraw2
     SaveViewAsImage swModel, isoPath
-    LogLine "Saved front ISO jpg: " & isoPath
+    LogLine "Saved front ISO jpg (no Pyropel): " & isoPath
 
-    ' BACK ISO = spin the base 180 degrees about the VERTICAL axis (shows the
-    ' opposite/back corner while keeping the TOP plate facing up). Rotating about
-    ' the horizontal axis instead just flips the top-down image, which is wrong.
+    ' BACK ISO = spin 180 about VERTICAL axis (top plate stays up).
     swModel.ShowNamedView2 "*Isometric", 7
     Dim swView As Object
     Set swView = swModel.ActiveView
@@ -2802,16 +2869,474 @@ On Error GoTo ErrHandler
     swModel.ViewZoomtofit2
     swModel.GraphicsRedraw2
     SaveViewAsImage swModel, backIsoPath
-    LogLine "Saved back ISO jpg: " & backIsoPath
+    LogLine "Saved back ISO jpg (no Pyropel): " & backIsoPath
 
+CleanExit:
+    On Error Resume Next
+    If Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then
+            ShowNamedComponentsOnce swModel, hiddenNames
+        Else
+            ShowAllAssemblyComponents swModel
+        End If
+    End If
     swModel.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    ApplyCmsTopView swModel
     EnsureSwHidden
     Exit Sub
 ErrHandler:
-    LogLine "ExportFrontAndBackIsoJpegs error: " & Err.Description
-    On Error Resume Next
-    EnsureSwHidden
+    LogLine "ExportFrontAndBackIsoJpegsWithoutPyropel error: " & Err.Description
+    Resume CleanExit
 End Sub
+
+' Compatibility wrapper (calls Pyropel-free path).
+Private Sub ExportFrontAndBackIsoJpegs(ByVal outputFolder As String, ByVal baseName As String)
+    ExportFrontAndBackIsoJpegsWithoutPyropel outputFolder, baseName
+End Sub
+
+' ============================================================
+' MERGED FULL-ASSEMBLY STL  (ported from gemini1)
+' Assembly -> temp multibody part -> Combine(Add) -> one STL,
+' then post-rotate mesh into corrected *Front/*Top frame.
+' ============================================================
+Private Sub SaveAssemblyAsMergedPartStl(ByVal assyModel As Object, ByVal stlPath As String)
+On Error GoTo ErrHandler
+    If assyModel Is Nothing Then Exit Sub
+    If stlPath = "" Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim tempFolder As String
+    tempFolder = Environ$("TEMP") & "\CMS_FULL_ASM_MERGE"
+    EnsureFolderDeep tempFolder
+
+    Dim partPath As String
+    partPath = tempFolder & "\FULL_ASSEMBLY_MERGE_" & Format(Now, "yyyymmdd_hhnnss") & ".sldprt"
+    partPath = GetUniqueFilePath(partPath)
+
+    Dim asmAsPartSet As Boolean
+    Dim priorAsmAsPart As Long
+    asmAsPartSet = False
+    If Not swApp Is Nothing Then
+        priorAsmAsPart = swApp.GetUserPreferenceIntegerValue(swSaveAssemblyAsPartOptions)
+        swApp.SetUserPreferenceIntegerValue swSaveAssemblyAsPartOptions, swSaveAsmAsPart_AllComponents
+        asmAsPartSet = True
+    End If
+
+    Dim errs As Long, warns As Long
+    LogLine "FULL ASSEMBLY: saving assembly as temp multibody part:"
+    LogLine "  " & partPath
+
+    assyModel.Extension.SaveAs3 partPath, swSaveAsCurrentVersion, _
+                                swSaveAsOptions_Silent + swSaveAsOptions_Copy, _
+                                Nothing, Nothing, errs, warns
+
+    If asmAsPartSet Then
+        swApp.SetUserPreferenceIntegerValue swSaveAssemblyAsPartOptions, priorAsmAsPart
+    End If
+
+    If fso.FileExists(partPath) = False Then
+        LogLine "FULL ASSEMBLY: temp part not created. Falling back to assembly STL."
+        SaveFullAssemblyStlFromAssembly assyModel, stlPath
+        Exit Sub
+    End If
+
+    Dim partModel As Object
+    Set partModel = swApp.OpenDoc6(partPath, swDocPART, swOpenDocOptions_Silent, "", errs, warns)
+    If partModel Is Nothing Then
+        LogLine "FULL ASSEMBLY: could not open temp part. Falling back to assembly STL."
+        SaveFullAssemblyStlFromAssembly assyModel, stlPath
+        On Error Resume Next
+        fso.DeleteFile partPath, True
+        Exit Sub
+    End If
+
+    swApp.ActivateDoc3 partModel.GetTitle, False, 0, errs
+    EnsureSwHidden
+    MergeAllPartBodies partModel
+    SaveStlWithMainBaseOrientation partModel, stlPath, "FULL ASSEMBLY"
+
+    On Error Resume Next
+    swApp.CloseDoc partModel.GetTitle
+    Set partModel = Nothing
+    If fso.FileExists(partPath) Then
+        fso.DeleteFile partPath, True
+        LogLine "FULL ASSEMBLY: deleted temp merge part."
+    End If
+    swApp.ActivateDoc3 assyModel.GetTitle, False, 0, errs
+    Set fso = Nothing
+    Exit Sub
+
+ErrHandler:
+    LogLine "SaveAssemblyAsMergedPartStl error: " & Err.Description
+    On Error Resume Next
+    If Not partModel Is Nothing Then swApp.CloseDoc partModel.GetTitle
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If partPath <> "" Then
+        If fso.FileExists(partPath) Then fso.DeleteFile partPath, True
+    End If
+    If Not assyModel Is Nothing Then swApp.ActivateDoc3 assyModel.GetTitle, False, 0, errs
+    SaveFullAssemblyStlFromAssembly assyModel, stlPath
+End Sub
+
+Private Sub SaveFullAssemblyStlFromAssembly(ByVal assyModel As Object, ByVal stlPath As String)
+On Error GoTo ErrHandler
+    Dim priorOneFile As Boolean
+    Dim oneFileSet As Boolean
+    oneFileSet = False
+    If Not swApp Is Nothing Then
+        priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
+        swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
+        oneFileSet = True
+    End If
+    SaveStlWithMainBaseOrientation assyModel, stlPath, "FULL ASSEMBLY"
+    If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
+    Exit Sub
+ErrHandler:
+    LogLine "SaveFullAssemblyStlFromAssembly error: " & Err.Description
+    On Error Resume Next
+    If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
+End Sub
+
+Private Sub MergeAllPartBodies(ByVal partModel As Object)
+On Error GoTo ErrHandler
+    If partModel Is Nothing Then Exit Sub
+    If partModel.GetType <> swDocPART Then Exit Sub
+
+    Dim vBodies As Variant
+    vBodies = partModel.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then
+        LogLine "FULL ASSEMBLY merge: no solid bodies found."
+        Exit Sub
+    End If
+
+    Dim bodyCount As Long
+    bodyCount = UBound(vBodies) - LBound(vBodies) + 1
+    If bodyCount < 2 Then
+        LogLine "FULL ASSEMBLY merge: single body already; no combine needed."
+        Exit Sub
+    End If
+
+    partModel.ClearSelection2 True
+    Dim i As Long
+    For i = LBound(vBodies) To UBound(vBodies)
+        If Not vBodies(i) Is Nothing Then vBodies(i).Select2 True, Nothing
+    Next i
+
+    Dim combineFeat As Object
+    Set combineFeat = partModel.FeatureManager.InsertCombineFeature(SWBODYADD, Nothing, Nothing)
+    partModel.ClearSelection2 True
+    partModel.EditRebuild3
+
+    If combineFeat Is Nothing Then
+        LogLine "FULL ASSEMBLY merge: Combine(Add) returned nothing; bodies left separate (STL still one file)."
+    Else
+        LogLine "FULL ASSEMBLY merge: combined " & CStr(bodyCount) & " bodies into one."
+    End If
+    Exit Sub
+ErrHandler:
+    LogLine "MergeAllPartBodies error: " & Err.Description
+    On Error Resume Next
+    partModel.ClearSelection2 True
+End Sub
+
+Private Sub SaveStlWithMainBaseOrientation(ByVal model As Object, _
+                                           ByVal stlPath As String, _
+                                           Optional ByVal label As String = "")
+On Error GoTo ErrHandler
+    If model Is Nothing Then Exit Sub
+    If stlPath = "" Then Exit Sub
+
+    Dim orientM(0 To 8) As Double
+    Dim gotOrient As Boolean
+    Dim i As Long
+    gotOrient = False
+
+    If POST_ROTATE_STL_TO_CORRECTED_FRONT Then
+        If FinalStlCoordFrameReady Then
+            For i = 0 To 8: orientM(i) = FinalStlCoordM(i): Next i
+            gotOrient = True
+            LogLine "STL using FINAL corrected standard-view coordinate system: " & label
+        Else
+            LogLine "WARNING: Final STL coordinate system not captured; attempting now."
+            If Not swModel Is Nothing Then
+                gotOrient = CaptureFinalStandardViewsForStlCoordinateSystem(swModel)
+            Else
+                gotOrient = CaptureFinalStandardViewsForStlCoordinateSystem(model)
+            End If
+            If gotOrient Then
+                For i = 0 To 8: orientM(i) = FinalStlCoordM(i): Next i
+            End If
+        End If
+    End If
+
+    SaveModelAs model, stlPath
+
+    If gotOrient Then
+        If ReorientStlFileToMatrix(stlPath, orientM) Then
+            LogLine "STL post-rotated into FINAL corrected Top/Front frame: " & stlPath
+        Else
+            LogLine "WARNING: STL post-rotation failed: " & stlPath
+        End If
+    End If
+
+    On Error Resume Next
+    ApplyCmsTopView model
+    Exit Sub
+ErrHandler:
+    LogLine "SaveStlWithMainBaseOrientation error (" & label & "): " & Err.Description
+    On Error Resume Next
+    SaveModelAs model, stlPath
+    ApplyCmsTopView model
+End Sub
+
+Private Function CaptureFinalStandardViewsForStlCoordinateSystem(ByVal model As Object) As Boolean
+On Error GoTo ErrHandler
+    CaptureFinalStandardViewsForStlCoordinateSystem = False
+    FinalStlCoordFrameReady = False
+    If model Is Nothing Then Exit Function
+
+    Dim errs As Long
+    swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+    EnsureSwHidden
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+    On Error Resume Next
+    If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
+    On Error GoTo ErrHandler
+
+    model.ShowNamedView2 "*Front", 1
+    On Error Resume Next
+    model.ViewZoomtofit2
+    model.GraphicsRedraw2
+    DoEvents
+    WaitMilliseconds 50
+    model.GraphicsRedraw2
+    DoEvents
+    On Error GoTo ErrHandler
+
+    Set swView = model.ActiveView
+    If swView Is Nothing Then
+        LogLine "STL coordinate capture failed: ActiveView is Nothing."
+        Exit Function
+    End If
+
+    Dim v As Variant
+    v = swView.Orientation3.ArrayData
+    If IsEmpty(v) Or IsArray(v) = False Then
+        LogLine "STL coordinate capture failed: Orientation3.ArrayData missing."
+        Exit Function
+    End If
+    If UBound(v) < 8 Then
+        LogLine "STL coordinate capture failed: orientation matrix too short."
+        Exit Function
+    End If
+
+    Dim i As Long
+    For i = 0 To 8
+        FinalStlCoordM(i) = CDbl(v(i))
+    Next i
+    FinalStlCoordFrameReady = True
+    CaptureFinalStandardViewsForStlCoordinateSystem = True
+    LogLine "FINAL STL coordinate system captured from corrected SolidWorks *Front."
+
+CleanExit:
+    On Error Resume Next
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    If Err.Number <> 0 Then
+        Err.Clear
+        model.ShowNamedView2 "*Top", 5
+    End If
+    Exit Function
+ErrHandler:
+    LogLine "CaptureFinalStandardViewsForStlCoordinateSystem error: " & Err.Description
+    FinalStlCoordFrameReady = False
+    CaptureFinalStandardViewsForStlCoordinateSystem = False
+    Resume CleanExit
+End Function
+
+Private Function ReorientStlFileToMatrix(ByVal stlPath As String, ByRef m() As Double) As Boolean
+On Error GoTo ErrHandler
+    ReorientStlFileToMatrix = False
+    If ReorientBinaryStlFileToMatrix(stlPath, m) Then
+        LogLine "STL reorient: binary STL rotated."
+        ReorientStlFileToMatrix = True
+        Exit Function
+    End If
+    If ReorientAsciiStlFileToMatrix(stlPath, m) Then
+        LogLine "STL reorient: ASCII STL rotated."
+        ReorientStlFileToMatrix = True
+        Exit Function
+    End If
+    LogLine "STL reorient failed: not binary or ASCII STL."
+    Exit Function
+ErrHandler:
+    LogLine "ReorientStlFileToMatrix error: " & Err.Description
+    ReorientStlFileToMatrix = False
+End Function
+
+Private Function ReorientBinaryStlFileToMatrix(ByVal stlPath As String, ByRef m() As Double) As Boolean
+On Error GoTo ErrHandler
+    ReorientBinaryStlFileToMatrix = False
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If stlPath = "" Or fso.FileExists(stlPath) = False Then Exit Function
+
+    Dim f As Integer
+    f = FreeFile
+    Open stlPath For Binary Access Read Write As #f
+
+    Dim hdr As BinaryStlHeader
+    Get #f, 1, hdr
+    If hdr.TriangleCount <= 0 Then
+        Close #f
+        LogLine "STL reorient skipped: triangle count <= 0."
+        Exit Function
+    End If
+
+    Dim expectedLen As Double
+    expectedLen = 84# + CDbl(hdr.TriangleCount) * 50#
+    If CDbl(LOF(f)) <> expectedLen Then
+        Close #f
+        LogLine "STL reorient skipped: not binary STL size (got " & LOF(f) & " expected " & expectedLen & ")."
+        Exit Function
+    End If
+
+    Dim tri As BinaryStlTriangle
+    If Len(tri) <> 50 Then
+        Close #f
+        LogLine "STL reorient skipped: BinaryStlTriangle size=" & Len(tri)
+        Exit Function
+    End If
+
+    Dim i As Long, triPos As Long
+    For i = 0 To hdr.TriangleCount - 1
+        triPos = 85 + i * 50
+        Get #f, triPos, tri
+        TransformStlTriangleByMatrix tri, m
+        Put #f, triPos, tri
+    Next i
+    Close #f
+    ReorientBinaryStlFileToMatrix = True
+    Exit Function
+ErrHandler:
+    LogLine "ReorientBinaryStlFileToMatrix error: " & Err.Description
+    On Error Resume Next
+    Close #f
+    ReorientBinaryStlFileToMatrix = False
+End Function
+
+Private Sub TransformStlTriangleByMatrix(ByRef tri As BinaryStlTriangle, ByRef m() As Double)
+On Error Resume Next
+    TransformStlVectorByMatrix tri.nx, tri.ny, tri.nz, m
+    NormalizeStlVector tri.nx, tri.ny, tri.nz
+    TransformStlVectorByMatrix tri.x1, tri.y1, tri.z1, m
+    TransformStlVectorByMatrix tri.x2, tri.y2, tri.z2, m
+    TransformStlVectorByMatrix tri.x3, tri.y3, tri.z3, m
+End Sub
+
+Private Sub TransformStlVectorByMatrix(ByRef x As Single, ByRef y As Single, ByRef z As Single, ByRef m() As Double)
+On Error Resume Next
+    Dim ox As Double, oy As Double, oz As Double
+    ox = CDbl(x): oy = CDbl(y): oz = CDbl(z)
+    x = CSng((ox * m(0)) + (oy * m(3)) + (oz * m(6)))
+    y = CSng((ox * m(1)) + (oy * m(4)) + (oz * m(7)))
+    z = CSng((ox * m(2)) + (oy * m(5)) + (oz * m(8)))
+End Sub
+
+Private Sub NormalizeStlVector(ByRef x As Single, ByRef y As Single, ByRef z As Single)
+On Error Resume Next
+    Dim L As Double
+    L = Sqr(CDbl(x) * CDbl(x) + CDbl(y) * CDbl(y) + CDbl(z) * CDbl(z))
+    If L <= 0.0000001 Then Exit Sub
+    x = CSng(CDbl(x) / L)
+    y = CSng(CDbl(y) / L)
+    z = CSng(CDbl(z) / L)
+End Sub
+
+Private Function ReorientAsciiStlFileToMatrix(ByVal stlPath As String, ByRef m() As Double) As Boolean
+On Error GoTo ErrHandler
+    ReorientAsciiStlFileToMatrix = False
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If stlPath = "" Or fso.FileExists(stlPath) = False Then Exit Function
+
+    Dim txt As String
+    txt = ReadAllTextFile(stlPath)
+    If Trim(txt) = "" Then Exit Function
+    If InStr(1, Left$(txt, 512), "solid", vbTextCompare) = 0 Then Exit Function
+    If InStr(1, txt, "vertex", vbTextCompare) = 0 Then Exit Function
+    If InStr(1, txt, "facet normal", vbTextCompare) = 0 Then Exit Function
+
+    txt = Replace(Replace(txt, vbCrLf, vbLf), vbCr, vbLf)
+    Dim lines() As String
+    lines = Split(txt, vbLf)
+    Dim outLines() As String
+    ReDim outLines(LBound(lines) To UBound(lines))
+
+    Dim i As Long, rawLine As String, T As String, indent As String
+    Dim toks() As String
+    Dim x As Double, y As Double, z As Double
+    Dim sx As Single, sy As Single, sz As Single
+    Dim changed As Boolean
+    changed = False
+
+    For i = LBound(lines) To UBound(lines)
+        rawLine = lines(i)
+        T = LTrim(rawLine)
+        indent = Left$(rawLine, Len(rawLine) - Len(T))
+        If Left$(LCase$(T), 12) = "facet normal" Or Left$(LCase$(T), 6) = "vertex" Then
+            toks = Split(Replace(Replace(T, vbTab, " "), "  ", " "), " ")
+            ' facet normal nx ny nz  OR  vertex x y z
+            Dim nTok As Long, k As Long, nums() As Double, nNum As Long
+            nTok = UBound(toks)
+            ReDim nums(1 To 3)
+            nNum = 0
+            For k = 0 To nTok
+                If IsNumeric(toks(k)) Then
+                    nNum = nNum + 1
+                    If nNum <= 3 Then nums(nNum) = CDbl(toks(k))
+                End If
+            Next k
+            If nNum >= 3 Then
+                sx = CSng(nums(1)): sy = CSng(nums(2)): sz = CSng(nums(3))
+                TransformStlVectorByMatrix sx, sy, sz, m
+                If Left$(LCase$(T), 12) = "facet normal" Then NormalizeStlVector sx, sy, sz
+                If Left$(LCase$(T), 12) = "facet normal" Then
+                    outLines(i) = indent & "facet normal " & _
+                        Format(sx, "0.000000E+00") & " " & Format(sy, "0.000000E+00") & " " & Format(sz, "0.000000E+00")
+                Else
+                    outLines(i) = indent & "vertex " & _
+                        Format(sx, "0.000000E+00") & " " & Format(sy, "0.000000E+00") & " " & Format(sz, "0.000000E+00")
+                End If
+                changed = True
+            Else
+                outLines(i) = rawLine
+            End If
+        Else
+            outLines(i) = rawLine
+        End If
+    Next i
+
+    If Not changed Then Exit Function
+
+    Dim outTxt As String
+    outTxt = Join(outLines, vbLf)
+    Dim f As Integer
+    f = FreeFile
+    Open stlPath For Output As #f
+    Print #f, outTxt;
+    Close #f
+    ReorientAsciiStlFileToMatrix = True
+    Exit Function
+ErrHandler:
+    LogLine "ReorientAsciiStlFileToMatrix error: " & Err.Description
+    On Error Resume Next
+    Close #f
+    ReorientAsciiStlFileToMatrix = False
+End Function
 
 Private Sub SaveViewAsImage(ByVal model As Object, ByVal imagePath As String)
 On Error GoTo ErrHandler
