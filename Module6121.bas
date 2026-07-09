@@ -160,6 +160,10 @@ Private CurrentDxfForce1to1 As Boolean
 Private FinalStlCoordFrameReady As Boolean
 Private FinalStlCoordM(0 To 8) As Double
 
+' Set by DetectBaseTypeIsStandard / ProcessOneJob / RunActiveAssembly.
+' Standard molds have no Pyropel isolation step — full-assembly DXF/ISO only.
+Private gJobIsStandardBase As Boolean
+
 ' ============================================================
 ' POT-BLOCK ENGINE ADDITIONS  (scan + BOM read/match + Excel fill)
 ' ============================================================
@@ -708,6 +712,7 @@ On Error GoTo ErrHandler
 
     Dim isStd As Boolean
     isStd = DetectBaseTypeIsStandard()
+    gJobIsStandardBase = isStd
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK (BOM-driven)")
     DoEvents
 
@@ -1351,6 +1356,7 @@ On Error GoTo ErrHandler
 
     Dim isStd As Boolean
     isStd = DetectBaseTypeIsStandard()
+    gJobIsStandardBase = isStd
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
 
     ' AI bridge: classify through the LOCAL AI service (standard bases only;
@@ -2571,15 +2577,29 @@ On Error GoTo ErrHandler
         ExportPlateStlsForComparison CurrentJobFolder & "\stl"
     End If
 
-    ' Front + back ISO JPGs with Pyropel hidden (same keep-list as DXF).
+    ' Front + back ISO JPGs.
+    ' Standard molds: full assembly (no Pyropel on these jobs).
+    ' BMS / pot-block: hide non-base (Pyropel) via keep-list.
     If CREATE_ISO_JPEGS Then
-        ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
-        LogLine "ISO JPGs written to job folder (Pyropel hidden)"
+        If gJobIsStandardBase Then
+            ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
+            LogLine "ISO JPGs written to job folder (STANDARD full assembly — no Pyropel isolation)"
+        Else
+            ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
+            LogLine "ISO JPGs written to job folder (BMS Pyropel hidden)"
+        End If
     End If
 
-    ' Base DXF (4 projected views) with Pyropel hidden — gemini1 selected-components path.
+    ' Base DXF (4 projected views).
+    ' Standard molds: full native assembly DXF — no TCP/holder/pot keep-list.
+    ' BMS: isolate base plates and hide Pyropel (gemini1 path).
     If EXPORT_BASE_DXF Then
-        CreateBaseDxfWithoutPyropel sldPath, dxfPath
+        If gJobIsStandardBase Then
+            LogLine "STANDARD BASE DXF: full assembly (no Pyropel isolation / no pot-block keep-list)"
+            CreateProjectedDxfFromNativePath sldPath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
+        Else
+            CreateBaseDxfWithoutPyropel sldPath, dxfPath
+        End If
         LogLine "DXF written: " & dxfPath
     End If
 
@@ -2594,6 +2614,14 @@ Private Sub CreateBaseDxfWithoutPyropel(ByVal nativeSourcePath As String, ByVal 
 On Error GoTo ErrHandler
 
     If swModel Is Nothing Then Exit Sub
+
+    ' Standard molds: never isolate TCP/holder/pot — that path hides ~250 parts
+    ' and hangs CreateProjectedDxf. Full assembly DXF only (no Pyropel on these jobs).
+    If gJobIsStandardBase Then
+        LogLine "CreateBaseDxfWithoutPyropel: STANDARD job — full assembly DXF (skip keep-list)"
+        CreateProjectedDxfFromNativePath nativeSourcePath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
+        Exit Sub
+    End If
 
     If swModel.GetType <> swDocASSEMBLY Then
         CreateProjectedDxfFromNativePath nativeSourcePath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
@@ -2832,13 +2860,67 @@ eh:
 End Function
 
 ' ============================================================
-' FRONT + BACK ISO JPGs  (Pyropel hidden — same keep-list as BASE DXF / gemini1)
+' FRONT + BACK ISO JPGs — STANDARD molds (full assembly, no keep-list).
+' Non-BMS jobs have no Pyropel; do not hide 250+ components.
+' ============================================================
+Private Sub ExportFrontAndBackIsoJpegsFullAssembly(ByVal outputFolder As String, ByVal baseName As String)
+On Error GoTo ErrHandler
+    If swModel Is Nothing Then Exit Sub
+    If baseName = "" Then baseName = CurrentJobNumber
+    EnsureFolderDeep outputFolder
+
+    UnsuppressAllAssemblyComponents swModel
+    ShowAllAssemblyComponents swModel
+
+    On Error Resume Next
+    swApp.Visible = True
+    On Error GoTo ErrHandler
+    RestoreMainViewportGraphics
+    ApplyCmsTopView swModel
+
+    Dim isoPath As String
+    Dim backIsoPath As String
+    isoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " ISO.jpg")
+    backIsoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " BACK ISO.jpg")
+
+    swModel.ShowNamedView2 "*Isometric", 7
+    swModel.ViewZoomtofit2
+    swModel.GraphicsRedraw2
+    SaveViewAsImage swModel, isoPath
+    LogLine "Saved front ISO jpg (STANDARD full assembly): " & isoPath
+
+    ' BACK ISO = spin 180 about VERTICAL axis (top plate stays up).
+    swModel.ShowNamedView2 "*Isometric", 7
+    Dim swView As Object
+    Set swView = swModel.ActiveView
+    If Not swView Is Nothing Then swView.RotateAboutCenter 0#, PI_VALUE
+    swModel.ViewZoomtofit2
+    swModel.GraphicsRedraw2
+    SaveViewAsImage swModel, backIsoPath
+    LogLine "Saved back ISO jpg (STANDARD full assembly): " & backIsoPath
+
+    swModel.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    ApplyCmsTopView swModel
+    EnsureSwHidden
+    Exit Sub
+ErrHandler:
+    LogLine "ExportFrontAndBackIsoJpegsFullAssembly error: " & Err.Description
+End Sub
+
+' ============================================================
+' FRONT + BACK ISO JPGs  (BMS only — Pyropel hidden via keep-list)
 ' ============================================================
 Private Sub ExportFrontAndBackIsoJpegsWithoutPyropel(ByVal outputFolder As String, ByVal baseName As String)
 On Error GoTo ErrHandler
     If swModel Is Nothing Then Exit Sub
     If baseName = "" Then baseName = CurrentJobNumber
     EnsureFolderDeep outputFolder
+
+    ' Safety: standard jobs must never run the BMS keep-list hide path.
+    If gJobIsStandardBase Then
+        ExportFrontAndBackIsoJpegsFullAssembly outputFolder, baseName
+        Exit Sub
+    End If
 
     Dim hiddenNames As Collection
     Set hiddenNames = Nothing
@@ -2905,9 +2987,13 @@ ErrHandler:
     Resume CleanExit
 End Sub
 
-' Compatibility wrapper (calls Pyropel-free path).
+' Compatibility wrapper — branches on standard vs BMS.
 Private Sub ExportFrontAndBackIsoJpegs(ByVal outputFolder As String, ByVal baseName As String)
-    ExportFrontAndBackIsoJpegsWithoutPyropel outputFolder, baseName
+    If gJobIsStandardBase Then
+        ExportFrontAndBackIsoJpegsFullAssembly outputFolder, baseName
+    Else
+        ExportFrontAndBackIsoJpegsWithoutPyropel outputFolder, baseName
+    End If
 End Sub
 
 ' ============================================================
