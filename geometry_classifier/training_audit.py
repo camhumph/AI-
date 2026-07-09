@@ -32,6 +32,7 @@ _progress: dict = {
     "message": "",
     "use_qwen": False,
     "qwen_model": "",
+    "export_xt": False,
     "error": "",
 }
 
@@ -40,6 +41,7 @@ if str(BASE.parent) not in sys.path:
     sys.path.insert(0, str(BASE.parent))
 
 from geometry_classifier import train_from_quote_sheets  # noqa: E402
+from geometry_classifier import training_xt_export  # noqa: E402
 from geometry_classifier.qwen_classify_xt_csv import (  # noqa: E402
     ROLES,
     classify_geometry,
@@ -472,25 +474,30 @@ def run_full_audit(
     manifest_path: str | None = None,
     use_qwen: bool = False,
     qwen_model: str = "qwen3.5:9b",
+    export_xt: bool = True,
 ) -> dict:
     """Scan training folder; optionally run Qwen per job in background (slow)."""
     if use_qwen:
-        start_background_audit(jobs_root, manifest_path, qwen_model)
+        start_background_audit(jobs_root, manifest_path, qwen_model, export_xt=export_xt)
         return {
             "started": True,
             "background": True,
             "use_qwen": True,
             "qwen_model": qwen_model,
+            "export_xt": export_xt,
             "message": "Training with Qwen started in background. Keep this PC awake; poll status for progress.",
             **get_progress(),
         }
-    return _run_audit_worker(jobs_root, manifest_path, use_qwen=False, qwen_model=qwen_model)
+    return _run_audit_worker(
+        jobs_root, manifest_path, use_qwen=False, qwen_model=qwen_model, export_xt=export_xt
+    )
 
 
 def start_background_audit(
     jobs_root: str | None,
     manifest_path: str | None,
     qwen_model: str = "qwen3.5:9b",
+    export_xt: bool = True,
 ) -> None:
     if get_progress().get("running"):
         raise RuntimeError("Training already running")
@@ -501,6 +508,7 @@ def start_background_audit(
         message="Starting training with Qwen...",
         use_qwen=True,
         qwen_model=qwen_model,
+        export_xt=export_xt,
         error="",
         job_index=0,
         job_total=0,
@@ -509,7 +517,9 @@ def start_background_audit(
 
     def _thread():
         try:
-            _run_audit_worker(jobs_root, manifest_path, use_qwen=True, qwen_model=qwen_model)
+            _run_audit_worker(
+                jobs_root, manifest_path, use_qwen=True, qwen_model=qwen_model, export_xt=export_xt
+            )
         except Exception as exc:
             _write_progress(running=False, phase="error", error=str(exc), message=str(exc))
         finally:
@@ -525,6 +535,7 @@ def _run_audit_worker(
     manifest_path: str | None,
     use_qwen: bool,
     qwen_model: str,
+    export_xt: bool = True,
 ) -> dict:
     job_folders: list[tuple[str, Path]] = []
 
@@ -558,6 +569,23 @@ def _run_audit_worker(
             "base_type": base_type,
             "detection_signals": signals,
         }
+
+        if export_xt and not train_from_quote_sheets.find_xt_csv(folder):
+            if training_xt_export.folder_has_cad(folder):
+                _write_progress(
+                    job_index=idx + 1,
+                    current_job=job_id,
+                    phase="xt_export",
+                    message=f"SolidWorks exporting CAD dimensions for {job_id} ({idx + 1}/{len(job_folders)})...",
+                )
+                xt_result = training_xt_export.ensure_xt_export(folder, job_id)
+                entry["xt_export"] = xt_result
+            else:
+                entry["xt_export"] = {
+                    "ok": False,
+                    "status": "skipped",
+                    "reason": "no CAD files — cannot auto-export XT",
+                }
 
         if base_type == "bms":
             entry.update(process_bms_job(job_id, folder))
@@ -602,7 +630,7 @@ def _run_audit_worker(
 
         results.append(entry)
 
-    return _finalize_summary(results, jobs_root or "", use_qwen, qwen_model)
+    return _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
 
 
 def _finalize_summary(
@@ -610,6 +638,7 @@ def _finalize_summary(
     jobs_root: str,
     use_qwen: bool,
     qwen_model: str,
+    export_xt: bool = True,
 ) -> dict:
     all_mismatches: list[dict] = []
     qwen_mismatches: list[dict] = []
@@ -646,6 +675,10 @@ def _finalize_summary(
         "overall_qwen_accuracy_pct": _overall_accuracy(results, "qwen_audit"),
         "use_qwen": use_qwen,
         "qwen_model": qwen_model if use_qwen else "",
+        "export_xt": export_xt,
+        "xt_exported_jobs": sum(
+            1 for r in results if r.get("xt_export", {}).get("status") == "exported"
+        ),
         "results": results,
         "suggestions": suggestions,
         "output_dir": str(OUT_DIR),

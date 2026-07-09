@@ -510,6 +510,7 @@ class TrainingRunBody(BaseModel):
     scan: bool = True
     use_qwen: bool = True
     qwen_model: str = "qwen3.5:9b"
+    export_xt: bool = True
 
 
 def _ensure_classifier_path():
@@ -538,6 +539,7 @@ def api_training_run(body: TrainingRunBody):
             manifest_path=body.manifest_path,
             use_qwen=body.use_qwen,
             qwen_model=body.qwen_model,
+            export_xt=body.export_xt,
         )
         return result
     except RuntimeError as e:

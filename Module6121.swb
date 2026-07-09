@@ -166,9 +166,14 @@ Private Const FILL_J000_STEEL_SHEET As Boolean = True
 Private Const DOWNLOADS_FOLDER As String = "C:\Users\lenovo\Downloads"
 ' Trusted location where the PDFs and Excel/xlsm templates now live.
 Private Const TRUSTED_FOLDER As String = "C:\Users\lenovo\Documents\Trust"
-' Gmail SMTP for the proposal email-back (same app password as the picker script).
+' Gmail SMTP for the proposal email-back.
+' SECURITY: credentials live in the webapp Settings page JSON file (never
+' gmail_app_password.txt). Revoke any password ever committed to GitHub.
 Private Const GMAIL_ADDRESS As String = "cms1engineering@gmail.com"
-Private Const GMAIL_APP_PASSWORD As String = ""  ' REDACTED - old password leaked to GitHub, REVOKE it and use C:\CMS_Local_Workspace\gmail_app_password.txt
+Private Const EMAIL_CREDENTIALS_FILE As String = "C:\CMS_Local_Workspace\cms_data\email_credentials.json"
+' Proposal email behavior: "AUTO" sends with no prompt (old behavior),
+' "PROMPT" asks before sending, "OFF" only writes the preview file.
+Private Const PROPOSAL_EMAIL_MODE As String = "PROMPT"
 Private Const QUOTE_SHEET_NAME As String = "QuoteWorksheet"
 Private Const POTBLOCK_STEEL_TYPE As String = "#2 4140"
 ' Quote worksheet shows STOCK sizes = finished size rounded UP to the next 1/4".
@@ -264,10 +269,11 @@ Private Const BASE_TYPE_MODE As String = "AUTO"      ' AUTO | POT | STANDARD
 Private Const STD_FOOTPRINT_TOL As Double = 0.18     ' within this fraction of base footprint = full plate
 Private Const STD_MIN_PLATE_THICKNESS As Double = 0.4
 Private Const STD_RAIL_MIN_LENGTH_FRAC As Double = 0.6
-Private Const STD_RAIL_MAX_WIDTH_FRAC As Double = 0.45
+Private Const STD_RAIL_MAX_WIDTH_FRAC As Double = 0.65
 Private Const STD_RAIL_MIN_THICK As Double = 1#
 Private Const STD_EJECTOR_MIN_FOOT_FRAC As Double = 0.15
 Private Const STD_A_B_GRADE As String = "P20"        ' A & B plates default to P20 (#3 block)
+Private Const STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK As Boolean = False
 Private Const PULLCORE_RATE As Double = 88#          ' pullcore/key quote = total cubic inches x this
 Private Const PULLCORE_QUOTE_START_ROW As Long = 218 ' Quote sheet row where the pull-core category begins
 Private Const PULLCORE_PRICE_FILE As String = "Pullcore Prices.csv"
@@ -337,6 +343,43 @@ Private StdQty() As Long
 Private StdGrade() As String
 Private StdQuoteRow() As Long
 Private StdCount As Long
+Private gStdRoleByPart() As String
+Private gStdStackAxis As Integer
+Private gStdTopIsFirst As Boolean
+Private gStdDmeStackFamily As String
+Private gStdPartingLineAxis As Integer
+Private gStdPartingLinePos As Double
+Private gStdCavityCadIndex As Long
+Private gStdCoreCadIndex As Long
+
+' ============================================================
+' AI BRIDGE (CMS AI Quoting local web app / geometry classifier)
+'
+' After WritePartDimensionCsv the macro POSTs the CSV path to the LOCAL
+' AI service (127.0.0.1 only - never the network) which runs the Python
+' geometry classifier (shop-token anchors, latch-lock/SC detection,
+' bottom-up rail/ejector stack anchoring) and returns one role per CAD
+' part index. Those roles feed ClassifyStandardBasePlates.
+'
+' HARD RULE: the AI is used for STANDARD (non-BMS) bases ONLY. BMS /
+' pot-block jobs keep the proven BOM-driven flow untouched - see the
+' isStd guard in RunAiBridgeClassification.
+' ============================================================
+Private Const AI_BRIDGE_ENABLED As Boolean = True
+Private Const AI_BRIDGE_URL As String = "http://127.0.0.1:8000"
+Private Const AI_BRIDGE_TIMEOUT_MS As Long = 30000
+' Fallback folder scanned for <job>_part_names.csv when the local web app
+' is not running (matches the web app's CMS_VBA_BRIDGE_DIR).
+Private Const AI_BRIDGE_FILE_DIR As String = "C:\CMS_Local_Workspace\AI_Bridge"
+' Minimum HIGH-confidence AI plate roles before the AI stack is trusted
+' over the macro's own geometry pass.
+Private Const AI_BRIDGE_MIN_PLATES As Long = 3
+
+Private gAiRoleByPart() As String       ' AI role key per CAD part index ("a_plate", ...)
+Private gAiConfByPart() As String       ' "HIGH" / "MEDIUM" / "LOW"
+Private gAiRoleCount As Long            ' rows parsed from the bridge
+Private gAiBridgeUsed As Boolean        ' True when AI roles drove the standard stack
+Private gAiSequencedLatchLock As Boolean ' True when the AI flagged a latch-lock/SC base
 
 ' Handoff file written by CMS_Launcher.vbs and read at startup
 Private Type HandoffInfo
@@ -352,6 +395,14 @@ Private Type HandoffInfo
 End Type
 
 Private Const HANDOFF_FILE As String = "C:\CMS_Local_Workspace\cms_handoff.txt"
+Private Const TRAINING_XT_HANDOFF As String = "C:\CMS_Local_Workspace\cms_training_xt.txt"
+
+Private Type TrainingXtHandoff
+    JobFolder As String
+    JobId As String
+    OutputCsv As String
+    DoneFile As String
+End Type
 
 ' ============================================================
 ' MAIN
@@ -364,12 +415,31 @@ On Error GoTo ErrHandler
     ' without showing an InputBox.
     Dim fsoLaunch As Object
     Set fsoLaunch = CreateObject("Scripting.FileSystemObject")
+    If fsoLaunch.FileExists(TRAINING_XT_HANDOFF) Then
+        RunTrainingXtExport
+        Exit Sub
+    End If
     If fsoLaunch.FileExists(HANDOFF_FILE) Then
         RunFromLauncher
         Exit Sub
     End If
 
     Set swApp = Application.SldWorks
+
+    If ActiveCadIsOpen() Then
+        Dim runActive As VbMsgBoxResult
+        runActive = MsgBox("Use the CAD model that is already open in SolidWorks?" & vbCrLf & vbCrLf & _
+                           "Yes = run quoting from the open XT/assembly." & vbCrLf & _
+                           "No = enter C-number(s) like normal." & vbCrLf & _
+                           "Cancel = stop.", _
+                           vbYesNoCancel + vbQuestion, "CMS Base Export")
+        If runActive = vbYes Then
+            RunActiveAssembly
+            Exit Sub
+        ElseIf runActive = vbCancel Then
+            GoTo NormalEnd
+        End If
+    End If
 
     If RUN_SOLIDWORKS_INVISIBLE Then
         On Error Resume Next
@@ -456,6 +526,337 @@ ErrHandler:
     If Not swApp Is Nothing And Not RUN_SOLIDWORKS_INVISIBLE Then swApp.Visible = True
     On Error GoTo 0
     If Not SUPPRESS_USER_PROMPTS Then MsgBox "Macro error at step: " & CurrentStepName & vbCrLf & Err.Description & vbCrLf & RunLogPath, vbCritical
+End Sub
+
+' ============================================================
+' ACTIVE CAD / XT ENTRY POINT
+' Use this when the XT, STEP, part, or assembly is already open in SolidWorks.
+' It does not need a launcher handoff or C-number, and it does not move/close
+' the user's CAD files.
+' ============================================================
+Sub RunActiveAssembly()
+On Error GoTo ErrHandler
+    Set swApp = Application.SldWorks
+    On Error Resume Next
+    swApp.Visible = True
+    On Error GoTo ErrHandler
+    MacroStartTime = Now
+    StartupLogPath = DOWNLOADS_FOLDER & "\CMS_Base_Export_Log.txt"
+    RunLogPath = StartupLogPath
+
+    If Not ActiveCadIsOpen() Then
+        LogLine "RunActiveAssembly stopped: no active CAD document is open."
+        MsgBox "Open the XT, STEP, part, or assembly in SolidWorks first, then run RunActiveAssembly.", vbExclamation, "CMS Base Export"
+        Exit Sub
+    End If
+
+    Set swModel = swApp.ActiveDoc
+    MainCadOpenedByMacro = False
+    MainCadTitleForClose = ""
+    MainViewportGraphicsDisabled = False
+
+    Dim modelPath As String
+    Dim modelTitle As String
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    modelPath = ""
+    On Error Resume Next
+    modelPath = swModel.GetPathName
+    modelTitle = swModel.GetTitle
+    On Error GoTo ErrHandler
+    If modelTitle = "" Then modelTitle = "ActiveCad"
+
+    JobBaseName = CleanFileName(GetFileBaseName(modelTitle))
+    If JobBaseName = "" Then JobBaseName = CleanFileName(modelTitle)
+    If JobBaseName = "" Then JobBaseName = "ActiveCad"
+    CurrentJobNumber = JobBaseName
+    CustomerJobNumber = ""
+    CustomerPrefix = ""
+    CustomerDisplayName = ""
+    AssignedQuoteNumber = ""
+    SimilarToJob = ""
+    ShipDateText = ""
+    gExactJobFolderName = ""
+    NetworkJobFolder = ""
+    LocalJobFolder = ""
+    gDiagBomPath = ""
+    gEmailStatus = ""
+
+    If modelPath <> "" Then
+        NetworkJobFolder = fso.GetParentFolderName(modelPath)
+    End If
+    If NetworkJobFolder = "" Then NetworkJobFolder = LOCAL_WORKSPACE_ROOT
+    CurrentJobFolder = NetworkJobFolder & "\CMS_ACTIVE_QUOTE_" & JobBaseName & "_" & Format(Now, "yyyymmdd_hhnnss")
+    EnsureFolderDeep CurrentJobFolder
+    RunLogPath = CurrentJobFolder & "\CMS_Base_Export_Log.txt"
+
+    LogLine "========================================"
+    LogLine "BASE EXPORT MACRO STARTED (active CAD quote)"
+    LogLine "Active CAD: " & modelTitle
+    If modelPath <> "" Then LogLine "Active path: " & modelPath
+    LogLine "Output folder: " & CurrentJobFolder
+    LogLine "========================================"
+
+    JobStartTime = Now
+    ' In active-CAD mode keep SolidWorks untouched. Do not activate views,
+    ' hide/show components, rebuild, export, or redefine standard views here.
+    ' This mode opens/uses an XT and runs quote sheets from the scanned geometry.
+    MainViewportGraphicsDisabled = False
+    DoEvents
+
+    LogStart "Scan active CAD/XT parts"
+    PartCount = 0
+    ReDim parts(1 To 1)
+    Set swAssy = Nothing
+    ScanActiveSolidWorksDocument
+    SortPartsByVolumeDescending
+    ClassifyPotBlockPlatesFromCad
+    LogLine "CAD PartCount=" & PartCount
+    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    LogDone "Scan active CAD/XT parts"
+    DoEvents
+
+    BomCount = 0
+    ReDim BomRows(1 To 1)
+    ExportCount = 0
+    ReDim ExportRows(1 To 1)
+    LoadPurchasedPriceList
+    WriteExportCheckCsv CurrentJobFolder & "\XT_Export_BOM_Match_Report.csv"
+
+    Dim isStd As Boolean
+    isStd = DetectBaseTypeIsStandard()
+    LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
+    DoEvents
+
+    ' AI bridge: classify through the LOCAL AI service (standard bases only;
+    ' BMS/pot-block jobs are guarded inside and keep the BOM-driven flow).
+    LogStart "AI bridge classification"
+    RunAiBridgeClassification CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv", isStd
+    LogDone "AI bridge classification"
+
+    If isStd Then
+        LogStart "Classify STANDARD mold base from active CAD"
+        ClassifyStandardBasePlates
+        CaptureStandardPurchasedFromCadIfNeeded
+        LogDone "Classify STANDARD mold base from active CAD"
+    End If
+
+    BuildPullcoreList
+    If WRITE_PCS_NAMING_ANALYSIS Then WritePcsNamingAnalysis CurrentJobFolder & "\PCS_Naming_Analysis.csv", isStd
+    DoEvents
+
+    If FILL_QUOTE_WORKBOOK Then
+        LogStart "Fill Quote workbook from active CAD"
+        If isStd Then FillStandardBaseQuote Else FillQuoteWorkbookFromBoundingBox
+        LogDone "Fill Quote workbook from active CAD"
+    End If
+
+    If FILL_J000_STEEL_SHEET Then
+        LogStart "Fill J000 steel sheet from active CAD"
+        If isStd Then FillStandardBaseSteel Else FillJ000SteelSheet
+        LogDone "Fill J000 steel sheet from active CAD"
+    End If
+
+    ComputePullcoreQuote
+    ComputePurchasedQuote
+
+    LogLine "DONE ACTIVE CAD QUOTE. Output folder: " & CurrentJobFolder
+    LogLine "TOTAL ACTIVE RUN TIME: " & DateDiff("s", JobStartTime, Now) & "s   (log: " & RunLogPath & ")"
+    MsgBox "Active CAD quote finished." & vbCrLf & _
+           "Quote/Excel was run. Heavy exports/views were skipped." & vbCrLf & vbCrLf & _
+           CurrentJobFolder, vbInformation, "CMS Base Export"
+
+CleanExit:
+    On Error Resume Next
+    RestoreMainViewportGraphics
+    Set swModel = swApp.ActiveDoc
+    Exit Sub
+
+ErrHandler:
+    LogLine "RunActiveAssembly error. Step: " & CurrentStepName & "  Err " & Err.Number & ": " & Err.Description
+    On Error Resume Next
+    RestoreMainViewportGraphics
+    MsgBox "Active assembly run failed at step: " & CurrentStepName & vbCrLf & Err.Description & vbCrLf & RunLogPath, vbCritical, "CMS Base Export"
+End Sub
+
+Private Function ActiveCadIsOpen() As Boolean
+On Error GoTo nope
+    ActiveCadIsOpen = False
+    If swApp Is Nothing Then Set swApp = Application.SldWorks
+    If swApp Is Nothing Then Exit Function
+    Dim m As Object
+    Set m = swApp.ActiveDoc
+    If m Is Nothing Then Exit Function
+    ActiveCadIsOpen = (m.GetType = swDocASSEMBLY Or m.GetType = swDocPART)
+    Exit Function
+nope:
+    ActiveCadIsOpen = False
+End Function
+
+Private Function ActiveAssemblyIsOpen() As Boolean
+    ActiveAssemblyIsOpen = ActiveCadIsOpen()
+End Function
+
+' ============================================================
+' TRAINING XT EXPORT (dimensions only)
+' Called by the webapp training scan when a job folder has CAD
+' but no XT_Export_CAD_Dimensions.csv yet.
+' Reads cms_training_xt.txt, opens CAD, scans geometry, writes
+' the XT CSV into the training folder, then exits.
+' ============================================================
+Sub RunTrainingXtExport()
+On Error GoTo ErrHandler
+    Dim h As TrainingXtHandoff
+    h = ReadTrainingXtHandoff()
+    If h.JobFolder = "" Then
+        WriteTrainingXtDone h.DoneFile, "ERROR", "", "Training handoff missing JobFolder"
+        Exit Sub
+    End If
+
+    Set swApp = Application.SldWorks
+    MacroStartTime = Now
+    CurrentJobFolder = h.JobFolder
+    CurrentJobNumber = h.JobId
+    If CurrentJobNumber = "" Then CurrentJobNumber = GetFolderLeafName(CurrentJobFolder)
+    If CurrentJobNumber = "" Then CurrentJobNumber = "TRAINING"
+    RunLogPath = CurrentJobFolder & "\CMS_Training_XT_Log.txt"
+    StartupLogPath = RunLogPath
+    MainCadOpenedByMacro = False
+    MainCadTitleForClose = ""
+    MainViewportGraphicsDisabled = False
+    Set swModel = Nothing
+
+    LogLine "========================================"
+    LogLine "TRAINING XT EXPORT STARTED"
+    LogLine "Job folder: " & CurrentJobFolder
+    LogLine "========================================"
+
+    Dim extractFolder As String
+    extractFolder = CurrentJobFolder & "\" & EXTRACT_FOLDER_NAME
+    LogStart "Extract ZIP files"
+    EnsureFolderDeep extractFolder
+    ExtractAllZipFilesInJobFolder CurrentJobFolder, extractFolder
+    FlattenExtractedZipContentsIntoJobFolder CurrentJobFolder, extractFolder
+    If DELETE_EXTRACTED_ZIP_AFTER_FLATTEN Then DeleteFolderSafe extractFolder
+    LogDone "Extract ZIP files"
+
+    LogStart "Find CAD file"
+    Dim cadCandidates As Collection
+    Set cadCandidates = FindAllCadModelsRanked(CurrentJobFolder)
+    AppendCadCandidates cadCandidates, FindAllCadModelsRanked(extractFolder)
+    If cadCandidates.Count = 0 Then
+        WriteTrainingXtDone h.DoneFile, "ERROR", "", "No CAD file found in training folder"
+        GoTo CleanExit
+    End If
+    LogDone "Find CAD file"
+
+    LogStart "Open CAD"
+    Dim ci As Long
+    Dim cadPath As String
+    For ci = 1 To cadCandidates.Count
+        cadPath = CStr(cadCandidates(ci))
+        LogLine "Trying CAD candidate " & ci & "/" & cadCandidates.Count & ": " & cadPath
+        Set swModel = OpenCadFile(cadPath)
+        If Not swModel Is Nothing Then
+            LogLine "CAD opened: " & cadPath
+            Exit For
+        End If
+    Next ci
+    If swModel Is Nothing Then
+        WriteTrainingXtDone h.DoneFile, "ERROR", "", "Open CAD failed"
+        GoTo CleanExit
+    End If
+    MainCadOpenedByMacro = True
+    MainCadTitleForClose = swModel.GetTitle
+    LogDone "Open CAD"
+
+    Dim errs As Long
+    swApp.ActivateDoc3 swModel.GetTitle, False, 0, errs
+    EnsureSwHidden
+
+    LogStart "Scan CAD parts (training XT export)"
+    PartCount = 0
+    ReDim parts(1 To 1)
+    Set swAssy = Nothing
+    ScanActiveSolidWorksDocument
+    SortPartsByVolumeDescending
+    ClassifyPotBlockPlatesFromCad
+    LogLine "CAD PartCount=" & PartCount
+
+    Dim outCsv As String
+    If h.OutputCsv <> "" Then
+        outCsv = h.OutputCsv
+    Else
+        outCsv = CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    End If
+    WritePartDimensionCsv outCsv
+    LogDone "Scan CAD parts (training XT export)"
+
+    WriteTrainingXtDone h.DoneFile, "OK", outCsv, "Exported " & PartCount & " components"
+    LogLine "TRAINING XT EXPORT DONE: " & outCsv
+
+CleanExit:
+    On Error Resume Next
+    CloseCurrentJobCadIfNeeded
+    RestoreMainViewportGraphics
+    Exit Sub
+
+ErrHandler:
+    LogLine "RunTrainingXtExport error: " & Err.Description
+    WriteTrainingXtDone h.DoneFile, "ERROR", "", Err.Description
+    Resume CleanExit
+End Sub
+
+Private Function ReadTrainingXtHandoff() As TrainingXtHandoff
+On Error GoTo eh
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FileExists(TRAINING_XT_HANDOFF) Then Exit Function
+    Dim f As Integer, line As String, k As String, v As String, p As Long
+    f = FreeFile
+    Open TRAINING_XT_HANDOFF For Input As #f
+    Do While Not EOF(f)
+        Line Input #f, line
+        p = InStr(line, "=")
+        If p > 0 Then
+            k = Trim(Left(line, p - 1))
+            v = Trim(Mid(line, p + 1))
+            Select Case UCase(k)
+                Case "JOBFOLDER": ReadTrainingXtHandoff.JobFolder = v
+                Case "JOBID": ReadTrainingXtHandoff.JobId = v
+                Case "OUTPUTCSV": ReadTrainingXtHandoff.OutputCsv = v
+                Case "DONEFILE": ReadTrainingXtHandoff.DoneFile = v
+            End Select
+        End If
+    Loop
+    Close #f
+    If ReadTrainingXtHandoff.DoneFile = "" Then
+        ReadTrainingXtHandoff.DoneFile = LOCAL_WORKSPACE_ROOT & "\cms_training_xt_done.txt"
+    End If
+    Exit Function
+eh:
+    LogLine "ReadTrainingXtHandoff error: " & Err.Description
+    On Error Resume Next: Close #f
+End Function
+
+Private Sub WriteTrainingXtDone(ByVal donePath As String, ByVal status As String, ByVal xtCsv As String, ByVal message As String)
+On Error Resume Next
+    Dim p As String
+    If donePath = "" Then donePath = LOCAL_WORKSPACE_ROOT & "\cms_training_xt_done.txt"
+    p = donePath
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim parent As String
+    parent = fso.GetParentFolderName(p)
+    If parent <> "" Then EnsureFolderDeep parent
+    Dim f As Integer
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Status=" & status
+    Print #f, "XtCsv=" & xtCsv
+    Print #f, "PartCount=" & PartCount
+    Print #f, "Message=" & message
+    Close #f
 End Sub
 
 ' ============================================================
@@ -749,6 +1150,12 @@ On Error GoTo ErrHandler
     isStd = DetectBaseTypeIsStandard()
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
 
+    ' AI bridge: classify through the LOCAL AI service (standard bases only;
+    ' BMS/pot-block jobs are guarded inside and keep the BOM-driven flow).
+    LogStart "AI bridge classification"
+    RunAiBridgeClassification CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv", isStd
+    LogDone "AI bridge classification"
+
     If isStd Then
         LogStart "Set STANDARD mold base orientation"
         SetStandardBaseOrientation swModel
@@ -809,6 +1216,8 @@ On Error GoTo ErrHandler
     CloseAllDocumentsSafely
     MoveLooseSolidWorksPartsToBaseFolder
     SyncCompletedJobToNetworkFolder
+
+    AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
 
     gLastJobDiag = "BOM file:  " & IIf(gDiagBomPath = "", "(NONE FOUND)", gDiagBomPath) & vbCrLf & _
                    "BOM rows read:  " & BomCount & vbCrLf & _
@@ -3201,6 +3610,7 @@ On Error GoTo ErrHandler
     If IsEmpty(vBodies) Then Exit Sub
     Dim i As Long, swBody As Object, vBox As Variant
     Dim dx As Double, dy As Double, dz As Double, massV As Double
+    Dim cx As Double, cy As Double, cz As Double
     For i = 0 To UBound(vBodies)
         Set swBody = vBodies(i)
         If Not swBody Is Nothing Then
@@ -3209,9 +3619,12 @@ On Error GoTo ErrHandler
                 dx = Abs(CDbl(vBox(3)) - CDbl(vBox(0))) * INCHES_PER_METER
                 dy = Abs(CDbl(vBox(4)) - CDbl(vBox(1))) * INCHES_PER_METER
                 dz = Abs(CDbl(vBox(5)) - CDbl(vBox(2))) * INCHES_PER_METER
+                cx = ((CDbl(vBox(0)) + CDbl(vBox(3))) / 2#) * INCHES_PER_METER
+                cy = ((CDbl(vBox(1)) + CDbl(vBox(4))) / 2#) * INCHES_PER_METER
+                cz = ((CDbl(vBox(2)) + CDbl(vBox(5))) / 2#) * INCHES_PER_METER
                 massV = GetBodyMassOrVolumeValue(swBody)
                 AddCadPart baseName & " [" & swBody.Name & "]", partModel.GetPathName, "", swBody.Name, _
-                           dx, dy, dz, massV, False, 0#, 0#, 0#, True
+                           dx, dy, dz, massV, True, cx, cy, cz, True
             End If
         End If
     Next i
@@ -5377,32 +5790,32 @@ Private Function StdFullPlateName(ByVal pos As Long, ByVal nFull As Long) As Str
             If pos = 2 Then StdFullPlateName = "Stripper Plate": Exit Function
 
         Case 4
-            If pos = 2 Then StdFullPlateName = "Cavity Plate": Exit Function
-            If pos = 3 Then StdFullPlateName = "Core Plate": Exit Function
+            If pos = 2 Then StdFullPlateName = "A Plate": Exit Function
+            If pos = 3 Then StdFullPlateName = "B Plate": Exit Function
 
         Case 5
-            If pos = 2 Then StdFullPlateName = "Cavity Plate": Exit Function
-            If pos = 3 Then StdFullPlateName = "Core Plate": Exit Function
+            If pos = 2 Then StdFullPlateName = "A Plate": Exit Function
+            If pos = 3 Then StdFullPlateName = "B Plate": Exit Function
             If pos = 4 Then StdFullPlateName = "Support Plate": Exit Function
 
         Case 6
-            If pos = 2 Then StdFullPlateName = "Cavity Plate": Exit Function
+            If pos = 2 Then StdFullPlateName = "A Plate": Exit Function
             If pos = 3 Then StdFullPlateName = "Stripper Plate": Exit Function
-            If pos = 4 Then StdFullPlateName = "Core Plate": Exit Function
+            If pos = 4 Then StdFullPlateName = "B Plate": Exit Function
             If pos = 5 Then StdFullPlateName = "Support Plate": Exit Function
 
         Case 7
-            If pos = 2 Then StdFullPlateName = "Cavity Plate": Exit Function
+            If pos = 2 Then StdFullPlateName = "A Plate": Exit Function
             If pos = 3 Then StdFullPlateName = "Stripper Plate": Exit Function
-            If pos = 4 Then StdFullPlateName = "Core Plate": Exit Function
+            If pos = 4 Then StdFullPlateName = "B Plate": Exit Function
             If pos = 5 Then StdFullPlateName = "Die Plate": Exit Function
             If pos = 6 Then StdFullPlateName = "Die Backup Plate": Exit Function
 
         Case Else
             Select Case pos
-                Case 2: StdFullPlateName = "Cavity Plate"
+                Case 2: StdFullPlateName = "A Plate"
                 Case 3: StdFullPlateName = "Stripper Plate"
-                Case 4: StdFullPlateName = "Core Plate"
+                Case 4: StdFullPlateName = "B Plate"
                 Case 5: StdFullPlateName = "Support Plate"
                 Case Else: StdFullPlateName = "Plate " & pos
             End Select
@@ -5412,18 +5825,281 @@ Private Function StdFullPlateName(ByVal pos As Long, ByVal nFull As Long) As Str
     StdFullPlateName = "Plate " & pos
 End Function
 
-Private Function StdFullPlateNameFromGeometry(ByVal pos As Long, ByVal nFull As Long, ByVal cadIdx As Long) As String
+Private Function StdFullPlateNameFromGeometry(ByVal pos As Long, ByVal nFull As Long, ByVal cadIdx As Long, _
+                                              ByRef fullIdx() As Long, ByVal hasRails As Boolean, _
+                                              ByVal hasEjectorStack As Boolean) As String
     Dim hinted As String
+    Dim guessed As String
 
+    guessed = StdFullPlateNameSmart(pos, nFull, fullIdx, hasRails, hasEjectorStack)
     hinted = ""
     If cadIdx > 0 And cadIdx <= PartCount Then
         hinted = StandardPlateNameStd(parts(cadIdx).componentName)
     End If
 
-    If hinted <> "" Then
+    ' Exact shop-standard tokens from imported STEP files are stronger than the
+    ' generic stack pattern. Keep using geometry for generic/mixed names.
+    Select Case NormalizeKey(hinted)
+        Case "APLATE", "BPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", "BOTTOMCLAMPPLATE"
+            StdFullPlateNameFromGeometry = hinted
+            Exit Function
+    End Select
+
+    If Not STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK Then
+        StdFullPlateNameFromGeometry = guessed
+        Exit Function
+    End If
+
+    ' CAD names are useful hints, but they are not allowed to flip the A/B side
+    ' against the mold-base stack. Leader pins/rails/ejector stack define the B
+    ' side; the plate immediately toward that side is the core/B plate.
+    If StdNameHintIsSafeForPosition(hinted, guessed, pos, nFull) Then
         StdFullPlateNameFromGeometry = hinted
     Else
-        StdFullPlateNameFromGeometry = StdFullPlateName(pos, nFull)
+        StdFullPlateNameFromGeometry = guessed
+    End If
+End Function
+
+Private Function StdFullPlateNameSmart(ByVal pos As Long, ByVal nFull As Long, _
+                                       ByRef fullIdx() As Long, ByVal hasRails As Boolean, _
+                                       ByVal hasEjectorStack As Boolean) As String
+    If nFull < 1 Then Exit Function
+
+    Dim topClampPresent As Boolean
+    topClampPresent = StdTopClampAppearsPresent(fullIdx, nFull)
+
+    If topClampPresent Then
+        If pos = 1 Then StdFullPlateNameSmart = "Top Clamp Plate": Exit Function
+        If pos = nFull Then StdFullPlateNameSmart = "Bottom Clamp Plate": Exit Function
+        StdFullPlateNameSmart = StdInnerStackName(pos - 1, nFull - 2, hasRails, hasEjectorStack)
+    Else
+        ' Some exports/jobs do not include the TCP. In that case the first big
+        ' plate is normally A/cavity, not a top clamp.
+        If pos = nFull Then StdFullPlateNameSmart = "Bottom Clamp Plate": Exit Function
+        StdFullPlateNameSmart = StdInnerStackName(pos, nFull - 1, hasRails, hasEjectorStack)
+    End If
+
+    If StdFullPlateNameSmart = "" Then StdFullPlateNameSmart = StdFullPlateName(pos, nFull)
+End Function
+
+Private Function StdTopClampAppearsPresent(ByRef fullIdx() As Long, ByVal nFull As Long) As Boolean
+    StdTopClampAppearsPresent = True
+    If nFull < 3 Then Exit Function
+
+    If Not STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK Then
+        Dim avgNoName As Double
+        avgNoName = StdAverageInnerFullPlateThickness(fullIdx, nFull)
+        If avgNoName > 0# Then
+            If parts(fullIdx(1)).Thickness > avgNoName * 1.35 Then
+                StdTopClampAppearsPresent = False
+                Exit Function
+            End If
+        End If
+        If nFull >= 5 Then
+            StdTopClampAppearsPresent = True
+            Exit Function
+        End If
+        StdTopClampAppearsPresent = True
+        Exit Function
+    End If
+
+    Dim firstHint As String
+    firstHint = StandardPlateNameStd(parts(fullIdx(1)).componentName)
+    If InStr(UCase(firstHint), "TOP CLAMP") > 0 Then StdTopClampAppearsPresent = True: Exit Function
+    If InStr(UCase(firstHint), "A PLATE") > 0 Or InStr(UCase(firstHint), "B PLATE") > 0 Or _
+       InStr(UCase(firstHint), "CAVITY") > 0 Or InStr(UCase(firstHint), "CORE") > 0 Or _
+       InStr(UCase(firstHint), "SUPPORT") > 0 Then
+        StdTopClampAppearsPresent = False
+        Exit Function
+    End If
+
+    ' Without a useful name, a much-thicker first full plate usually means the
+    ' TCP is missing and the first full plate is the A/cavity plate.
+    Dim avgInner As Double
+    avgInner = StdAverageInnerFullPlateThickness(fullIdx, nFull)
+    If avgInner > 0# Then
+        If parts(fullIdx(1)).Thickness > avgInner * 1.15 Then
+            StdTopClampAppearsPresent = False
+            Exit Function
+        End If
+    End If
+
+    ' Five or more full plates usually include a top clamp in a standard stack.
+    If nFull >= 5 Then StdTopClampAppearsPresent = True
+End Function
+
+Private Function StdAverageInnerFullPlateThickness(ByRef fullIdx() As Long, ByVal nFull As Long) As Double
+    Dim i As Long
+    Dim total As Double
+    Dim cnt As Long
+    If nFull <= 2 Then Exit Function
+    For i = 2 To nFull - 1
+        total = total + parts(fullIdx(i)).Thickness
+        cnt = cnt + 1
+    Next i
+    If cnt > 0 Then StdAverageInnerFullPlateThickness = total / cnt
+End Function
+
+Private Function StdInnerStackName(ByVal innerPos As Long, ByVal innerCount As Long, _
+                                   ByVal hasRails As Boolean, ByVal hasEjectorStack As Boolean) As String
+    If innerPos < 1 Or innerCount < 1 Then Exit Function
+
+    Select Case innerCount
+        Case 1
+            If hasRails Or hasEjectorStack Then
+                StdInnerStackName = "B Plate"
+            Else
+                StdInnerStackName = "A Plate"
+            End If
+
+        Case 2
+            If innerPos = 1 Then StdInnerStackName = "A Plate": Exit Function
+            If innerPos = 2 Then StdInnerStackName = "B Plate": Exit Function
+
+        Case 3
+            If innerPos = 1 Then StdInnerStackName = "A Plate": Exit Function
+            If innerPos = 2 Then StdInnerStackName = "B Plate": Exit Function
+            If innerPos = 3 Then StdInnerStackName = "Support Plate": Exit Function
+
+        Case 4
+            If innerPos = 1 Then StdInnerStackName = "A Plate": Exit Function
+            If innerPos = 2 Then StdInnerStackName = "Stripper Plate": Exit Function
+            If innerPos = 3 Then StdInnerStackName = "B Plate": Exit Function
+            If innerPos = 4 Then StdInnerStackName = "Support Plate": Exit Function
+
+        Case Else
+            Select Case innerPos
+                Case 1: StdInnerStackName = "A Plate"
+                Case 2: StdInnerStackName = "Stripper Plate"
+                Case 3: StdInnerStackName = "B Plate"
+                Case 4: StdInnerStackName = "Support Plate"
+                Case Else: StdInnerStackName = "Plate " & innerPos
+            End Select
+    End Select
+End Function
+
+Private Function StdNameHintIsSafeForPosition(ByVal hinted As String, ByVal guessed As String, _
+                                              ByVal pos As Long, ByVal nFull As Long) As Boolean
+    StdNameHintIsSafeForPosition = False
+    If hinted = "" Then Exit Function
+
+    Dim h As String
+    Dim g As String
+    h = NormalizeKey(hinted)
+    g = NormalizeKey(guessed)
+    If h = g Then StdNameHintIsSafeForPosition = True: Exit Function
+
+    ' Only let strong clamp/special names override the stack when they are at a
+    ' sensible end of the full-plate stack.
+    If h = "TOPCLAMPPLATE" And pos <= 2 Then StdNameHintIsSafeForPosition = True: Exit Function
+    If h = "BOTTOMCLAMPPLATE" And pos >= nFull - 1 Then StdNameHintIsSafeForPosition = True: Exit Function
+    If (h = "MANIFOLDPLATE" Or h = "STRIPPERPLATE") And pos > 1 And pos < nFull Then StdNameHintIsSafeForPosition = True: Exit Function
+
+    ' Do not let generic CAD names flip cavity/core. Those two are decided by
+    ' position relative to the ejector/rail/leader-pin side.
+End Function
+
+Private Function StdDmeStackFamilyName(ByVal nFull As Long, ByVal topClampPresent As Boolean, _
+                                       ByVal hasRails As Boolean, ByVal hasEjectorStack As Boolean, _
+                                       ByVal nLeaderStack As Long) As String
+    Dim innerCount As Long
+    If topClampPresent Then
+        innerCount = nFull - 2
+    Else
+        innerCount = nFull - 1
+    End If
+
+    Select Case innerCount
+        Case 1
+            StdDmeStackFamilyName = "DME minimal/core-only stack"
+        Case 2
+            StdDmeStackFamilyName = "DME 2-plate A/B stack"
+        Case 3
+            StdDmeStackFamilyName = "DME A/B/support stack"
+        Case 4
+            StdDmeStackFamilyName = "DME stripper A/B/support stack"
+        Case 5
+            StdDmeStackFamilyName = "DME manifold/stripper A/B/support stack"
+        Case Else
+            StdDmeStackFamilyName = "DME extended standard stack"
+    End Select
+
+    If Not topClampPresent Then StdDmeStackFamilyName = StdDmeStackFamilyName & " (top clamp missing)"
+    If hasRails Then StdDmeStackFamilyName = StdDmeStackFamilyName & " + rails"
+    If hasEjectorStack Then StdDmeStackFamilyName = StdDmeStackFamilyName & " + ejector stack"
+    If nLeaderStack > 0 Then StdDmeStackFamilyName = StdDmeStackFamilyName & " + leader-pin stack"
+End Function
+
+Private Function StdLeaderPinOrientationTopIsFirst(ByRef fullIdx() As Long, ByVal nFull As Long, _
+                                                   ByRef lpIdx() As Long, ByVal nLp As Long, _
+                                                   ByVal ax As Integer, ByRef topIsFirstOut As Boolean) As Boolean
+    StdLeaderPinOrientationTopIsFirst = False
+    If nFull < 1 Or nLp < 1 Then Exit Function
+
+    Dim i As Long
+    Dim roleKey As String
+    Dim pinMean As Double, pinCount As Long
+    Dim bushMean As Double, bushCount As Long
+
+    For i = 1 To nLp
+        roleKey = NormalizeKey(StandardRoundComponentRole(lpIdx(i)))
+        Select Case roleKey
+            Case "LEADERPIN"
+                pinMean = pinMean + PartAxisCenter(lpIdx(i), ax)
+                pinCount = pinCount + 1
+            Case "LEADERPINBUSHING", "GUIDEDEJECTORBUSHING"
+                bushMean = bushMean + PartAxisCenter(lpIdx(i), ax)
+                bushCount = bushCount + 1
+        End Select
+    Next i
+
+    Dim firstC As Double
+    Dim lastC As Double
+    firstC = PartAxisCenter(fullIdx(1), ax)
+    lastC = PartAxisCenter(fullIdx(nFull), ax)
+
+    ' DME/common mold-base rule: leader pins are on the B/core side, bushings
+    ' are on the A/cavity side. Prefer pins first because the B side also has
+    ' the rails/ejector hardware and is the most important orientation anchor.
+    If pinCount > 0 Then
+        pinMean = pinMean / pinCount
+        topIsFirstOut = (Abs(firstC - pinMean) > Abs(lastC - pinMean))
+        StdLeaderPinOrientationTopIsFirst = True
+        Exit Function
+    End If
+
+    If bushCount > 0 Then
+        bushMean = bushMean / bushCount
+        topIsFirstOut = (Abs(firstC - bushMean) < Abs(lastC - bushMean))
+        StdLeaderPinOrientationTopIsFirst = True
+    End If
+End Function
+
+Private Sub StdSetPartingLineFromRoles(ByVal ax As Integer)
+    gStdPartingLineAxis = 0
+    gStdPartingLinePos = 0#
+    If gStdCavityCadIndex < 1 Or gStdCoreCadIndex < 1 Then Exit Sub
+
+    gStdPartingLineAxis = ax
+    gStdPartingLinePos = (PartAxisCenter(gStdCavityCadIndex, ax) + PartAxisCenter(gStdCoreCadIndex, ax)) / 2#
+    LogLine "Standard parting line rule: A/cavity idx " & gStdCavityCadIndex & _
+            " and B/core idx " & gStdCoreCadIndex & _
+            " -> axis " & ax & " pos " & FormatNumberForCsv(gStdPartingLinePos)
+End Sub
+
+Private Function StdPartingSideForCadIndex(ByVal idx As Long) As String
+    StdPartingSideForCadIndex = ""
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If gStdPartingLineAxis < 1 Or gStdPartingLineAxis > 3 Then Exit Function
+
+    Dim v As Double
+    v = PartAxisCenter(idx, gStdPartingLineAxis)
+    If Abs(v - gStdPartingLinePos) <= 0.05 Then
+        StdPartingSideForCadIndex = "PARTING_LINE"
+    ElseIf gStdTopIsFirst Then
+        If v > gStdPartingLinePos Then StdPartingSideForCadIndex = "A/CAVITY_SIDE" Else StdPartingSideForCadIndex = "B/CORE_SIDE"
+    Else
+        If v < gStdPartingLinePos Then StdPartingSideForCadIndex = "A/CAVITY_SIDE" Else StdPartingSideForCadIndex = "B/CORE_SIDE"
     End If
 End Function
 
@@ -5457,6 +6133,32 @@ Private Function IsStandardRailCandidate(ByVal idx As Long, ByVal baseW As Doubl
 
     IsStandardRailCandidate = True
 End Function
+
+Private Function IsStandardEjectorPlateCandidate(ByVal idx As Long, ByVal baseW As Double, ByVal baseL As Double, ByVal baseFoot As Double) As Boolean
+    IsStandardEjectorPlateCandidate = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    Dim t As Double
+    Dim w As Double
+    Dim l As Double
+    Dim fp As Double
+
+    t = parts(idx).Thickness
+    w = parts(idx).Width
+    l = parts(idx).Length
+    If t <= 0# Or w <= 0# Or l <= 0# Then Exit Function
+
+    ' Ejector retainer/plate steel is long and flat in the mold footprint. Small
+    ' cavity/core inserts can have enough area to pass a simple footprint test,
+    ' but they are not long base-stack plates.
+    If l < 0.6 * baseL Then Exit Function
+    If w < 0.35 * baseW Then Exit Function
+
+    fp = w * l
+    If fp < STD_EJECTOR_MIN_FOOT_FRAC * baseFoot Then Exit Function
+
+    IsStandardEjectorPlateCandidate = True
+End Function
 Private Sub BuildStdFromGeometry()
     If PartCount < 1 Then Exit Sub
 
@@ -5472,18 +6174,38 @@ Private Sub BuildStdFromGeometry()
     Dim fullIdx(1 To 60) As Long, nFull As Long
     Dim railIdx(1 To 60) As Long, nRail As Long
     Dim ejIdx(1 To 60) As Long, nEj As Long
-    nFull = 0: nRail = 0: nEj = 0
+    Dim lpIdx(1 To 120) As Long, nLp As Long
+    nFull = 0: nRail = 0: nEj = 0: nLp = 0
     Dim t As Double, w As Double, l As Double
+    Dim rr As String
     For i = 1 To PartCount
         t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
         If t >= STD_MIN_PLATE_THICKNESS Then
             fp = w * l
             If fp >= (1 - STD_FOOTPRINT_TOL) * baseFoot Then
-                nFull = nFull + 1: fullIdx(nFull) = i
+                If nFull < UBound(fullIdx) Then
+                    nFull = nFull + 1
+                    fullIdx(nFull) = i
+                End If
             ElseIf IsStandardRailCandidate(i, baseW, baseL) Then
-                nRail = nRail + 1: railIdx(nRail) = i
-            ElseIf fp >= STD_EJECTOR_MIN_FOOT_FRAC * baseFoot Then
-                nEj = nEj + 1: ejIdx(nEj) = i
+                If nRail < UBound(railIdx) Then
+                    nRail = nRail + 1
+                    railIdx(nRail) = i
+                End If
+            ElseIf IsStandardEjectorPlateCandidate(i, baseW, baseL, baseFoot) Then
+                If nEj < UBound(ejIdx) Then
+                    nEj = nEj + 1
+                    ejIdx(nEj) = i
+                End If
+            End If
+        End If
+        If IsRoundBarLike(i) Then
+            rr = NormalizeKey(StandardRoundComponentRole(i))
+            If rr = "LEADERPIN" Or rr = "LEADERPINBUSHING" Or rr = "GUIDEDEJECTORBUSHING" Then
+                If nLp < UBound(lpIdx) Then
+                    nLp = nLp + 1
+                    lpIdx(nLp) = i
+                End If
             End If
         End If
     Next i
@@ -5504,17 +6226,40 @@ Private Sub BuildStdFromGeometry()
 
     StdSortByAxisDesc fullIdx, nFull, ax
 
-    ' Direction: the end nearer the ejector plates is the bottom. If there are
-    ' no ejector plates in the model, use end-plate hints and standard clamp
-    ' thickness behavior so unnamed standard stacks do not flip top/bottom.
+    ' Direction: the end nearer the ejector plates/rails is the B/ejector side
+    ' and therefore the bottom. If those anchors are not in the model, use
+    ' end-plate hints and standard clamp thickness behavior so unnamed standard
+    ' stacks do not flip top/bottom.
     Dim topIsFirst As Boolean
     topIsFirst = True
-    If nEj > 0 Then
-        Dim ejMean As Double
-        ejMean = 0
-        For i = 1 To nEj: ejMean = ejMean + PartAxisCenter(ejIdx(i), ax): Next i
-        ejMean = ejMean / nEj
-        If Abs(PartAxisCenter(fullIdx(1), ax) - ejMean) < Abs(PartAxisCenter(fullIdx(nFull), ax) - ejMean) Then topIsFirst = False
+    Dim leaderOriented As Boolean
+    leaderOriented = False
+    If nEj > 0 Or nRail > 0 Then
+        Dim anchorMean As Double
+        Dim anchorCount As Long
+        anchorMean = 0
+        anchorCount = 0
+        If nEj > 0 Then
+            For i = 1 To nEj
+                anchorMean = anchorMean + PartAxisCenter(ejIdx(i), ax)
+                anchorCount = anchorCount + 1
+            Next i
+        Else
+            If nRail > 0 Then
+                For i = 1 To nRail
+                    anchorMean = anchorMean + PartAxisCenter(railIdx(i), ax)
+                    anchorCount = anchorCount + 1
+                Next i
+            End If
+        End If
+        If anchorCount > 0 Then
+            anchorMean = anchorMean / anchorCount
+            If Abs(PartAxisCenter(fullIdx(1), ax) - anchorMean) < Abs(PartAxisCenter(fullIdx(nFull), ax) - anchorMean) Then topIsFirst = False
+            LogLine "Standard orientation rule: rails/ejector stack set topIsFirst=" & CStr(topIsFirst)
+        End If
+    ElseIf StdLeaderPinOrientationTopIsFirst(fullIdx, nFull, lpIdx, nLp, ax, topIsFirst) Then
+        leaderOriented = True
+        LogLine "Standard orientation rule: leader pins/bushings set topIsFirst=" & CStr(topIsFirst)
     Else
         Dim firstNm As String
         Dim lastNm As String
@@ -5532,33 +6277,81 @@ Private Sub BuildStdFromGeometry()
         End If
     End If
     If Not topIsFirst Then StdReverse fullIdx, nFull
+    gStdStackAxis = ax
+    gStdTopIsFirst = topIsFirst
+    gStdDmeStackFamily = StdDmeStackFamilyName(nFull, StdTopClampAppearsPresent(fullIdx, nFull), (nRail > 0), (nEj > 0), nLp)
+    LogLine "Standard DME stack family: " & gStdDmeStackFamily
 
     ' Name full plates top -> bottom. Geometry/stack order is primary; CAD names
     ' are accepted only as a label hint for the already-positioned plate.
+    Dim roleName As String
     For i = 1 To nFull
-        AddStdPlateFromCad fullIdx(i), StdFullPlateNameFromGeometry(i, nFull, fullIdx(i))
+        roleName = StdFullPlateNameFromGeometry(i, nFull, fullIdx(i), fullIdx, (nRail > 0), (nEj > 0))
+        SetStdCadRole fullIdx(i), roleName
+        Select Case NormalizeKey(roleName)
+            Case "APLATE", "CAVITYPLATE"
+                gStdCavityCadIndex = fullIdx(i)
+            Case "BPLATE", "COREPLATE"
+                gStdCoreCadIndex = fullIdx(i)
+        End Select
+        AddStdPlateFromCad fullIdx(i), roleName
+        LogLine "Standard full plate rule: pos " & i & "/" & nFull & _
+                " idx " & fullIdx(i) & " -> " & roleName & _
+                " | T=" & parts(fullIdx(i)).Thickness & " W=" & parts(fullIdx(i)).Width & " L=" & parts(fullIdx(i)).Length & _
+                " | name=" & parts(fullIdx(i)).componentName
     Next i
+    StdSetPartingLineFromRoles ax
 
     ' Rails (one line, qty = number of rail blocks).
     If nRail > 0 Then
+        For i = 1 To nRail
+            SetStdCadRole railIdx(i), "Rails"
+        Next i
         AddStdPlate "Rails", parts(railIdx(1)).Thickness, parts(railIdx(1)).Width, parts(railIdx(1)).Length, nRail
+        LogLine "Standard rail rule: qty " & nRail & " using idx " & railIdx(1) & _
+                " | T=" & parts(railIdx(1)).Thickness & " W=" & parts(railIdx(1)).Width & " L=" & parts(railIdx(1)).Length
     End If
 
-    ' Ejector plates: top one = Pin Plate (retainer), next = Ejector Plate.
+    ' Ejector stack naming (CMS rule from J8420): the THINNER plate is always
+    ' the "Ejector Plate"; the THICKER/LOWER plate is the "Bottom Ejector
+    ' Plate". Never name the thinner plate "Ejector Retainer Plate".
     If nEj > 0 Then
         StdSortByAxisDesc ejIdx, nEj, ax
         If Not topIsFirst Then StdReverse ejIdx, nEj
         Dim j As Long
-        For j = 1 To nEj
-            If j = 1 Then
-                AddStdPlateFromCad ejIdx(j), "Pin Plate"
-            Else
-                AddStdPlateFromCad ejIdx(j), "Ejector Plate"
+        Dim retainerIdx As Long
+        Dim minEjT As Double
+        retainerIdx = ejIdx(1)
+        minEjT = parts(ejIdx(1)).Thickness
+        For j = 2 To nEj
+            If parts(ejIdx(j)).Thickness < minEjT Then
+                minEjT = parts(ejIdx(j)).Thickness
+                retainerIdx = ejIdx(j)
             End If
+        Next j
+
+        Dim ejRole As String
+        For j = 1 To nEj
+            If ejIdx(j) = retainerIdx Then
+                ejRole = "Ejector Plate"
+            Else
+                ejRole = "Bottom Ejector Plate"
+            End If
+            SetStdCadRole ejIdx(j), ejRole
+            AddStdPlateFromCad ejIdx(j), ejRole
+            LogLine "Standard ejector-stack rule: idx " & ejIdx(j) & " -> " & ejRole & _
+                    " | T=" & parts(ejIdx(j)).Thickness & " | name=" & parts(ejIdx(j)).componentName
         Next j
     End If
 
-    LogLine "Standard base (geometry): full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " (stack axis " & ax & ")"
+    If nLp > 0 Then
+        For i = 1 To nLp
+            SetStdCadRole lpIdx(i), StandardRoundComponentRole(lpIdx(i))
+        Next i
+        LogLine "Standard leader-pin stack rule: round leader/bushing components=" & nLp
+    End If
+
+    LogLine "Standard base (geometry): full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " leaderStack=" & nLp & " (stack axis " & ax & ")"
 End Sub
 
 Private Function StdSteelTypeFor(ByVal grade As String) As String
@@ -5788,6 +6581,12 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     If InStr(s, " UPPER BASE ") > 0 Then StandardPlateNameStd = "Top Clamp Plate": Exit Function
     If InStr(s, " BASE PLATE ") > 0 Or InStr(s, " BASE ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " BALANCE PLATE ") > 0 Or InStr(s, " BALANCE PLATES ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
+    If InStr(s, " SC RETAINER ") > 0 Or InStr(s, " SC RETAINER PLATE ") > 0 Then StandardPlateNameStd = "SC Retainer Plate": Exit Function
+    If InStr(s, " SC BACKUP ") > 0 Or InStr(s, " SC BACKUP PLATE ") > 0 Or InStr(s, " SC BACK UP ") > 0 Then StandardPlateNameStd = "SC Backup Plate": Exit Function
+    If InStr(s, " EJECTOR RETAINER ") > 0 Or InStr(s, " EJ RET ") > 0 Or InStr(s, " KO RET ") > 0 Then StandardPlateNameStd = "Ejector Plate": Exit Function
+    ' CMS naming: the thicker/lower backing plate is the "Bottom Ejector Plate"
+    ' (never "Ejector Retainer Plate"). Same PIN quote row as before.
+    If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJ BACKUP ") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
     If InStr(s, " RETAINER ") > 0 Or InStr(s, " RETAINER PLATE ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " HOLDER MOUNT ") > 0 Or InStr(s, " MOUNT ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " RUNNER STRIPPER ") > 0 Then StandardPlateNameStd = "Runner Stripper Plate": Exit Function
@@ -5795,16 +6594,17 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     If InStr(s, " TCP ") > 0 Or InStr(s, " TOP CLAMP ") > 0 Or InStr(s, " TOP CLP ") > 0 Then StandardPlateNameStd = "Top Clamp Plate": Exit Function
     If InStr(s, " BCP ") > 0 Or InStr(s, " BOTTOM CLAMP ") > 0 Or InStr(s, " BOT CLAMP ") > 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
     If InStr(s, " MANIFOLD ") > 0 Or InStr(s, " MAN PLT ") > 0 Then StandardPlateNameStd = "Manifold Plate": Exit Function
-    If InStr(s, " CAVITY PLT ") > 0 Or InStr(s, " CAVITY PLATE ") > 0 Or InStr(s, " CAVITY RETAINER ") > 0 Or InStr(s, " STATIONARY RETAINER ") > 0 Then StandardPlateNameStd = "Cavity Plate": Exit Function
-    If InStr(s, " CORE PLT ") > 0 Or InStr(s, " CORE PLATE ") > 0 Or InStr(s, " CORE RETAINER ") > 0 Or InStr(s, " MOVABLE RETAINER ") > 0 Or InStr(s, " MOVEABLE RETAINER ") > 0 Then StandardPlateNameStd = "Core Plate": Exit Function
+    If InStr(s, " CAVITY PLT ") > 0 Or InStr(s, " CAVITY PLATE ") > 0 Or InStr(s, " CAVITY RETAINER ") > 0 Or InStr(s, " STATIONARY RETAINER ") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
+    If InStr(s, " CORE PLT ") > 0 Or InStr(s, " CORE PLATE ") > 0 Or InStr(s, " CORE RETAINER ") > 0 Or InStr(s, " MOVABLE RETAINER ") > 0 Or InStr(s, " MOVEABLE RETAINER ") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
     If InStr(s, " DIE BACK UP ") > 0 Or InStr(s, " DIE BACKUP ") > 0 Or InStr(s, " BACK UP PLT ") > 0 Or InStr(s, " BACKUP PLT ") > 0 Then StandardPlateNameStd = "Die Backup Plate": Exit Function
     If InStr(s, " DIE PLATE ") > 0 Or InStr(s, " DIE PLT ") > 0 Then StandardPlateNameStd = "Die Plate": Exit Function
-    If InStr(s, " EJECTOR RETAINER ") > 0 Or InStr(s, " PIN PLATE ") > 0 Or InStr(s, " PIN PLT ") > 0 Or InStr(s, " EJ RET ") > 0 Or InStr(s, " KO RET ") > 0 Then StandardPlateNameStd = "Pin Plate": Exit Function
-    If InStr(s, " EJECTOR PLATE ") > 0 Or InStr(s, " EJECTOR PLT ") > 0 Or InStr(s, " KNOCKOUT ") > 0 Or InStr(s, " KO PLT ") > 0 Or InStr(s, " EJ PLT ") > 0 Then StandardPlateNameStd = "Ejector Plate": Exit Function
+    If InStr(s, " PIN PLATE ") > 0 Or InStr(s, " PIN PLT ") > 0 Then StandardPlateNameStd = "Ejector Plate": Exit Function
+    If InStr(s, " BOTTOM EJECTOR ") > 0 Or InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
+    If InStr(s, " EJECTOR PLATE ") > 0 Or InStr(s, " EJECTOR PLT ") > 0 Or InStr(s, " KNOCKOUT ") > 0 Or InStr(s, " KO PLT ") > 0 Or InStr(s, " EJ PLT ") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
     If InStr(s, " SUPPORT PLATE ") > 0 Or InStr(s, " SUPPORT PLT ") > 0 Or InStr(s, " SUP PLT ") > 0 Or InStr(s, " SUPPORT PLAT ") > 0 Then StandardPlateNameStd = "Support Plate": Exit Function
     If InStr(s, " RAIL ") > 0 Or InStr(s, " RAILS ") > 0 Or InStr(s, " RISER ") > 0 Or InStr(s, " RISERS ") > 0 Or InStr(s, " SPACER ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
-    If InStr(s, " A PLATE ") > 0 Or InStr(s, " A PLT ") > 0 Then StandardPlateNameStd = """A"" Plate": Exit Function
-    If InStr(s, " B PLATE ") > 0 Or InStr(s, " B PLT ") > 0 Then StandardPlateNameStd = """B"" Plate": Exit Function
+    If InStr(s, " A PLATE ") > 0 Or InStr(s, " A PLT ") > 0 Or InStr(s, " A SIDE ") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
+    If InStr(s, " B PLATE ") > 0 Or InStr(s, " B PLT ") > 0 Or InStr(s, " B SIDE ") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
     If InStr(s, " X PLATE ") > 0 Or InStr(s, " X PLT ") > 0 Then StandardPlateNameStd = """X"" Plate": Exit Function
     If InStr(s, " Y PLATE ") > 0 Or InStr(s, " Y PLT ") > 0 Then StandardPlateNameStd = """Y"" Plate": Exit Function
 End Function
@@ -5818,22 +6618,27 @@ Private Function StdSlotForName(ByVal nm As String) As String
     If InStr(s, " STRIPPER ") > 0 Then StdSlotForName = "STRIPPER": Exit Function
     If InStr(s, " TOP CLAMP ") > 0 Then StdSlotForName = "TOPCLAMP": Exit Function
     If InStr(s, " BOTTOM CLAMP ") > 0 Then StdSlotForName = "BOTTOMCLAMP": Exit Function
-    If InStr(s, " CAVITY ") > 0 Then StdSlotForName = "A": Exit Function
-    If InStr(s, " CORE ") > 0 Then StdSlotForName = "B": Exit Function
-    If InStr(s, " DIE BACKUP ") > 0 Or InStr(s, " DIE BACK UP ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
-    If InStr(s, " DIE ") > 0 Then StdSlotForName = "X": Exit Function
-    If InStr(s, " PLATE ") > 0 Then StdSlotForName = "A": Exit Function
-    If InStr(s, " MANIFOLD ") > 0 Then StdSlotForName = "MANIFOLD": Exit Function
-    If InStr(s, " PIN ") > 0 Then StdSlotForName = "PIN": Exit Function
-    If InStr(s, " EJECTOR ") > 0 Then StdSlotForName = "EJECTOR": Exit Function
+    If InStr(s, " A PLATE ") > 0 Or InStr(s, " CAVITY ") > 0 Then StdSlotForName = "A": Exit Function
+    If InStr(s, " B PLATE ") > 0 Or InStr(s, " CORE ") > 0 Then StdSlotForName = "B": Exit Function
+    If InStr(s, " SC RETAINER ") > 0 Then StdSlotForName = "B": Exit Function
+    If InStr(s, " SC BACKUP ") > 0 Or InStr(s, " SC BACK UP ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
+    If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJ BACKUP ") > 0 Then StdSlotForName = "PIN": Exit Function
+    If InStr(s, " EJ RET ") > 0 Then StdSlotForName = "EJECTOR": Exit Function
+    ' CMS rule: "Bottom Ejector Plate" is the thicker/lower plate (same physical
+    ' plate the EJ-BACKUP token names) -> same PIN row it always used. The
+    ' thinner "Ejector Plate" keeps the EJECTOR row below.
+    If InStr(s, " BOTTOM EJECTOR ") > 0 Then StdSlotForName = "PIN": Exit Function
+    If InStr(s, " EJECTOR RETAINER ") > 0 Or InStr(s, " PIN PLATE ") > 0 Or InStr(s, " PIN ") > 0 Or InStr(s, " RETAINER ") > 0 Then StdSlotForName = "PIN": Exit Function
+    If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJECTOR ") > 0 Then StdSlotForName = "EJECTOR": Exit Function
     If InStr(s, " SUPPORT ") > 0 Or InStr(s, " PILLAR ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
     If InStr(s, " RAIL ") > 0 Or InStr(s, " RAILS ") > 0 Or InStr(s, " RISER ") > 0 Or InStr(s, " RISERS ") > 0 Then StdSlotForName = "RAILS": Exit Function
-    If InStr(s, " RETAINER ") > 0 Then StdSlotForName = "PIN": Exit Function
+    If InStr(s, " DIE BACKUP ") > 0 Or InStr(s, " DIE BACK UP ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
+    If InStr(s, " DIE ") > 0 Then StdSlotForName = "X": Exit Function
+    If InStr(s, " MANIFOLD ") > 0 Then StdSlotForName = "MANIFOLD": Exit Function
     If InStr(s, " BALANCE ") > 0 Then StdSlotForName = "A": Exit Function
-    If InStr(s, " A PLATE ") > 0 Then StdSlotForName = "A": Exit Function
-    If InStr(s, " B PLATE ") > 0 Then StdSlotForName = "B": Exit Function
     If InStr(s, " X PLATE ") > 0 Then StdSlotForName = "X": Exit Function
     If InStr(s, " Y PLATE ") > 0 Then StdSlotForName = "Y": Exit Function
+    If InStr(s, " PLATE ") > 0 Then StdSlotForName = "A": Exit Function
 End Function
 
 ' Decide the steel block for a plate from its material hint (and slot if unknown).
@@ -5996,7 +6801,43 @@ Private Sub StdResetArrays()
     StdCount = 0
     ReDim stdName(1 To 80): ReDim StdT(1 To 80): ReDim StdW(1 To 80)
     ReDim StdL(1 To 80): ReDim StdQty(1 To 80): ReDim StdGrade(1 To 80): ReDim StdQuoteRow(1 To 80)
+    If PartCount > 0 Then
+        ReDim gStdRoleByPart(1 To PartCount)
+    Else
+        Erase gStdRoleByPart
+    End If
+    gStdStackAxis = 0
+    gStdTopIsFirst = True
+    gStdDmeStackFamily = ""
+    gStdPartingLineAxis = 0
+    gStdPartingLinePos = 0#
+    gStdCavityCadIndex = 0
+    gStdCoreCadIndex = 0
 End Sub
+
+Private Sub SetStdCadRole(ByVal idx As Long, ByVal roleName As String)
+    On Error Resume Next
+    If idx < 1 Or idx > PartCount Then Exit Sub
+    If Not StdRoleArrayReady() Then ReDim gStdRoleByPart(1 To PartCount)
+    gStdRoleByPart(idx) = roleName
+End Sub
+
+Private Function StdCadRole(ByVal idx As Long) As String
+    On Error Resume Next
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If Not StdRoleArrayReady() Then Exit Function
+    StdCadRole = gStdRoleByPart(idx)
+End Function
+
+Private Function StdRoleArrayReady() As Boolean
+    On Error GoTo nope
+    Dim hi As Long
+    hi = UBound(gStdRoleByPart)
+    StdRoleArrayReady = (hi >= 1)
+    Exit Function
+nope:
+    StdRoleArrayReady = False
+End Function
 
 Private Function FindStdByName(ByVal nm As String) As Long
     Dim i As Long, k As String
@@ -6051,9 +6892,276 @@ Private Function BuildStdFromCadNames() As Boolean
     BuildStdFromCadNames = (added >= 3)
 End Function
 
-' Standard-base plate source priority: geometry/layout first, then BOM/names if
-' geometry is unavailable. Names help label plates, but they do not define the stack.
+' ============================================================
+' AI BRIDGE implementation
+' ============================================================
+
+' Job token used for bridge file names and web-app job registration.
+Private Function AiBridgeJobToken() As String
+    Dim t As String
+    t = Trim(CurrentJobNumber)
+    If t = "" Then t = Trim(AssignedQuoteNumber)
+    If t = "" And CurrentJobFolder <> "" Then
+        Dim fso As Object
+        Set fso = CreateObject("Scripting.FileSystemObject")
+        t = fso.GetFileName(CurrentJobFolder)
+    End If
+    If t = "" Then t = "ACTIVE"
+    AiBridgeJobToken = t
+End Function
+
+Private Sub AiBridgeReset()
+    gAiRoleCount = 0
+    gAiBridgeUsed = False
+    gAiSequencedLatchLock = False
+    If PartCount >= 1 Then
+        ReDim gAiRoleByPart(1 To PartCount)
+        ReDim gAiConfByPart(1 To PartCount)
+    End If
+End Sub
+
+Private Function AiJsonEscape(ByVal s As String) As String
+    s = Replace(s, "\", "\\")
+    s = Replace(s, Chr(34), "\" & Chr(34))
+    AiJsonEscape = s
+End Function
+
+' POST the CAD CSV path to the LOCAL AI service. Returns the bridge CSV text
+' (Index,Component,Role,ResolvedName,Confidence,Quote,Price,SecondaryPartingLine)
+' or "" when the service is unreachable.
+Private Function AiBridgeHttpClassify(ByVal csvPath As String) As String
+    AiBridgeHttpClassify = ""
+    On Error GoTo done
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts 3000, 3000, AI_BRIDGE_TIMEOUT_MS, AI_BRIDGE_TIMEOUT_MS
+    http.Open "POST", AI_BRIDGE_URL & "/api/vba/classify", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
+              """,""csv_path"":""" & AiJsonEscape(csvPath) & _
+              """,""base_type"":""standard""}"
+    If http.Status = 200 Then AiBridgeHttpClassify = http.responseText
+done:
+End Function
+
+' Fallback: read a bridge CSV the web app exported earlier for this job.
+Private Function AiBridgeReadFallbackFile() As String
+    AiBridgeReadFallbackFile = ""
+    On Error GoTo done
+    Dim fso As Object, p As String, ts As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p = AI_BRIDGE_FILE_DIR & "\" & AiBridgeJobToken() & "_part_names.csv"
+    If Not fso.FileExists(p) Then Exit Function
+    Set ts = fso.OpenTextFile(p, 1)
+    AiBridgeReadFallbackFile = ts.ReadAll
+    ts.Close
+    LogLine "AI bridge: using fallback file " & p
+done:
+End Function
+
+' Parse the bridge CSV into gAiRoleByPart/gAiConfByPart (by CAD part Index).
+Private Sub AiBridgeParseCsv(ByVal csvText As String)
+    Dim lines() As String, i As Long, f() As String
+    Dim idx As Long, roleCol As Long, confCol As Long
+    csvText = Replace(csvText, vbCrLf, vbLf)
+    csvText = Replace(csvText, vbCr, vbLf)
+    lines = Split(csvText, vbLf)
+    If UBound(lines) < 1 Then Exit Sub
+
+    ' Locate the Role / Confidence columns from the header so the format can
+    ' grow new columns without breaking this parser.
+    Dim hdr() As String, c As Long
+    hdr = Split(lines(0), ",")
+    roleCol = -1: confCol = -1
+    For c = 0 To UBound(hdr)
+        Select Case UCase(Trim(hdr(c)))
+            Case "ROLE": roleCol = c
+            Case "CONFIDENCE": confCol = c
+        End Select
+    Next c
+    If roleCol < 0 Then Exit Sub
+
+    For i = 1 To UBound(lines)
+        If Trim(lines(i)) <> "" Then
+            f = Split(lines(i), ",")
+            If UBound(f) >= roleCol Then
+                idx = Val(f(0))
+                If idx >= 1 And idx <= PartCount Then
+                    gAiRoleByPart(idx) = LCase(Trim(f(roleCol)))
+                    If confCol >= 0 And UBound(f) >= confCol Then
+                        gAiConfByPart(idx) = UCase(Trim(f(confCol)))
+                    Else
+                        gAiConfByPart(idx) = "MEDIUM"
+                    End If
+                    gAiRoleCount = gAiRoleCount + 1
+                    If gAiRoleByPart(idx) = "latch_lock" Then gAiSequencedLatchLock = True
+                End If
+            End If
+        End If
+    Next i
+End Sub
+
+' Map an AI role key to the macro's standard plate name. "" = not a quoted plate.
+Private Function AiPlateNameForRole(ByVal roleKey As String) As String
+    Select Case LCase(Trim(roleKey))
+        Case "top_clamp_plate": AiPlateNameForRole = "Top Clamp Plate"
+        Case "a_plate": AiPlateNameForRole = "A Plate"
+        Case "b_plate": AiPlateNameForRole = "B Plate"
+        Case "stripper_plate": AiPlateNameForRole = "Stripper Plate"
+        Case "sc_retainer_plate": AiPlateNameForRole = "SC Retainer Plate"
+        Case "sc_backup_plate": AiPlateNameForRole = "SC Backup Plate"
+        Case "support_plate": AiPlateNameForRole = "Support Plate"
+        Case "bottom_clamp_plate": AiPlateNameForRole = "Bottom Clamp Plate"
+        Case "rail", "rail_1", "rail_2": AiPlateNameForRole = "Rails"
+        Case "pin_plate": AiPlateNameForRole = "Pin Plate"
+        Case "ejector_plate": AiPlateNameForRole = "Ejector Plate"
+        ' CMS naming: the thicker/lower ejector-stack plate is the Bottom
+        ' Ejector Plate (never "Ejector Retainer Plate").
+        Case "bottom_ejector_plate", "ejector_retainer_plate", "ejector_backup_plate"
+            AiPlateNameForRole = "Bottom Ejector Plate"
+        Case Else: AiPlateNameForRole = ""
+    End Select
+End Function
+
+' Round-hardware role names for SetStdCadRole (naming analysis / logs only).
+Private Function AiHardwareNameForRole(ByVal roleKey As String) As String
+    Select Case LCase(Trim(roleKey))
+        Case "leader_pin": AiHardwareNameForRole = "Leader Pin"
+        Case "leader_pin_bushing": AiHardwareNameForRole = "Leader Pin Bushing"
+        Case "guided_ejector_bushing": AiHardwareNameForRole = "Guided Ejector Bushing"
+        Case "return_pin": AiHardwareNameForRole = "Return Pin"
+        Case "ejector_pin": AiHardwareNameForRole = "Ejector Pin"
+        Case "support_pillar": AiHardwareNameForRole = "Support Pillar"
+        Case "latch_lock": AiHardwareNameForRole = "Latch Lock / Safety Strap"
+        Case Else: AiHardwareNameForRole = ""
+    End Select
+End Function
+
+' Main entry: classify this job through the local AI service.
+' HARD GUARD: BMS / pot-block jobs never touch the AI - their BOM-driven
+' flow already works and must not be disturbed.
+Public Sub RunAiBridgeClassification(ByVal csvPath As String, ByVal isStandardBase As Boolean)
+    On Error GoTo eh
+    AiBridgeReset
+    If Not AI_BRIDGE_ENABLED Then Exit Sub
+    If Not isStandardBase Then
+        LogLine "AI bridge: SKIPPED - BMS/pot-block base keeps the BOM-driven flow (AI is for standard bases only)."
+        ' Still register the job with the local app (marked BMS) so it shows in
+        ' the dashboard, but no classification is applied.
+        AiBridgeNotifyBms csvPath
+        Exit Sub
+    End If
+
+    Dim csvText As String
+    csvText = AiBridgeHttpClassify(csvPath)
+    If csvText = "" Then csvText = AiBridgeReadFallbackFile()
+    If csvText = "" Then
+        LogLine "AI bridge: local AI service not reachable at " & AI_BRIDGE_URL & " and no fallback file - macro geometry rules will run alone."
+        Exit Sub
+    End If
+
+    AiBridgeParseCsv csvText
+    LogLine "AI bridge: " & gAiRoleCount & " part roles received." & _
+            IIf(gAiSequencedLatchLock, " Plate-sequenced LATCH-LOCK base detected: latch locks mark secondary parting lines and must not flip A/B.", "")
+    Exit Sub
+eh:
+    LogLine "AI bridge error (ignored, geometry rules continue): " & Err.Description
+End Sub
+
+' Register a BMS/pot-block job with the local app dashboard (no classification).
+Private Sub AiBridgeNotifyBms(ByVal csvPath As String)
+    On Error Resume Next
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts 2000, 2000, 5000, 5000
+    http.Open "POST", AI_BRIDGE_URL & "/api/vba/classify", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
+              """,""csv_path"":""" & AiJsonEscape(csvPath) & _
+              """,""base_type"":""bms""}"
+End Sub
+
+' Tell the local webapp the job finished so it can import quote/steel/CSV outputs.
+Private Sub AiBridgeNotifyJobComplete(ByVal baseType As String)
+    On Error Resume Next
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.setTimeouts 2000, 2000, 15000, 15000
+    http.Open "POST", AI_BRIDGE_URL & "/api/vba/job-complete", False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
+              """,""folder_path"":""" & AiJsonEscape(CurrentJobFolder) & _
+              """,""base_type"":""" & AiJsonEscape(baseType) & _
+              """,""status"":""completed""}"
+    If http.Status = 200 Then
+        LogLine "AI bridge: job-complete synced to webapp."
+    End If
+End Sub
+
+' Build the standard plate list from AI roles. Returns True when the AI gave
+' enough plate roles to define the stack; otherwise the caller falls back to
+' the macro's own geometry pass.
+Private Function BuildStdFromAiBridge() As Boolean
+    BuildStdFromAiBridge = False
+    If gAiRoleCount < 1 Then Exit Function
+
+    Dim i As Long, nm As String, hw As String, plateCount As Long
+    Dim railT As Double, railW As Double, railL As Double, nRail As Long
+
+    ' First pass: count distinct AI plate roles so we only take over when the
+    ' AI actually resolved a stack (>= AI_BRIDGE_MIN_PLATES full plates).
+    For i = 1 To PartCount
+        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        If nm <> "" And nm <> "Rails" Then plateCount = plateCount + 1
+    Next i
+    If plateCount < AI_BRIDGE_MIN_PLATES Then
+        LogLine "AI bridge: only " & plateCount & " plate roles (< " & AI_BRIDGE_MIN_PLATES & ") - macro geometry rules stay in charge."
+        Exit Function
+    End If
+
+    nRail = 0
+    For i = 1 To PartCount
+        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        If nm = "Rails" Then
+            SetStdCadRole i, "Rails"
+            If nRail = 0 Then
+                railT = parts(i).Thickness: railW = parts(i).Width: railL = parts(i).Length
+            End If
+            nRail = nRail + 1
+        ElseIf nm <> "" Then
+            SetStdCadRole i, nm
+            Select Case NormalizeKey(nm)
+                Case "APLATE": gStdCavityCadIndex = i
+                Case "BPLATE": gStdCoreCadIndex = i
+            End Select
+            AddStdPlateFromCad i, nm
+            LogLine "AI bridge plate: idx " & i & " -> " & nm & " [" & gAiConfByPart(i) & "]" & _
+                    " | T=" & parts(i).Thickness & " W=" & parts(i).Width & " L=" & parts(i).Length & _
+                    " | name=" & parts(i).cleanName
+        Else
+            hw = AiHardwareNameForRole(gAiRoleByPart(i))
+            If hw <> "" Then SetStdCadRole i, hw
+        End If
+    Next i
+    If nRail > 0 Then
+        AddStdPlate "Rails", railT, railW, railL, nRail
+        LogLine "AI bridge rails: qty " & nRail
+    End If
+
+    gAiBridgeUsed = True
+    BuildStdFromAiBridge = True
+End Function
+
+' Standard-base plate source priority: AI bridge roles first (shop-token +
+' latch-lock aware), then geometry/layout, then BOM/names if geometry is
+' unavailable. Names help label plates, but they do not define the stack.
 Private Sub ClassifyStandardBasePlates()
+    StdResetArrays
+    If BuildStdFromAiBridge() Then
+        LogLine "Standard base plates: AI bridge classification in charge."
+        GoTo finishStd
+    End If
+
     StdResetArrays
     BuildStdFromGeometry
     If StdCount >= 3 Then GoTo finishStd
@@ -6280,20 +7388,41 @@ Private Function TryClassifyStandardCadPurchased(ByVal idx As Long, _
     u = UCase(raw)
     partNo = CadPurchasePartToken(raw)
 
-    If partNo = "" Then Exit Function
-
-    If Left(UCase(partNo), 2) = "LP" Then
-        desc = "Leader Pin"
-        vendor = "PCS"
-        TryClassifyStandardCadPurchased = True
-        Exit Function
-    End If
-
-    If Left(UCase(partNo), 3) = "GEB" Then
-        desc = "Guided Ejector Bushing"
-        vendor = "PCS"
-        TryClassifyStandardCadPurchased = True
-        Exit Function
+    If IsRoundBarLike(idx) Then
+        Dim rr As String
+        rr = StandardRoundComponentRole(idx)
+        Select Case NormalizeKey(rr)
+            Case "LEADERPIN"
+                desc = "Leader Pin"
+                vendor = "PCS"
+                TryClassifyStandardCadPurchased = True
+                Exit Function
+            Case "LEADERPINBUSHING"
+                desc = "Leader Pin Bushing"
+                vendor = "PCS"
+                TryClassifyStandardCadPurchased = True
+                Exit Function
+            Case "GUIDEDEJECTORBUSHING"
+                desc = "Guided Ejector Bushing"
+                vendor = "PCS"
+                TryClassifyStandardCadPurchased = True
+                Exit Function
+            Case "RETURNPIN", "EJECTORRETURNPIN"
+                desc = "Return Pin"
+                vendor = "PCS"
+                TryClassifyStandardCadPurchased = True
+                Exit Function
+            Case "EJECTORPIN"
+                desc = "Ejector Pin"
+                vendor = "PCS"
+                TryClassifyStandardCadPurchased = True
+                Exit Function
+            Case "SUPPORTPILLAR"
+                desc = "Support Pillar"
+                vendor = "DME"
+                TryClassifyStandardCadPurchased = True
+                Exit Function
+        End Select
     End If
 
     If Left(UCase(partNo), 2) = "LR" Then
@@ -6360,7 +7489,14 @@ On Error GoTo ErrHandler
 
     For i = 1 To PartCount
         If TryClassifyStandardCadPurchased(i, d, v, pn) Then
-            k = NormalizeKey(d & "|" & pn)
+            ' Group by description + part number + SIZE so different-size parts
+            ' with the same generic name (e.g. 1" ejector leader pins vs 1-1/2"
+            ' main leader pins, both with no part number) stay separate quote
+            ' lines instead of collapsing into one mispriced line.
+            k = NormalizeKey(d & "|" & pn & "|" & _
+                             Format(parts(i).Thickness, "0.000") & "x" & _
+                             Format(parts(i).Width, "0.000") & "x" & _
+                             Format(parts(i).Length, "0.000"))
             hit = 0
             For j = 1 To n
                 If key(j) = k Then hit = j: Exit For
@@ -6939,7 +8075,7 @@ On Error GoTo eh
     Dim f As Integer
     f = FreeFile
     Open destPath For Output As #f
-    Print #f, "Index,CurrentName,GeometryRole,SuggestedPCSName,Confidence,Reason,Thickness,Width,Length,CenterX,CenterY,CenterZ"
+    Print #f, "Index,CurrentName,GeometryRole,SuggestedPCSName,Confidence,Reason,DMEStackFamily,PartingSide,PartingLineAxis,PartingLinePos,LeaderPinStackKey,StackAxisPos,Thickness,Width,Length,CenterX,CenterY,CenterZ"
 
     Dim i As Long
     Dim role As String
@@ -6952,6 +8088,9 @@ On Error GoTo eh
         suggested = SuggestedPcsNameForCadIndex(i, role, confidence, reason)
         Print #f, i & "," & CsvText(parts(i).componentName) & "," & CsvText(role) & "," & _
                   CsvText(suggested) & "," & CsvText(confidence) & "," & CsvText(reason) & "," & _
+                  CsvText(gStdDmeStackFamily) & "," & CsvText(StdPartingSideForCadIndex(i)) & "," & _
+                  CStr(gStdPartingLineAxis) & "," & FormatNumberForCsv(gStdPartingLinePos) & "," & _
+                  CsvText(LeaderPinStackKeyForCadIndex(i)) & "," & FormatNumberForCsv(StandardStackAxisPos(i)) & "," & _
                   FormatNumberForCsv(parts(i).Thickness) & "," & FormatNumberForCsv(parts(i).Width) & "," & _
                   FormatNumberForCsv(parts(i).Length) & "," & FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
                   FormatNumberForCsv(parts(i).AsmCenterY) & "," & FormatNumberForCsv(parts(i).AsmCenterZ)
@@ -6966,8 +8105,45 @@ eh:
     Close #f
 End Sub
 
+Private Function StandardStackAxisPos(ByVal idx As Long) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If gStdStackAxis < 1 Or gStdStackAxis > 3 Then
+        StandardStackAxisPos = parts(idx).AsmCenterZ
+    Else
+        StandardStackAxisPos = PartAxisCenter(idx, gStdStackAxis)
+    End If
+End Function
+
+Private Function LeaderPinStackKeyForCadIndex(ByVal idx As Long) As String
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If IsRoundBarLike(idx) = False Then Exit Function
+
+    Dim role As String
+    role = NormalizeKey(StandardRoundComponentRole(idx))
+    If role <> "LEADERPIN" And role <> "LEADERPINBUSHING" And role <> "GUIDEDEJECTORBUSHING" Then Exit Function
+
+    Dim a1 As Double
+    Dim a2 As Double
+    Select Case gStdStackAxis
+        Case 1
+            a1 = parts(idx).AsmCenterY: a2 = parts(idx).AsmCenterZ
+        Case 2
+            a1 = parts(idx).AsmCenterX: a2 = parts(idx).AsmCenterZ
+        Case Else
+            a1 = parts(idx).AsmCenterX: a2 = parts(idx).AsmCenterY
+    End Select
+
+    LeaderPinStackKeyForCadIndex = "LPSTACK_" & Format$(Round(a1, 2), "0.00") & "_" & Format$(Round(a2, 2), "0.00")
+End Function
+
 Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase As Boolean) As String
     If idx < 1 Or idx > PartCount Then Exit Function
+
+    If isStandardBase Then
+        Dim stdRole As String
+        stdRole = StdCadRole(idx)
+        If stdRole <> "" Then GeometryRoleForCadIndex = stdRole: Exit Function
+    End If
 
     If idx = gIdxTCP Then GeometryRoleForCadIndex = "TCP": Exit Function
     If idx = gIdxBCP Then GeometryRoleForCadIndex = "BCP": Exit Function
@@ -6977,17 +8153,7 @@ Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase
     If idx = gIdxODP Then GeometryRoleForCadIndex = "OD POT": Exit Function
 
     If IsRoundBarLike(idx) Then
-        Dim dia As Double
-        dia = RoundBarDiameter(idx)
-        If parts(idx).Length / IIf(dia <= 0#, 1#, dia) >= 3.5 Then
-            If dia >= 1.5 Then
-                GeometryRoleForCadIndex = "PILLAR / LEADER PIN"
-            Else
-                GeometryRoleForCadIndex = "EJECTOR LEADER PIN / SMALL LEADER PIN"
-            End If
-        Else
-            GeometryRoleForCadIndex = "ROUND BUSHING / SLEEVE"
-        End If
+        GeometryRoleForCadIndex = StandardRoundComponentRole(idx)
         Exit Function
     End If
 
@@ -7003,6 +8169,88 @@ Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase
     GeometryRoleForCadIndex = "HARDWARE / OTHER"
 End Function
 
+Private Function StandardRoundComponentRole(ByVal idx As Long) As String
+    StandardRoundComponentRole = ""
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    Dim u As String
+    Dim pn As String
+    Dim dia As Double
+    Dim axisLen As Double
+    Dim ratio As Double
+
+    u = UCase(parts(idx).componentName)
+    pn = UCase(CadPurchasePartToken(parts(idx).componentName))
+    dia = RoundBarDiameter(idx)
+    axisLen = RoundBarAxisLength(idx)
+    If dia > 0# Then ratio = axisLen / dia
+
+    ' Geometry first. CAD component names in customer files are often copied,
+    ' swapped, or stale. The stack logic needs the physical shape, not the label.
+    If dia > 0# Then
+        If dia > 4# Then Exit Function
+
+        If dia >= 2.5 And ratio >= 2# Then
+            StandardRoundComponentRole = "Support Pillar"
+            Exit Function
+        End If
+
+        If ratio >= 4# Then
+            If dia <= 1.15 Then
+                StandardRoundComponentRole = "Ejector Return Pin"
+            Else
+                StandardRoundComponentRole = "Leader Pin"
+            End If
+            Exit Function
+        End If
+
+        If ratio <= 2# And dia >= 1.25 And dia <= 2.75 And parts(idx).BBoxVolume <= 150# Then
+            StandardRoundComponentRole = "Leader Pin Bushing"
+            Exit Function
+        End If
+    End If
+
+    ' Name fallback only for ambiguous round items that geometry did not settle.
+    If InStr(u, "SUPPORT PILLAR") > 0 Or InStr(u, "PILLAR") > 0 Or InStr(u, "SUPPORT POST") > 0 Then
+        StandardRoundComponentRole = "Support Pillar"
+        Exit Function
+    End If
+
+    If InStr(u, "BUSH") > 0 Or InStr(u, "SLEEVE") > 0 Or Left(pn, 1) = "B" Or Left(pn, 3) = "GEB" Then
+        If InStr(u, "EJECT") > 0 Or Left(pn, 3) = "GEB" Then
+            StandardRoundComponentRole = "Guided Ejector Bushing"
+        Else
+            StandardRoundComponentRole = "Leader Pin Bushing"
+        End If
+        Exit Function
+    End If
+
+    If InStr(u, "RETURN") > 0 Then
+        StandardRoundComponentRole = "Return Pin"
+        Exit Function
+    End If
+
+    If InStr(u, "LEADER") > 0 Or InStr(u, "GUIDE PIN") > 0 Or Left(pn, 2) = "LP" Or Left(pn, 1) = "P" Then
+        StandardRoundComponentRole = "Leader Pin"
+        Exit Function
+    End If
+
+    If InStr(u, "EJECT") > 0 And InStr(u, "PIN") > 0 Then
+        StandardRoundComponentRole = "Ejector Pin"
+        Exit Function
+    End If
+
+    If ratio >= 3.5 Then
+        If dia >= 0.875 Then
+            StandardRoundComponentRole = "Leader Pin"
+        Else
+            StandardRoundComponentRole = "Ejector Return Pin"
+        End If
+    Else
+        StandardRoundComponentRole = "Leader Pin Bushing"
+    End If
+End Function
+
 Private Function SuggestedPcsNameForCadIndex(ByVal idx As Long, ByVal role As String, _
                                             ByRef confidence As String, ByRef reason As String) As String
     confidence = "LOW"
@@ -7010,6 +8258,8 @@ Private Function SuggestedPcsNameForCadIndex(ByVal idx As Long, ByVal role As St
     SuggestedPcsNameForCadIndex = ""
 
     If idx < 1 Or idx > PartCount Then Exit Function
+    Dim dia As Double
+    Dim axisLen As Double
 
     ' Pot/holder assemblies can have generic CAD names and round-ish geometry, so
     ' trust the geometry/position role before applying generic PCS round-part rules.
@@ -7019,14 +8269,62 @@ Private Function SuggestedPcsNameForCadIndex(ByVal idx As Long, ByVal role As St
             confidence = "HIGH"
             reason = "Matched by pot-block geometry and assembly position, not by CAD file name."
             Exit Function
-        Case "STANDARDPLATE/RAIL", "STANDARDPLATERAIL"
-            SuggestedPcsNameForCadIndex = CleanFileName(IIf(JobBaseName <> "", JobBaseName, CurrentJobNumber) & "_PLATE-LIKE")
-            confidence = "LOW"
-            reason = "Plate-like geometry; exact standard-plate role depends on stack order and BOM."
+        Case "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", "APLATE", "BPLATE", "CAVITYPLATE", "COREPLATE", "SUPPORTPLATE", _
+             "PINPLATE", "EJECTORPLATE", "EJECTORRETAINERPLATE", "BOTTOMEJECTORPLATE", _
+             "SCRETAINERPLATE", "SCBACKUPPLATE", "STRIPPERPLATE", "MANIFOLDPLATE", "DIEPLATE", "DIEBACKUPPLATE"
+            SuggestedPcsNameForCadIndex = CleanFileName(IIf(JobBaseName <> "", JobBaseName, CurrentJobNumber) & "_" & Replace(role, " ", "-"))
+            confidence = "HIGH"
+            reason = "Standard-base stack/size rule assigned this CAD component without needing a BOM."
+            Exit Function
+        Case "RAILS"
+            SuggestedPcsNameForCadIndex = CleanFileName(IIf(JobBaseName <> "", JobBaseName, CurrentJobNumber) & "_Rails")
+            confidence = "HIGH"
+            reason = "Standard-base rail geometry: long narrow support blocks beside the ejector stack."
+            Exit Function
+        Case "LEADERPIN"
+            dia = RoundBarDiameter(idx)
+            axisLen = RoundBarAxisLength(idx)
+            SuggestedPcsNameForCadIndex = "LEADER_PIN_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_PCS"
+            confidence = "MEDIUM"
+            reason = "Round long pin geometry matched leader-pin stack logic."
+            Exit Function
+        Case "LEADERPINBUSHING"
+            dia = RoundBarDiameter(idx)
+            axisLen = RoundBarAxisLength(idx)
+            SuggestedPcsNameForCadIndex = "LP_BUSHING_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_PCS"
+            confidence = "MEDIUM"
+            reason = "Round sleeve/bushing geometry in the leader-pin stack."
+            Exit Function
+        Case "GUIDEDEJECTORBUSHING"
+            dia = RoundBarDiameter(idx)
+            axisLen = RoundBarAxisLength(idx)
+            SuggestedPcsNameForCadIndex = "GUIDED_EJ_BUSHING_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_PCS"
+            confidence = "MEDIUM"
+            reason = "Round short bushing geometry near ejector-side stack."
+            Exit Function
+        Case "RETURNPIN", "EJECTORRETURNPIN"
+            dia = RoundBarDiameter(idx)
+            axisLen = RoundBarAxisLength(idx)
+            SuggestedPcsNameForCadIndex = "RETURN_PIN_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_PCS"
+            confidence = "MEDIUM"
+            reason = "Small long round pin in the ejector-side stack."
+            Exit Function
+        Case "EJECTORPIN"
+            dia = RoundBarDiameter(idx)
+            axisLen = RoundBarAxisLength(idx)
+            SuggestedPcsNameForCadIndex = "EJECTOR_PIN_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_PCS"
+            confidence = "MEDIUM"
+            reason = "Small long round-pin geometry."
+            Exit Function
+        Case "SUPPORTPILLAR"
+            dia = RoundBarDiameter(idx)
+            axisLen = RoundBarAxisLength(idx)
+            SuggestedPcsNameForCadIndex = "SUPPORT_PILLAR_D-" & PcsDimToken(dia) & "-X-" & PcsDimToken(axisLen) & "_DME"
+            confidence = "HIGH"
+            reason = "Large round post geometry; kept separate from leader-pin logic."
             Exit Function
     End Select
 
-    Dim dia As Double
     If IsRoundBarLike(idx) Then
         dia = RoundBarDiameter(idx)
         If parts(idx).Length / IIf(dia <= 0#, 1#, dia) >= 3.5 Then
@@ -7058,14 +8356,55 @@ Private Function IsRoundBarLike(ByVal idx As Long) As Boolean
     If idx < 1 Or idx > PartCount Then Exit Function
     If parts(idx).Width <= 0# Or parts(idx).Thickness <= 0# Then Exit Function
     Dim dia As Double
+    Dim axisLen As Double
     dia = RoundBarDiameter(idx)
     If dia <= 0# Then Exit Function
-    IsRoundBarLike = (Abs(parts(idx).Width - parts(idx).Thickness) <= MaxDouble(0.08, dia * 0.08) And parts(idx).Length >= dia * 1.2)
+    If dia > 4# Then Exit Function
+    axisLen = RoundBarAxisLength(idx)
+    IsRoundBarLike = (axisLen >= dia * 0.25)
 End Function
 
 Private Function RoundBarDiameter(ByVal idx As Long) As Double
     If idx < 1 Or idx > PartCount Then Exit Function
-    RoundBarDiameter = (parts(idx).Width + parts(idx).Thickness) / 2#
+    Dim a As Double, b As Double, c As Double
+    Dim dTW As Double, dTL As Double, dWL As Double
+    a = parts(idx).Thickness
+    b = parts(idx).Width
+    c = parts(idx).Length
+    dTW = Abs(a - b)
+    dTL = Abs(a - c)
+    dWL = Abs(b - c)
+
+    If dTW <= dTL And dTW <= dWL Then
+        RoundBarDiameter = (a + b) / 2#
+    ElseIf dTL <= dTW And dTL <= dWL Then
+        RoundBarDiameter = (a + c) / 2#
+    Else
+        RoundBarDiameter = (b + c) / 2#
+    End If
+
+    If RoundBarDiameter <= 0# Then Exit Function
+    If MinDouble3(dTW, dTL, dWL) > MaxDouble(0.08, RoundBarDiameter * 0.1) Then RoundBarDiameter = 0#
+End Function
+
+Private Function RoundBarAxisLength(ByVal idx As Long) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+    Dim a As Double, b As Double, c As Double
+    Dim dTW As Double, dTL As Double, dWL As Double
+    a = parts(idx).Thickness
+    b = parts(idx).Width
+    c = parts(idx).Length
+    dTW = Abs(a - b)
+    dTL = Abs(a - c)
+    dWL = Abs(b - c)
+
+    If dTW <= dTL And dTW <= dWL Then
+        RoundBarAxisLength = c
+    ElseIf dTL <= dTW And dTL <= dWL Then
+        RoundBarAxisLength = b
+    Else
+        RoundBarAxisLength = a
+    End If
 End Function
 
 Private Function PcsDimToken(ByVal v As Double) As String
@@ -7099,6 +8438,12 @@ End Function
 
 Private Function MaxDouble(ByVal a As Double, ByVal b As Double) As Double
     If a >= b Then MaxDouble = a Else MaxDouble = b
+End Function
+
+Private Function MinDouble3(ByVal a As Double, ByVal b As Double, ByVal c As Double) As Double
+    MinDouble3 = a
+    If b < MinDouble3 Then MinDouble3 = b
+    If c < MinDouble3 Then MinDouble3 = c
 End Function
 ' ============================================================
 ' PURCHASED COMPONENTS  (DME / McMaster / Jaco hardware)
@@ -7306,36 +8651,49 @@ Private Function PurchasedKeyword(ByVal comp As String) As String
 End Function
 
 ' Find the best price-list row for a BOM description (part number first, then keyword).
-Private Function MatchPurchasedRow(ByVal desc As String, Optional ByVal partNo As String = "") As Long
+' matchKind reports how the row was found: PARTNO / DESCNO / PHRASE / KEYWORD / "".
+' KEYWORD matches are weak evidence and must NOT silently price grouped
+' assemblies (the J8420 "$25.46 for a latch-lock assembly" bug).
+Private Function MatchPurchasedRow(ByVal desc As String, Optional ByVal partNo As String = "", _
+                                   Optional ByRef matchKind As String) As Long
     Dim du As String, k As Long, tok As String, pu As String
+    matchKind = ""
     du = " " & UCase(desc) & " "
     pu = UCase(Trim(partNo))
     ' 1) exact-ish match on the BOM's part number against the price list part numbers
     If pu <> "" Then
         For k = 1 To PlCount
             If PlPartNo(k) <> "" Then
-                If InStr(pu, UCase(PlPartNo(k))) > 0 Or InStr(UCase(PlPartNo(k)), pu) > 0 Then MatchPurchasedRow = k: Exit Function
+                If InStr(pu, UCase(PlPartNo(k))) > 0 Or InStr(UCase(PlPartNo(k)), pu) > 0 Then matchKind = "PARTNO": MatchPurchasedRow = k: Exit Function
             End If
         Next k
     End If
     ' 2) price-list part number appearing inside the description text
     For k = 1 To PlCount
         If PlPartNo(k) <> "" Then
-            If InStr(du, UCase(PlPartNo(k))) > 0 Then MatchPurchasedRow = k: Exit Function
+            If InStr(du, UCase(PlPartNo(k))) > 0 Then matchKind = "DESCNO": MatchPurchasedRow = k: Exit Function
         End If
     Next k
     ' 3) component phrase (Top Plate / Bottom Plate / exact named hardware).
     For k = 1 To PlCount
         If Trim(PlComp(k)) <> "" Then
-            If InStr(du, " " & UCase(Trim(PlComp(k))) & " ") > 0 Then MatchPurchasedRow = k: Exit Function
+            If InStr(du, " " & UCase(Trim(PlComp(k))) & " ") > 0 Then matchKind = "PHRASE": MatchPurchasedRow = k: Exit Function
         End If
     Next k
-    ' 4) component keyword (LEADER / BUSHING / RETAIN / STRAP / INSULAT / BEARING)
+    ' 4) component keyword (LEADER / BUSHING / RETAIN / STRAP / INSULAT / BEARING).
+    '    Guards: grouped assemblies (ASM/ASSEMBLY names) never keyword-match,
+    '    and the PIN keyword requires LEADER/GUIDE in the description so
+    '    return pins / dowel pins / PLC latch pins can't take the leader-pin price.
+    If InStr(du, " ASM ") > 0 Or InStr(du, "_ASM") > 0 Or InStr(du, "-ASM") > 0 Or InStr(du, "ASSEMBLY") > 0 Then Exit Function
     For k = 1 To PlCount
         tok = PurchasedKeyword(PlComp(k))
         If tok <> "" Then
-            If InStr(du, tok) > 0 Then MatchPurchasedRow = k: Exit Function
-            If tok = "INSULAT" And InStr(du, "PYROPEL") > 0 Then MatchPurchasedRow = k: Exit Function
+            If tok = "PIN" Then
+                If InStr(du, "PIN") > 0 And (InStr(du, "LEADER") > 0 Or InStr(du, "GUIDE") > 0) Then matchKind = "KEYWORD": MatchPurchasedRow = k: Exit Function
+            ElseIf InStr(du, tok) > 0 Then
+                matchKind = "KEYWORD": MatchPurchasedRow = k: Exit Function
+            End If
+            If tok = "INSULAT" And InStr(du, "PYROPEL") > 0 Then matchKind = "KEYWORD": MatchPurchasedRow = k: Exit Function
         End If
     Next k
 End Function
@@ -7372,7 +8730,8 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     End If
 
     Dim k As Long
-    k = MatchPurchasedRow(desc, partNo)
+    Dim matchKind As String
+    k = MatchPurchasedRow(desc, partNo, matchKind)
 
     ' Gate: if the BOM has an explicit TYPE = Purchase, capture it no matter what
     ' (so every purchased line shows up, even if it is not in the price list).
@@ -7401,17 +8760,27 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     PpDet(PpCount) = Trim(detNo)
 
     ' Price: web lookup (off by default) -> direct part# match in the list ->
-    ' the keyword-matched row -> 0. Logged so a $0 is easy to diagnose.
+    ' the matched row -> 0. Logged so a $0 is easy to diagnose.
+    ' KEYWORD matches with no part number are too weak to price: they are what
+    ' put $25.46 (Leader Pin) on grouped assemblies in J8420. Those now stay
+    ' $0 with a NEEDS PRICE warning instead of silently taking a wrong price.
     Dim p As Double
     p = GetOnlineUnitPrice(PpVendor(PpCount), PpPartNo(PpCount))
     If p <= 0 Then p = LookupListPriceByPartNo(PpPartNo(PpCount))
-    If p <= 0 And k > 0 Then p = PlPrice(k)
+    If p <= 0 And k > 0 Then
+        If matchKind = "KEYWORD" And Trim(partNo) = "" Then
+            LogLine "PRICE WARNING (" & desc & "): weak keyword match to '" & PlComp(k) & _
+                    "' with no part number - NEEDS PRICE, left at $0 instead of $" & FormatNumberForCsv(PlPrice(k)) & "."
+        Else
+            p = PlPrice(k)
+        End If
+    End If
     If p <= 0 And InStr(UCase(PpVendor(PpCount)), "DME") > 0 Then
         p = LookupDmePriceWithPython(PpPartNo(PpCount))
         If p > 0 Then SavePriceToList PpVendor(PpCount), PpPartNo(PpCount), p
     End If
     PpPrice(PpCount) = p
-    LogLine "PRICE " & PpPartNo(PpCount) & " (" & desc & "): listRow#=" & k & _
+    LogLine "PRICE " & PpPartNo(PpCount) & " (" & desc & "): listRow#=" & k & " match=" & matchKind & _
             " -> $" & FormatNumberForCsv(p) & "   [price list has " & PlCount & " row(s)]"
 End Sub
 
@@ -7911,6 +9280,24 @@ On Error GoTo eh
         Exit Sub
     End If
 
+    ' Email gate: PROPOSAL_EMAIL_MODE = OFF | PROMPT | AUTO. This stops the
+    ' unwanted automatic CDO proposal emails (J8420) unless explicitly allowed.
+    If UCase(PROPOSAL_EMAIL_MODE) = "OFF" Then
+        gEmailStatus = "NOT sent - PROPOSAL_EMAIL_MODE=OFF (preview written to cms_proposal.txt)"
+        LogLine "Proposal email skipped: PROPOSAL_EMAIL_MODE=OFF."
+        WriteProposalPreviewFile total, False
+        Exit Sub
+    ElseIf UCase(PROPOSAL_EMAIL_MODE) = "PROMPT" Then
+        If MsgBox("Send the PROPOSAL-BOM PRICING email now?" & vbCrLf & vbCrLf & _
+                  "Purchased lines: " & PpCount & "   Total: $" & FormatNumberForCsv(total), _
+                  vbYesNo + vbQuestion, "CMS Proposal Email") <> vbYes Then
+            gEmailStatus = "NOT sent - user declined at prompt (preview written to cms_proposal.txt)"
+            LogLine "Proposal email skipped: user declined at PROMPT."
+            WriteProposalPreviewFile total, False
+            Exit Sub
+        End If
+    End If
+
     ' Build the BOM line: "Leader Pin (107), Guide Bushing (108), ..."
     Dim items As String, i As Long
     items = ""
@@ -7971,9 +9358,70 @@ eh:
     LogLine "SendProposalEmail error: " & Err.Description
 End Sub
 
+' Write the proposal handoff/preview file without sending (used when the
+' email gate is OFF or the user declines the prompt).
+Private Sub WriteProposalPreviewFile(ByVal total As Double, ByVal wasSent As Boolean)
+    On Error Resume Next
+    Dim items As String, i As Long
+    For i = 1 To PpCount
+        If items <> "" Then items = items & ", "
+        items = items & PpComp(i)
+        If PpDet(i) <> "" Then items = items & " (" & PpDet(i) & ")"
+    Next i
+    Dim fso As Object, p As String, ts As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
+    p = LOCAL_WORKSPACE_ROOT & "\cms_proposal.txt"
+    Set ts = fso.CreateTextFile(p, True)
+    ts.WriteLine "To=" & GMAIL_ADDRESS
+    ts.WriteLine "CustomerPrefix=" & CustomerPrefix
+    ts.WriteLine "CustomerName=" & CustomerDisplayName
+    ts.WriteLine "CustJob=" & CustomerJobNumber
+    ts.WriteLine "CNum=" & AssignedQuoteNumber
+    ts.WriteLine "Items=" & items
+    ts.WriteLine "Total=" & FormatNumberForCsv(total)
+    ts.WriteLine "Sent=" & IIf(wasSent, "1", "0")
+    ts.WriteLine "GatedBy=PROPOSAL_EMAIL_MODE:" & PROPOSAL_EMAIL_MODE
+    ts.Close
+End Sub
+
+' Read the Gmail app password from the webapp Settings JSON (never hardcoded).
+Private Function JsonStringField(ByVal jsonText As String, ByVal fieldName As String) As String
+    JsonStringField = ""
+    On Error Resume Next
+    Dim re As Object, matches As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = """" & fieldName & """\s*:\s*""([^""]*)"""
+    Set matches = re.Execute(jsonText)
+    If matches.Count > 0 Then JsonStringField = matches(0).SubMatches(0)
+End Function
+
+Private Function GmailAppPassword() As String
+    GmailAppPassword = ""
+    On Error Resume Next
+    Dim fso As Object, ts As Object, jsonText As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FileExists(EMAIL_CREDENTIALS_FILE) Then Exit Function
+    Set ts = fso.OpenTextFile(EMAIL_CREDENTIALS_FILE, 1)
+    jsonText = ts.ReadAll
+    ts.Close
+    GmailAppPassword = JsonStringField(jsonText, "smtp_password")
+    If GmailAppPassword = "" Then GmailAppPassword = JsonStringField(jsonText, "imap_password")
+End Function
+
 ' Send an HTML email through Gmail SMTP using CDO. Tries SSL 465, then STARTTLS 587.
 Private Function SendViaCdo(ByVal toAddr As String, ByVal subj As String, ByVal htmlBody As String) As Boolean
     SendViaCdo = False
+    Dim appPw As String
+    appPw = GmailAppPassword()
+    If appPw = "" Then
+        LogLine "CDO send skipped: no email credentials at " & EMAIL_CREDENTIALS_FILE & _
+                " (open http://127.0.0.1:8000/settings and save your Gmail app password)."
+        Exit Function
+    End If
+
     Dim sch As String
     sch = "http://schemas.microsoft.com/cdo/configuration/"
 
@@ -7992,7 +9440,7 @@ Private Function SendViaCdo(ByVal toAddr As String, ByVal subj As String, ByVal 
             .Item(sch & "smtpusessl") = ssls(pi)
             .Item(sch & "smtpauthenticate") = 1
             .Item(sch & "sendusername") = GMAIL_ADDRESS
-            .Item(sch & "sendpassword") = GMAIL_APP_PASSWORD
+            .Item(sch & "sendpassword") = appPw
             .Item(sch & "smtpconnectiontimeout") = 30
             .Update
         End With

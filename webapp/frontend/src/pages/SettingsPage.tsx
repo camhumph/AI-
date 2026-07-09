@@ -18,6 +18,7 @@ export default function SettingsPage() {
   const [trainingError, setTrainingError] = useState("");
   const [jobsRoot, setJobsRoot] = useState("C:\\Users\\lenovo\\Downloads\\TRAINING");
   const [useQwen, setUseQwen] = useState(true);
+  const [exportXt, setExportXt] = useState(true);
   const [qwenModel, setQwenModel] = useState("qwen3.5:9b");
 
   useEffect(() => {
@@ -78,7 +79,7 @@ export default function SettingsPage() {
     setTrainingRunning(true);
     setTrainingError("");
     try {
-      const result = await api.runTraining(jobsRoot.trim() || undefined, useQwen, qwenModel);
+      const result = await api.runTraining(jobsRoot.trim() || undefined, useQwen, qwenModel, exportXt);
       setTrainingStatus(result);
       if (result.background) {
         setTrainingRunning(false);
@@ -153,16 +154,19 @@ export default function SettingsPage() {
             <Button onClick={runTraining} disabled={trainingRunning || !!trainingStatus?.running}>
               <Play className="h-4 w-4" />{" "}
               {trainingStatus?.running
-                ? "Qwen training..."
+                ? trainingStatus.phase === "xt_export"
+                  ? "SolidWorks XT export..."
+                  : "Qwen training..."
                 : trainingRunning
                   ? "Starting..."
                   : "Run Training Scan"}
             </Button>
           </div>
           <p className="mb-3 text-xs text-ink-400">
-            Scans your <strong>TRAINING</strong> folder, reads steel sheets, and runs{" "}
-            <strong>Qwen via Ollama</strong> on each job with an XT export (slow — minutes per job).
-            Live quotes still use fast rules only.
+            Scans your <strong>TRAINING</strong> folder. When a job has CAD but no{" "}
+            <code className="text-ink-300">XT_Export_CAD_Dimensions.csv</code>, SolidWorks runs the
+            dimension-export step from Module6121 automatically (leader pins, all components).
+            Optional <strong>Qwen</strong> pass runs after XT exists (slow — minutes per job).
           </p>
           <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
             <Field
@@ -181,11 +185,20 @@ export default function SettingsPage() {
           <label className="mb-3 flex items-center gap-2 text-xs text-ink-400">
             <input
               type="checkbox"
+              checked={exportXt}
+              onChange={(e) => setExportXt(e.target.checked)}
+              className="rounded border-ink-700"
+            />
+            Auto-export XT from CAD via SolidWorks (opens each assembly — keep PC awake)
+          </label>
+          <label className="mb-3 flex items-center gap-2 text-xs text-ink-400">
+            <input
+              type="checkbox"
               checked={useQwen}
               onChange={(e) => setUseQwen(e.target.checked)}
               className="rounded border-ink-700"
             />
-            Run Qwen deep learning (slow — keep PC awake; uncheck for fast scan only)
+            Run Qwen deep learning after XT export (slow — uncheck for fast scan only)
           </label>
           {trainingStatus?.running && (
             <div className="mb-3 rounded border border-ink-700/30 bg-ink-900/50 px-3 py-2 text-xs text-ink-300">
@@ -205,6 +218,9 @@ export default function SettingsPage() {
               <div className="flex flex-wrap gap-3 text-xs">
                 <Badge tone="neutral">{trainingStatus.jobs_processed ?? 0} jobs scanned</Badge>
                 <Badge tone="success">{trainingStatus.jobs_ok ?? 0} OK</Badge>
+                {(trainingStatus.xt_exported_jobs ?? 0) > 0 && (
+                  <Badge tone="brand">{trainingStatus.xt_exported_jobs} XT exported</Badge>
+                )}
                 <Badge tone="warning">{trainingStatus.bms_jobs ?? 0} BMS</Badge>
                 <Badge tone="neutral">{trainingStatus.standard_jobs ?? 0} standard</Badge>
                 <Badge tone={ (trainingStatus.overall_rules_accuracy_pct ?? 0) >= 90 ? "success" : "warning" }>
@@ -219,7 +235,8 @@ export default function SettingsPage() {
                 <p className="text-xs text-accent-amber">
                   All jobs skipped or failed. Common fixes: install <code className="text-ink-300">xlrd</code>{" "}
                   (<code className="text-ink-300">pip install xlrd</code>), use .xls steel sheets in each subfolder,
-                  and add <code className="text-ink-300">XT_Export_CAD_Dimensions.csv</code> for full match training.
+                  enable <strong>Auto-export XT</strong> when CAD files are present, or add{" "}
+                  <code className="text-ink-300">XT_Export_CAD_Dimensions.csv</code> manually.
                 </p>
               )}
 
@@ -232,6 +249,7 @@ export default function SettingsPage() {
                         <th className="px-3 py-2">Type</th>
                         <th className="px-3 py-2">Status</th>
                         <th className="px-3 py-2">Why / notes</th>
+                        <th className="px-3 py-2">XT</th>
                         <th className="px-3 py-2">Rules %</th>
                         <th className="px-3 py-2">Qwen %</th>
                       </tr>
@@ -244,6 +262,13 @@ export default function SettingsPage() {
                           <td className="px-3 py-2 text-ink-400">{r.status}</td>
                           <td className="max-w-xs truncate px-3 py-2 text-[10px] text-ink-500" title={r.reason}>
                             {r.reason || "—"}
+                          </td>
+                          <td className="px-3 py-2 text-[10px] text-ink-400">
+                            {r.xt_export?.status === "exported"
+                              ? "new"
+                              : r.xt_export?.status === "exists"
+                                ? "yes"
+                                : r.xt_export?.status || "—"}
                           </td>
                           <td className="px-3 py-2 text-ink-300">
                             {r.rules_accuracy_pct ?? r.accuracy_pct ?? "—"}

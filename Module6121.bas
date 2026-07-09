@@ -395,6 +395,14 @@ Private Type HandoffInfo
 End Type
 
 Private Const HANDOFF_FILE As String = "C:\CMS_Local_Workspace\cms_handoff.txt"
+Private Const TRAINING_XT_HANDOFF As String = "C:\CMS_Local_Workspace\cms_training_xt.txt"
+
+Private Type TrainingXtHandoff
+    JobFolder As String
+    JobId As String
+    OutputCsv As String
+    DoneFile As String
+End Type
 
 ' ============================================================
 ' MAIN
@@ -407,6 +415,10 @@ On Error GoTo ErrHandler
     ' without showing an InputBox.
     Dim fsoLaunch As Object
     Set fsoLaunch = CreateObject("Scripting.FileSystemObject")
+    If fsoLaunch.FileExists(TRAINING_XT_HANDOFF) Then
+        RunTrainingXtExport
+        Exit Sub
+    End If
     If fsoLaunch.FileExists(HANDOFF_FILE) Then
         RunFromLauncher
         Exit Sub
@@ -684,6 +696,168 @@ End Function
 Private Function ActiveAssemblyIsOpen() As Boolean
     ActiveAssemblyIsOpen = ActiveCadIsOpen()
 End Function
+
+' ============================================================
+' TRAINING XT EXPORT (dimensions only)
+' Called by the webapp training scan when a job folder has CAD
+' but no XT_Export_CAD_Dimensions.csv yet.
+' Reads cms_training_xt.txt, opens CAD, scans geometry, writes
+' the XT CSV into the training folder, then exits.
+' ============================================================
+Sub RunTrainingXtExport()
+On Error GoTo ErrHandler
+    Dim h As TrainingXtHandoff
+    h = ReadTrainingXtHandoff()
+    If h.JobFolder = "" Then
+        WriteTrainingXtDone h.DoneFile, "ERROR", "", "Training handoff missing JobFolder"
+        Exit Sub
+    End If
+
+    Set swApp = Application.SldWorks
+    MacroStartTime = Now
+    CurrentJobFolder = h.JobFolder
+    CurrentJobNumber = h.JobId
+    If CurrentJobNumber = "" Then CurrentJobNumber = GetFolderLeafName(CurrentJobFolder)
+    If CurrentJobNumber = "" Then CurrentJobNumber = "TRAINING"
+    RunLogPath = CurrentJobFolder & "\CMS_Training_XT_Log.txt"
+    StartupLogPath = RunLogPath
+    MainCadOpenedByMacro = False
+    MainCadTitleForClose = ""
+    MainViewportGraphicsDisabled = False
+    Set swModel = Nothing
+
+    LogLine "========================================"
+    LogLine "TRAINING XT EXPORT STARTED"
+    LogLine "Job folder: " & CurrentJobFolder
+    LogLine "========================================"
+
+    Dim extractFolder As String
+    extractFolder = CurrentJobFolder & "\" & EXTRACT_FOLDER_NAME
+    LogStart "Extract ZIP files"
+    EnsureFolderDeep extractFolder
+    ExtractAllZipFilesInJobFolder CurrentJobFolder, extractFolder
+    FlattenExtractedZipContentsIntoJobFolder CurrentJobFolder, extractFolder
+    If DELETE_EXTRACTED_ZIP_AFTER_FLATTEN Then DeleteFolderSafe extractFolder
+    LogDone "Extract ZIP files"
+
+    LogStart "Find CAD file"
+    Dim cadCandidates As Collection
+    Set cadCandidates = FindAllCadModelsRanked(CurrentJobFolder)
+    AppendCadCandidates cadCandidates, FindAllCadModelsRanked(extractFolder)
+    If cadCandidates.Count = 0 Then
+        WriteTrainingXtDone h.DoneFile, "ERROR", "", "No CAD file found in training folder"
+        GoTo CleanExit
+    End If
+    LogDone "Find CAD file"
+
+    LogStart "Open CAD"
+    Dim ci As Long
+    Dim cadPath As String
+    For ci = 1 To cadCandidates.Count
+        cadPath = CStr(cadCandidates(ci))
+        LogLine "Trying CAD candidate " & ci & "/" & cadCandidates.Count & ": " & cadPath
+        Set swModel = OpenCadFile(cadPath)
+        If Not swModel Is Nothing Then
+            LogLine "CAD opened: " & cadPath
+            Exit For
+        End If
+    Next ci
+    If swModel Is Nothing Then
+        WriteTrainingXtDone h.DoneFile, "ERROR", "", "Open CAD failed"
+        GoTo CleanExit
+    End If
+    MainCadOpenedByMacro = True
+    MainCadTitleForClose = swModel.GetTitle
+    LogDone "Open CAD"
+
+    Dim errs As Long
+    swApp.ActivateDoc3 swModel.GetTitle, False, 0, errs
+    EnsureSwHidden
+
+    LogStart "Scan CAD parts (training XT export)"
+    PartCount = 0
+    ReDim parts(1 To 1)
+    Set swAssy = Nothing
+    ScanActiveSolidWorksDocument
+    SortPartsByVolumeDescending
+    ClassifyPotBlockPlatesFromCad
+    LogLine "CAD PartCount=" & PartCount
+
+    Dim outCsv As String
+    If h.OutputCsv <> "" Then
+        outCsv = h.OutputCsv
+    Else
+        outCsv = CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    End If
+    WritePartDimensionCsv outCsv
+    LogDone "Scan CAD parts (training XT export)"
+
+    WriteTrainingXtDone h.DoneFile, "OK", outCsv, "Exported " & PartCount & " components"
+    LogLine "TRAINING XT EXPORT DONE: " & outCsv
+
+CleanExit:
+    On Error Resume Next
+    CloseCurrentJobCadIfNeeded
+    RestoreMainViewportGraphics
+    Exit Sub
+
+ErrHandler:
+    LogLine "RunTrainingXtExport error: " & Err.Description
+    WriteTrainingXtDone h.DoneFile, "ERROR", "", Err.Description
+    Resume CleanExit
+End Sub
+
+Private Function ReadTrainingXtHandoff() As TrainingXtHandoff
+On Error GoTo eh
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FileExists(TRAINING_XT_HANDOFF) Then Exit Function
+    Dim f As Integer, line As String, k As String, v As String, p As Long
+    f = FreeFile
+    Open TRAINING_XT_HANDOFF For Input As #f
+    Do While Not EOF(f)
+        Line Input #f, line
+        p = InStr(line, "=")
+        If p > 0 Then
+            k = Trim(Left(line, p - 1))
+            v = Trim(Mid(line, p + 1))
+            Select Case UCase(k)
+                Case "JOBFOLDER": ReadTrainingXtHandoff.JobFolder = v
+                Case "JOBID": ReadTrainingXtHandoff.JobId = v
+                Case "OUTPUTCSV": ReadTrainingXtHandoff.OutputCsv = v
+                Case "DONEFILE": ReadTrainingXtHandoff.DoneFile = v
+            End Select
+        End If
+    Loop
+    Close #f
+    If ReadTrainingXtHandoff.DoneFile = "" Then
+        ReadTrainingXtHandoff.DoneFile = LOCAL_WORKSPACE_ROOT & "\cms_training_xt_done.txt"
+    End If
+    Exit Function
+eh:
+    LogLine "ReadTrainingXtHandoff error: " & Err.Description
+    On Error Resume Next: Close #f
+End Function
+
+Private Sub WriteTrainingXtDone(ByVal donePath As String, ByVal status As String, ByVal xtCsv As String, ByVal message As String)
+On Error Resume Next
+    Dim p As String
+    If donePath = "" Then donePath = LOCAL_WORKSPACE_ROOT & "\cms_training_xt_done.txt"
+    p = donePath
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim parent As String
+    parent = fso.GetParentFolderName(p)
+    If parent <> "" Then EnsureFolderDeep parent
+    Dim f As Integer
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Status=" & status
+    Print #f, "XtCsv=" & xtCsv
+    Print #f, "PartCount=" & PartCount
+    Print #f, "Message=" & message
+    Close #f
+End Sub
 
 ' ============================================================
 ' LAUNCHER ENTRY POINT

@@ -208,6 +208,7 @@ export interface TrainingJobResult {
   qwen_accuracy_pct?: number;
   qwen_ran?: boolean;
   qwen_elapsed_sec?: number;
+  xt_export?: { ok?: boolean; status?: string; reason?: string; message?: string; part_count?: string };
   macro_guidance?: string;
   detection_signals?: string[];
   reason?: string;
@@ -223,6 +224,8 @@ export interface TrainingReport {
   overall_qwen_accuracy_pct?: number;
   use_qwen?: boolean;
   qwen_model?: string;
+  export_xt?: boolean;
+  xt_exported_jobs?: number;
   running?: boolean;
   phase?: string;
   current_job?: string;
@@ -346,7 +349,7 @@ export const api = {
   trainingStatus: () =>
     req<TrainingReport>("/training/status"),
   trainingSuggestions: () => req<TrainingSuggestions>("/training/suggestions"),
-  runTraining: (jobsRoot?: string, useQwen = true, qwenModel = "qwen3.5:9b") =>
+  runTraining: (jobsRoot?: string, useQwen = true, qwenModel = "qwen3.5:9b", exportXt = true) =>
     req<TrainingReport>("/training/run", {
       method: "POST",
       body: JSON.stringify({
@@ -354,6 +357,7 @@ export const api = {
         scan: true,
         use_qwen: useQwen,
         qwen_model: qwenModel,
+        export_xt: exportXt,
       }),
     }),
 };

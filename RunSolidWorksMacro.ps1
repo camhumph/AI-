@@ -2,7 +2,8 @@
     [Parameter(Mandatory=$true)][string]$MacroPath,
     [Parameter(Mandatory=$true)][string]$SwExe,
     [Parameter(Mandatory=$true)][string]$ProgId,
-    [string]$LogFile = "C:\Users\lenovo\Downloads\CMS_Quote_Log.txt"
+    [string]$LogFile = "C:\Users\lenovo\Downloads\CMS_Quote_Log.txt",
+    [string]$Procedure = "RunFromLauncher"
 )
 
 $ErrorActionPreference = "Continue"
@@ -109,9 +110,9 @@ try {
     $moduleNames = @("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
     $ext = [System.IO.Path]::GetExtension($MacroPath).ToLowerInvariant()
     if ($ext -eq ".swp") {
-        $procedureNames = @("RunFromLauncher")
+        $procedureNames = @($Procedure)
     } else {
-        $procedureNames = @("RunFromLauncher", "main")
+        $procedureNames = @($Procedure, "RunFromLauncher", "main")
     }
 
     $ran = $false
