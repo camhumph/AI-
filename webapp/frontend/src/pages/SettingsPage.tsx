@@ -17,12 +17,22 @@ export default function SettingsPage() {
   const [trainingRunning, setTrainingRunning] = useState(false);
   const [trainingError, setTrainingError] = useState("");
   const [jobsRoot, setJobsRoot] = useState("C:\\Users\\lenovo\\Downloads\\TRAINING");
+  const [useQwen, setUseQwen] = useState(true);
+  const [qwenModel, setQwenModel] = useState("qwen3.5:9b");
 
   useEffect(() => {
     api.getPricing().then(setRates);
     api.getEmailSettings().then(setEmailSettings);
     api.trainingStatus().then(setTrainingStatus).catch(() => setTrainingStatus(null));
   }, []);
+
+  useEffect(() => {
+    if (!trainingStatus?.running) return;
+    const iv = setInterval(() => {
+      api.trainingStatus().then(setTrainingStatus).catch(() => {});
+    }, 4000);
+    return () => clearInterval(iv);
+  }, [trainingStatus?.running]);
 
   const saveEmail = async () => {
     if (!emailSettings) return;
@@ -68,12 +78,16 @@ export default function SettingsPage() {
     setTrainingRunning(true);
     setTrainingError("");
     try {
-      const result = await api.runTraining(jobsRoot.trim() || undefined);
+      const result = await api.runTraining(jobsRoot.trim() || undefined, useQwen, qwenModel);
       setTrainingStatus(result);
+      if (result.background) {
+        setTrainingRunning(false);
+      }
     } catch (e) {
       setTrainingError(e instanceof Error ? e.message : "Training scan failed");
-    } finally {
       setTrainingRunning(false);
+    } finally {
+      if (!useQwen) setTrainingRunning(false);
     }
   };
 
@@ -136,21 +150,51 @@ export default function SettingsPage() {
               <Brain className="h-4 w-4 text-ink-300" />
               <h3 className="text-sm font-semibold text-ink-100">Training Scan (BMS + Standard)</h3>
             </div>
-            <Button onClick={runTraining} disabled={trainingRunning}>
-              <Play className="h-4 w-4" /> {trainingRunning ? "Scanning..." : "Run Training Scan"}
+            <Button onClick={runTraining} disabled={trainingRunning || !!trainingStatus?.running}>
+              <Play className="h-4 w-4" />{" "}
+              {trainingStatus?.running
+                ? "Qwen training..."
+                : trainingRunning
+                  ? "Starting..."
+                  : "Run Training Scan"}
             </Button>
           </div>
           <p className="mb-3 text-xs text-ink-400">
-            Point at your <strong>TRAINING</strong> folder. Each subfolder is scanned for steel sheets,
-            BOM/moldbase files, and XT exports. BMS jobs are cataloged for the macro BOM path; standard jobs
-            build CORRECT_ME training files and compare live rules vs your steel-sheet ground truth.
+            Scans your <strong>TRAINING</strong> folder, reads steel sheets, and runs{" "}
+            <strong>Qwen via Ollama</strong> on each job with an XT export (slow — minutes per job).
+            Live quotes still use fast rules only.
           </p>
-          <Field
-            label="Training folder"
-            value={jobsRoot}
-            onChange={setJobsRoot}
-            placeholder="C:\Users\lenovo\Downloads\TRAINING"
-          />
+          <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Field
+              label="Training folder"
+              value={jobsRoot}
+              onChange={setJobsRoot}
+              placeholder="C:\Users\lenovo\Downloads\TRAINING"
+            />
+            <Field
+              label="Qwen model (Ollama)"
+              value={qwenModel}
+              onChange={setQwenModel}
+              placeholder="qwen3.5:9b"
+            />
+          </div>
+          <label className="mb-3 flex items-center gap-2 text-xs text-ink-400">
+            <input
+              type="checkbox"
+              checked={useQwen}
+              onChange={(e) => setUseQwen(e.target.checked)}
+              className="rounded border-ink-700"
+            />
+            Run Qwen deep learning (slow — keep PC awake; uncheck for fast scan only)
+          </label>
+          {trainingStatus?.running && (
+            <div className="mb-3 rounded border border-ink-700/30 bg-ink-900/50 px-3 py-2 text-xs text-ink-300">
+              <strong className="text-ink-200">{trainingStatus.phase}</strong>
+              {trainingStatus.current_job && ` · ${trainingStatus.current_job}`}
+              {trainingStatus.job_total ? ` (${trainingStatus.job_index}/${trainingStatus.job_total})` : ""}
+              <div className="mt-1 text-[10px] text-ink-500">{trainingStatus.message}</div>
+            </div>
+          )}
           {trainingError && (
             <p className="mt-2 flex items-center gap-2 text-xs text-accent-rose">
               <AlertTriangle className="h-3.5 w-3.5" /> {trainingError}
@@ -164,8 +208,11 @@ export default function SettingsPage() {
                 <Badge tone="warning">{trainingStatus.bms_jobs ?? 0} BMS</Badge>
                 <Badge tone="neutral">{trainingStatus.standard_jobs ?? 0} standard</Badge>
                 <Badge tone={ (trainingStatus.overall_rules_accuracy_pct ?? 0) >= 90 ? "success" : "warning" }>
-                  Rules accuracy {trainingStatus.overall_rules_accuracy_pct ?? 0}%
+                  Rules {trainingStatus.overall_rules_accuracy_pct ?? 0}%
                 </Badge>
+                {(trainingStatus.overall_qwen_accuracy_pct ?? 0) > 0 && (
+                  <Badge tone="neutral">Qwen {trainingStatus.overall_qwen_accuracy_pct}%</Badge>
+                )}
               </div>
 
               {trainingStatus.jobs_ok === 0 && (trainingStatus.jobs_processed ?? 0) > 0 && (
@@ -186,6 +233,7 @@ export default function SettingsPage() {
                         <th className="px-3 py-2">Status</th>
                         <th className="px-3 py-2">Why / notes</th>
                         <th className="px-3 py-2">Rules %</th>
+                        <th className="px-3 py-2">Qwen %</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -199,6 +247,9 @@ export default function SettingsPage() {
                           </td>
                           <td className="px-3 py-2 text-ink-300">
                             {r.rules_accuracy_pct ?? r.accuracy_pct ?? "—"}
+                          </td>
+                          <td className="px-3 py-2 text-ink-300">
+                            {r.qwen_accuracy_pct ?? (r.qwen_ran === false ? "err" : "—")}
                           </td>
                         </tr>
                       ))}

@@ -205,6 +205,9 @@ export interface TrainingJobResult {
   accuracy_pct?: number;
   components_matched?: number;
   total_components?: number;
+  qwen_accuracy_pct?: number;
+  qwen_ran?: boolean;
+  qwen_elapsed_sec?: number;
   macro_guidance?: string;
   detection_signals?: string[];
   reason?: string;
@@ -217,6 +220,17 @@ export interface TrainingReport {
   bms_jobs?: number;
   standard_jobs?: number;
   overall_rules_accuracy_pct?: number;
+  overall_qwen_accuracy_pct?: number;
+  use_qwen?: boolean;
+  qwen_model?: string;
+  running?: boolean;
+  phase?: string;
+  current_job?: string;
+  job_index?: number;
+  job_total?: number;
+  message?: string;
+  background?: boolean;
+  started?: boolean;
   results?: TrainingJobResult[];
   suggestions?: TrainingSuggestion[];
   output_dir?: string;
@@ -332,9 +346,14 @@ export const api = {
   trainingStatus: () =>
     req<TrainingReport>("/training/status"),
   trainingSuggestions: () => req<TrainingSuggestions>("/training/suggestions"),
-  runTraining: (jobsRoot?: string) =>
+  runTraining: (jobsRoot?: string, useQwen = true, qwenModel = "qwen3.5:9b") =>
     req<TrainingReport>("/training/run", {
       method: "POST",
-      body: JSON.stringify({ jobs_root: jobsRoot || null, scan: true }),
+      body: JSON.stringify({
+        jobs_root: jobsRoot || null,
+        scan: true,
+        use_qwen: useQwen,
+        qwen_model: qwenModel,
+      }),
     }),
 };

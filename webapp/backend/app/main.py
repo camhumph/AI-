@@ -508,6 +508,8 @@ class TrainingRunBody(BaseModel):
     manifest_path: Optional[str] = None
     jobs_root: Optional[str] = None
     scan: bool = True
+    use_qwen: bool = True
+    qwen_model: str = "qwen3.5:9b"
 
 
 def _ensure_classifier_path():
@@ -534,8 +536,12 @@ def api_training_run(body: TrainingRunBody):
         result = training_audit.run_full_audit(
             jobs_root=jobs_root if body.scan else None,
             manifest_path=body.manifest_path,
+            use_qwen=body.use_qwen,
+            qwen_model=body.qwen_model,
         )
         return result
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
