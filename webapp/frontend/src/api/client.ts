@@ -265,6 +265,8 @@ export const api = {
   health: () => req<{ ok: boolean; email_configured: boolean; smtp_configured: boolean }>("/health"),
 
   listJobs: () => req<JobSummary[]>("/jobs"),
+  deleteJob: (jobId: string) =>
+    req<{ deleted: boolean; job_id: string }>(`/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" }),
   browseWorkspace: (path = "") => req<WorkspaceBrowse>(`/workspace/browse?path=${encodeURIComponent(path)}`),
   importFromFolder: (folder_path: string, run_quote = true) =>
     req<JobDetail & { quote_started?: boolean; quote_id?: string; poll_url?: string }>("/jobs/import-folder", {
@@ -274,6 +276,11 @@ export const api = {
   quoteStatus: (quoteId: string) => req<QuoteRunStatus>(`/quote/status/${encodeURIComponent(quoteId)}`),
   cancelQuote: (quoteId: string) =>
     req<QuoteRunStatus>(`/quote/cancel/${encodeURIComponent(quoteId)}`, { method: "POST", body: "{}" }),
+  deleteQuote: (quoteId: string) =>
+    req<{ deleted: boolean; quote_id: string; job_deleted?: boolean }>(
+      `/quote/delete/${encodeURIComponent(quoteId)}`,
+      { method: "POST", body: "{}" }
+    ),
   activeQuotes: () => req<QuoteRunStatus[]>("/quote/active"),
   getJob: (jobId: string) => req<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`),
   createJob: (job_id: string, display_name: string, customer: string) =>

@@ -1,5 +1,6 @@
-import { CheckCircle2, Loader2, X, AlertCircle, ExternalLink, Square } from "lucide-react";
+import { CheckCircle2, Loader2, X, AlertCircle, ExternalLink, Square, Trash2 } from "lucide-react";
 import { useQuoteJobs } from "../context/QuoteJobsContext";
+import { api } from "../api/client";
 
 const PHASE_LABEL: Record<string, string> = {
   queued: "Preparing",
@@ -14,6 +15,23 @@ const PHASE_LABEL: Record<string, string> = {
 export default function BackgroundQuoteBar() {
   const { jobs, cancelQuote, dismissQuote, openQuote } = useQuoteJobs();
   if (jobs.length === 0) return null;
+
+  const deleteQuote = async (quoteId: string, jobId?: string) => {
+    if (!window.confirm(`Delete quote ${jobId || quoteId}?\n\nRemoves it from the webapp list.`)) return;
+    try {
+      await api.deleteQuote(quoteId);
+      if (jobId && jobId !== quoteId) {
+        try {
+          await api.deleteJob(jobId);
+        } catch {
+          /* already gone */
+        }
+      }
+    } catch {
+      /* still dismiss from bar */
+    }
+    dismissQuote(quoteId);
+  };
 
   return (
     <div className="fixed bottom-5 right-5 z-50 flex w-full max-w-sm flex-col gap-2 sm:max-w-md">
@@ -68,6 +86,13 @@ export default function BackgroundQuoteBar() {
                   <Square className="h-3.5 w-3.5" />
                 </button>
               )}
+              <button
+                onClick={() => deleteQuote(job.quoteId, job.status.job_id)}
+                className="rounded-full p-1.5 text-ink-500 hover:bg-accent-rose/10 hover:text-accent-rose"
+                title="Delete quote"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
               <button
                 onClick={() => dismissQuote(job.quoteId)}
                 className="rounded-full p-1.5 text-ink-500 hover:bg-white/10 hover:text-ink-200"

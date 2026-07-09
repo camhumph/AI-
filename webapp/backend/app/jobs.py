@@ -13,6 +13,7 @@ A "job" is a folder under config.JOBS_ROOT. Recognized contents:
 """
 import csv
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -190,6 +191,36 @@ def create_job(job_id: str, display_name: str = "", customer: str = "") -> dict:
         }
         (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return get_job(job_id)
+
+
+def delete_job(job_id: str) -> dict:
+    """Remove a quote/job from the webapp registry (JOBS_ROOT folder + quote status)."""
+    job_dir = _job_dir(job_id)
+    if not job_dir.exists():
+        raise FileNotFoundError(f"Job '{job_id}' not found")
+    # Safety: only delete under JOBS_ROOT
+    root = config.JOBS_ROOT.resolve()
+    resolved = job_dir.resolve()
+    if root not in resolved.parents and resolved != root:
+        raise PermissionError("Refusing to delete outside jobs root")
+    shutil.rmtree(resolved)
+
+    # Also clear quote status file if present
+    try:
+        from . import quote_pipeline
+
+        status_path = quote_pipeline._status_path(job_id)
+        if status_path.exists():
+            status_path.unlink()
+        # Also try C-number variants
+        for alt in (job_id.replace("-", ""), job_id.upper(), job_id.lower()):
+            p = quote_pipeline._status_path(alt)
+            if p.exists():
+                p.unlink()
+    except Exception:
+        pass
+
+    return {"deleted": True, "job_id": job_id}
 
 
 def update_meta(job_id: str, **fields) -> None:

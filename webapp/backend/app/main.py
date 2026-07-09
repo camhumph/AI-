@@ -68,6 +68,51 @@ def api_get_job(job_id: str):
     return job
 
 
+@app.delete("/api/jobs/{job_id}")
+def api_delete_job(job_id: str):
+    """Delete a quote/job from the webapp (does not delete SolidWorks network files)."""
+    try:
+        return jobs.delete_job(job_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/quote/delete/{quote_id}")
+def api_quote_delete(quote_id: str):
+    """Delete a background quote status entry and its job registry folder if present."""
+    try:
+        quote_pipeline.cancel_quote(quote_id)
+    except Exception:
+        pass
+    deleted_job = False
+    try:
+        jobs.delete_job(quote_id)
+        deleted_job = True
+    except FileNotFoundError:
+        # Try C-number from status
+        st = quote_pipeline.get_status(quote_id) or {}
+        alt = st.get("job_id") or st.get("c_number")
+        if alt and alt != quote_id:
+            try:
+                jobs.delete_job(alt)
+                deleted_job = True
+            except FileNotFoundError:
+                pass
+    # Mark status dismissed/deleted
+    quote_pipeline.set_status(
+        quote_id,
+        phase="cancelled",
+        message="Quote deleted",
+        dismissed=True,
+        deleted=True,
+    )
+    return {"deleted": True, "quote_id": quote_id, "job_deleted": deleted_job}
+
+
 @app.post("/api/jobs/{job_id}/classify")
 def api_classify_job(job_id: str, body: ClassifyBody):
     job = jobs.get_job(job_id)

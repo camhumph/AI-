@@ -639,16 +639,49 @@ On Error GoTo ErrHandler
     LogDone "Scan active CAD/XT parts"
     DoEvents
 
+    ' BMS / pot-block jobs MUST read the customer BOM (same as ProcessOneJob).
+    ' Without this, open-CAD-first quotes skip BOM and fill wrong sizes.
     BomCount = 0
     ReDim BomRows(1 To 1)
     ExportCount = 0
     ReDim ExportRows(1 To 1)
     LoadPurchasedPriceList
+
+    LogStart "Find + read BOM (active CAD path)"
+    Dim bomSearchRoots As Collection
+    Set bomSearchRoots = New Collection
+    bomSearchRoots.Add CurrentJobFolder
+    If NetworkJobFolder <> "" Then bomSearchRoots.Add NetworkJobFolder
+    If gHandoffAttachDir <> "" Then bomSearchRoots.Add gHandoffAttachDir
+    Dim bomPath As String, bi As Long, rootPath As String
+    bomPath = ""
+    For bi = 1 To bomSearchRoots.Count
+        rootPath = CStr(bomSearchRoots(bi))
+        If rootPath <> "" Then
+            bomPath = FindCustomerBomFile(rootPath)
+            If bomPath <> "" Then Exit For
+        End If
+    Next bi
+    gDiagBomPath = bomPath
+    If bomPath <> "" Then
+        LogLine "BOM selected (active): " & bomPath
+        If LCase(GetFileExtension(bomPath)) = "pdf" Then
+            If READ_PDF_BOM_WITH_PDFTOTEXT Then ReadCustomerBomPdfUsingPdfToText bomPath
+        Else
+            ReadCustomerBom bomPath
+        End If
+    Else
+        LogLine "No BOM file found near active CAD (continuing with CAD-only fill)."
+    End If
+    LogLine "BomCount=" & BomCount
+    LogDone "Find + read BOM (active CAD path)"
+
+    BuildExportRowsFromBom
     WriteExportCheckCsv CurrentJobFolder & "\XT_Export_BOM_Match_Report.csv"
 
     Dim isStd As Boolean
     isStd = DetectBaseTypeIsStandard()
-    LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
+    LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK (BOM-driven)")
     DoEvents
 
     ' AI bridge: classify through the LOCAL AI service (standard bases only;
@@ -683,11 +716,21 @@ On Error GoTo ErrHandler
     ComputePullcoreQuote
     ComputePurchasedQuote
 
+    ' Export deliverables (DXF/IGS/ISO/EASM/STL) for active-CAD quotes too.
+    LogStart "Export base package (active CAD)"
+    ExportBasePackage CurrentJobFolder & "\base"
+    LogDone "Export base package (active CAD)"
+
+    AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
+
     LogLine "DONE ACTIVE CAD QUOTE. Output folder: " & CurrentJobFolder
     LogLine "TOTAL ACTIVE RUN TIME: " & DateDiff("s", JobStartTime, Now) & "s   (log: " & RunLogPath & ")"
-    MsgBox "Active CAD quote finished." & vbCrLf & _
-           "Quote/Excel was run. Heavy exports/views were skipped." & vbCrLf & vbCrLf & _
-           CurrentJobFolder, vbInformation, "CMS Base Export"
+    If Not SUPPRESS_USER_PROMPTS Then
+        MsgBox "Active CAD quote finished." & vbCrLf & _
+               "Base type: " & IIf(isStd, "STANDARD", "BMS/POT (BOM)") & vbCrLf & _
+               "BOM: " & IIf(bomPath = "", "(none)", bomPath) & vbCrLf & vbCrLf & _
+               CurrentJobFolder, vbInformation, "CMS Base Export"
+    End If
 
 CleanExit:
     On Error Resume Next
@@ -3547,8 +3590,9 @@ Private Sub BoxCornersToInches(ByVal vBox As Variant, _
     rx = Abs(CDbl(vBox(3)) - CDbl(vBox(0)))
     ry = Abs(CDbl(vBox(4)) - CDbl(vBox(1)))
     rz = Abs(CDbl(vBox(5)) - CDbl(vBox(2)))
-    ' Detect scale from the largest axis so all three share one unit system
-    Dim scale As Double
+    ' Detect unit scale from the largest axis so all three share one unit system.
+    ' NOTE: do not name a variable "Scale" — reserved in SolidWorks VBA.
+    Dim unitScale As Double
     Dim rawMax As Double
     rawMax = rx
     If ry > rawMax Then rawMax = ry
@@ -3557,20 +3601,20 @@ Private Sub BoxCornersToInches(ByVal vBox As Variant, _
     asMeters = rawMax * INCHES_PER_METER
     asInches = rawMax
     asMm = rawMax / 25.4
-    scale = INCHES_PER_METER
+    unitScale = INCHES_PER_METER
     If asMeters > MAX_SANE_MOLD_DIM_IN And asInches <= MAX_SANE_MOLD_DIM_IN And asInches > 0.05 Then
-        scale = 1#
+        unitScale = 1#
         LogLine "Box units: treating as inches (meter convert was " & FormatNumberForCsv(asMeters) & " in)"
     ElseIf asMeters > MAX_SANE_MOLD_DIM_IN And asMm <= MAX_SANE_MOLD_DIM_IN And asMm > 0.05 Then
-        scale = 1# / 25.4
+        unitScale = 1# / 25.4
         LogLine "Box units: treating as mm (meter convert was " & FormatNumberForCsv(asMeters) & " in)"
     End If
-    dxIn = rx * scale
-    dyIn = ry * scale
-    dzIn = rz * scale
-    cxIn = ((CDbl(vBox(0)) + CDbl(vBox(3))) / 2#) * scale
-    cyIn = ((CDbl(vBox(1)) + CDbl(vBox(4))) / 2#) * scale
-    czIn = ((CDbl(vBox(2)) + CDbl(vBox(5))) / 2#) * scale
+    dxIn = rx * unitScale
+    dyIn = ry * unitScale
+    dzIn = rz * unitScale
+    cxIn = ((CDbl(vBox(0)) + CDbl(vBox(3))) / 2#) * unitScale
+    cyIn = ((CDbl(vBox(1)) + CDbl(vBox(4))) / 2#) * unitScale
+    czIn = ((CDbl(vBox(2)) + CDbl(vBox(5))) / 2#) * unitScale
 End Sub
 
 Private Sub SortThreeDimensions(ByVal a As Double, ByVal b As Double, ByVal c As Double, _
@@ -5916,6 +5960,14 @@ Private Function DetectBaseTypeIsStandard() As Boolean
     If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
     If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
 
+    ' HARD RULE: BMS / pot-block jobs are NEVER standard mold bases.
+    ' Folder names like BMS-851100029-C18603 must keep the BOM-driven pot-block flow.
+    If LooksLikeBmsJob() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from job/folder/customer name"
+        Exit Function
+    End If
+
     ' Strong signal: holder/pot/smed families -> pot block.
     ' TCP/BCP alone are not pot-block proof; standard molds have clamp plates too.
     Dim i As Long, d As String, q As String
@@ -5955,6 +6007,18 @@ Private Function DetectBaseTypeIsStandard() As Boolean
         End If
     Next i
     DetectBaseTypeIsStandard = (nFull >= 3)
+End Function
+
+Private Function LooksLikeBmsJob() As Boolean
+    LooksLikeBmsJob = False
+    Dim blob As String
+    blob = UCase$(CurrentJobNumber & "|" & CustomerJobNumber & "|" & CustomerPrefix & "|" & _
+                  CustomerDisplayName & "|" & gExactJobFolderName & "|" & NetworkJobFolder & "|" & _
+                  CurrentJobFolder & "|" & gHandoffAttachDir & "|" & JobBaseName)
+    If InStr(blob, "BMS") > 0 Then LooksLikeBmsJob = True: Exit Function
+    If InStr(blob, "POTBLOCK") > 0 Or InStr(blob, "POT-BLOCK") > 0 Or InStr(blob, "POT_BLOCK") > 0 Then
+        LooksLikeBmsJob = True
+    End If
 End Function
 
 Private Sub AddStdPlate(ByVal nm As String, ByVal t As Double, ByVal w As Double, ByVal l As Double, ByVal qty As Long, Optional ByVal gradeHint As String = "")

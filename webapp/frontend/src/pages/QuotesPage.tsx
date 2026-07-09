@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { FileStack, Image as ImageIcon, Box, Plus, Search, FolderOpen, ChevronRight, ChevronUp } from "lucide-react";
+import { FileStack, Image as ImageIcon, Box, Plus, Search, FolderOpen, ChevronRight, ChevronUp, Trash2 } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, EmptyState, Spinner } from "../components/ui";
 import { api, type JobSummary, type WorkspaceBrowse } from "../api/client";
@@ -10,6 +10,7 @@ export default function QuotesPage() {
   const [jobs, setJobs] = useState<JobSummary[] | null>(null);
   const [query, setQuery] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const refresh = () => api.listJobs().then(setJobs).catch(() => setJobs([]));
   useEffect(() => {
@@ -21,6 +22,23 @@ export default function QuotesPage() {
       j.display_name.toLowerCase().includes(query.toLowerCase()) ||
       j.job_id.toLowerCase().includes(query.toLowerCase())
   );
+
+  const deleteQuote = async (jobId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm(`Delete quote ${jobId} from the webapp?\n\nThis removes it from the Quotes list. SolidWorks job files on disk are not deleted.`)) {
+      return;
+    }
+    setDeleting(jobId);
+    try {
+      await api.deleteJob(jobId);
+      setJobs((prev) => (prev || []).filter((j) => j.job_id !== jobId));
+    } catch (err) {
+      window.alert((err as Error).message || "Delete failed");
+    } finally {
+      setDeleting(null);
+    }
+  };
 
   return (
     <Layout
@@ -54,22 +72,33 @@ export default function QuotesPage() {
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((job) => (
-            <Link key={job.job_id} to={`/quotes/${job.job_id}`}>
-              <Card className="h-full p-5 transition hover:border-ink-100">
-                <div className="mb-3 flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold uppercase tracking-wider text-ink-100">{job.job_id}</div>
-                    <div className="mt-1 truncate text-xs text-ink-400">{job.display_name}</div>
+            <div key={job.job_id} className="relative">
+              <Link to={`/quotes/${job.job_id}`}>
+                <Card className="h-full p-5 transition hover:border-ink-100">
+                  <div className="mb-3 flex items-start justify-between gap-3 pr-8">
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold uppercase tracking-wider text-ink-100">{job.job_id}</div>
+                      <div className="mt-1 truncate text-xs text-ink-400">{job.display_name}</div>
+                    </div>
+                    {job.base_type === "bms" && <Badge tone="warning">BMS</Badge>}
                   </div>
-                  {job.base_type === "bms" && <Badge tone="warning">BMS</Badge>}
-                </div>
-                <div className="flex items-center gap-4 text-xs text-ink-500">
-                  <span className="flex items-center gap-1"><FileStack className="h-3.5 w-3.5" /> {job.part_count}</span>
-                  <span className="flex items-center gap-1"><ImageIcon className="h-3.5 w-3.5" /> {job.image_count}</span>
-                  <span className="flex items-center gap-1"><Box className="h-3.5 w-3.5" /> {job.model_count}</span>
-                </div>
-              </Card>
-            </Link>
+                  <div className="flex items-center gap-4 text-xs text-ink-500">
+                    <span className="flex items-center gap-1"><FileStack className="h-3.5 w-3.5" /> {job.part_count}</span>
+                    <span className="flex items-center gap-1"><ImageIcon className="h-3.5 w-3.5" /> {job.image_count}</span>
+                    <span className="flex items-center gap-1"><Box className="h-3.5 w-3.5" /> {job.model_count}</span>
+                  </div>
+                </Card>
+              </Link>
+              <button
+                type="button"
+                onClick={(e) => deleteQuote(job.job_id, e)}
+                disabled={deleting === job.job_id}
+                title="Delete quote"
+                className="absolute right-3 top-3 rounded-full p-1.5 text-ink-500 hover:bg-accent-rose/15 hover:text-accent-rose disabled:opacity-40"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
           ))}
         </div>
       )}
