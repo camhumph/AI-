@@ -22,6 +22,8 @@ OUT_DIR = BASE / "outputs" / "training"
 DATA_DIR = BASE / "data" / "training"
 REPORT_PATH = DATA_DIR / "last_audit_report.json"
 SUGGESTIONS_PATH = DATA_DIR / "rule_suggestions.md"
+DISAGREEMENTS_CSV = DATA_DIR / "training_disagreements.csv"
+DISAGREEMENTS_MD = DATA_DIR / "training_disagreements.md"
 PROGRESS_PATH = DATA_DIR / "training_progress.json"
 QWEN_LIVE_OUTPUT = DATA_DIR / "qwen_live_output.txt"
 
@@ -727,7 +729,7 @@ def audit_rules_against_correct_me(correct_me_path: Path, xt_path: Path) -> dict
     return audit
 
 
-def audit_qwen_against_correct_me(correct_me_path: Path, qwen_data: dict) -> dict:
+def audit_qwen_against_correct_me(correct_me_path: Path, qwen_data: dict, xt_path: Path | None = None) -> dict:
     truth = _load_truth_from_correct_me(correct_me_path)
     if not truth:
         return {"compared": 0, "correct": 0, "mismatches": [], "accuracy_pct": 0}
@@ -735,7 +737,15 @@ def audit_qwen_against_correct_me(correct_me_path: Path, qwen_data: dict) -> dic
         str(c.get("index", "")): c.get("role", "")
         for c in qwen_data.get("classifications", [])
     }
-    return _audit_predictions_against_truth(truth, pred_map, "qwen")
+    audit = _audit_predictions_against_truth(truth, pred_map, "qwen")
+    if xt_path and xt_path.exists():
+        xt_rows = [_compact_row(r) for r in train_from_quote_sheets.read_xt_rows(xt_path)]
+        mismatches = []
+        for mm in audit["mismatches"]:
+            comp = next((r for r in xt_rows if r["i"] == mm["index"]), {})
+            mismatches.append({**mm, "component": comp.get("name", "")})
+        audit["mismatches"] = mismatches
+    return audit
 
 
 def build_suggestions(all_mismatches: list[dict], job_results: list[dict]) -> list[dict]:
@@ -1113,7 +1123,9 @@ def _run_audit_worker(
             entry["qwen_output"] = str(qwen_json_path)
 
             if proc.get("output") and Path(proc["output"]).exists():
-                q_audit = audit_qwen_against_correct_me(Path(proc["output"]), qwen_out.get("data", {}))
+                q_audit = audit_qwen_against_correct_me(
+                    Path(proc["output"]), qwen_out.get("data", {}), Path(xt_path)
+                )
                 entry["qwen_audit"] = q_audit
                 entry["qwen_accuracy_pct"] = q_audit.get("accuracy_pct", 0)
 
@@ -1163,10 +1175,72 @@ def _finalize_summary(
     summary["suggestions"] = suggestions
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _write_disagreements_report(results)
     REPORT_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     _write_suggestions_md(suggestions, summary)
     (DATA_DIR / "last_training_run.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
+
+
+def _write_disagreements_report(results: list[dict]) -> None:
+    """Flat CSV + Markdown list of every part the rules got wrong vs the steel sheet."""
+    rows: list[dict[str, str]] = []
+    for job in results:
+        job_id = str(job.get("job_id", ""))
+        if not job_id:
+            continue
+        audit = job.get("audit") or {}
+        qwen_audit = job.get("qwen_audit") or {}
+        qwen_wrong = {str(m["index"]): m for m in qwen_audit.get("mismatches", [])}
+        for mm in audit.get("mismatches", []):
+            idx = str(mm.get("index", ""))
+            qm = qwen_wrong.get(idx)
+            rows.append(
+                {
+                    "job_id": job_id,
+                    "index": idx,
+                    "component": str(mm.get("component", "") or (qm or {}).get("component", "")),
+                    "steel_says": str(mm.get("expected", "")),
+                    "rules_got": str(mm.get("predicted", "")),
+                    "qwen_got": str(qm["predicted"]) if qm else "(matched steel)",
+                }
+            )
+
+    if not rows:
+        DISAGREEMENTS_CSV.write_text(
+            "job_id,index,component,steel_says,rules_got,qwen_got\n",
+            encoding="utf-8",
+        )
+        DISAGREEMENTS_MD.write_text(
+            "# Training disagreements\n\nNo mismatches — rules matched every steel-sheet role.\n",
+            encoding="utf-8",
+        )
+        return
+
+    with DISAGREEMENTS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["job_id", "index", "component", "steel_says", "rules_got", "qwen_got"],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    lines = [
+        "# Training disagreements (rules vs steel sheet)",
+        "",
+        "Open in Excel or Notepad. **steel_says** = role from the quote/steel sheet (ground truth).",
+        "",
+        "| Job | # | Component | Steel says | Rules got | Qwen got |",
+        "|-----|---|-----------|------------|-----------|----------|",
+    ]
+    for r in rows:
+        comp = r["component"].replace("|", "/")[:60]
+        lines.append(
+            f"| {r['job_id']} | {r['index']} | {comp} | {r['steel_says']} | "
+            f"{r['rules_got']} | {r['qwen_got']} |"
+        )
+    lines.extend(["", f"_{len(rows)} disagreement(s) across {len({r['job_id'] for r in rows})} job(s)._"])
+    DISAGREEMENTS_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_suggestions_md(suggestions: list[dict], summary: dict) -> None:
@@ -1228,6 +1302,8 @@ def status() -> dict:
     """Live progress always wins while a scan is running or just cancelled."""
     out: dict = {"jobs_processed": 0, "output_dir": str(OUT_DIR), "suggestions": []}
     prog = get_progress()
+    out["disagreements_csv"] = str(DISAGREEMENTS_CSV)
+    out["disagreements_md"] = str(DISAGREEMENTS_MD)
     # Don't let a stale report overwrite a live/cancelled progress state
     if prog.get("running") or prog.get("phase") in ("cancelled", "error", "starting", "scan", "xt_export", "qwen"):
         out.update(prog)

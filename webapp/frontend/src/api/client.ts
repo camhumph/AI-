@@ -248,6 +248,8 @@ export interface TrainingReport {
   suggestions?: TrainingSuggestion[];
   output_dir?: string;
   jobs_root?: string;
+  disagreements_csv?: string;
+  disagreements_md?: string;
 }
 
 export interface TrainingSuggestions {

@@ -326,9 +326,24 @@ export default function SettingsPage() {
             </div>
           )}
           {trainingStatus?.phase === "done" && !trainingStatus?.running && (
-            <div className="mb-3 flex items-center gap-2 rounded-xl border border-accent-green/25 bg-accent-green/10 px-3 py-2 text-xs text-accent-green">
-              <CheckCircle2 className="h-3.5 w-3.5" /> Training complete
-              {trainingStatus.detail ? ` — ${trainingStatus.detail}` : ""}
+            <div className="mb-3 space-y-2">
+              <div className="flex items-center gap-2 rounded-xl border border-accent-green/25 bg-accent-green/10 px-3 py-2 text-xs text-accent-green">
+                <CheckCircle2 className="h-3.5 w-3.5" /> Training complete
+                {trainingStatus.detail ? ` — ${trainingStatus.detail}` : ""}
+              </div>
+              {(trainingStatus.disagreements_csv || trainingStatus.disagreements_md) && (
+                <div className="rounded-xl border border-ink-700/40 bg-ink-900/60 px-3 py-2 text-[10px] text-ink-400">
+                  <div className="font-semibold uppercase tracking-wider text-ink-500">
+                    Disagreements (steel vs rules)
+                  </div>
+                  <div className="mt-1 font-mono text-ink-300">
+                    CSV: {trainingStatus.disagreements_csv || "geometry_classifier\\data\\training\\training_disagreements.csv"}
+                  </div>
+                  <div className="mt-0.5 font-mono text-ink-300">
+                    Markdown: {trainingStatus.disagreements_md || "geometry_classifier\\data\\training\\training_disagreements.md"}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           {trainingError && (
