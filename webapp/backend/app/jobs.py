@@ -488,8 +488,6 @@ def _xt_looks_like_pot_block(job_dir: Path) -> bool:
 
 def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
     """Register a quote from an existing folder on disk (C-number job)."""
-    import re
-
     src = Path(folder_path)
     if not src.exists() or not src.is_dir():
         raise FileNotFoundError(f"Folder not found: {folder_path}")
