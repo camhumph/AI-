@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ LOCAL_WORKSPACE = Path(os.environ.get("CMS_LOCAL_WORKSPACE", r"C:\CMS_Local_Work
 HANDOFF_FILE = LOCAL_WORKSPACE / "cms_handoff.txt"
 EMAIL_OUTPUT_FILE = LOCAL_WORKSPACE / "cms_email.txt"
 CANCEL_FILE = LOCAL_WORKSPACE / "cms_quote_cancel.txt"
+TRAINING_TRIGGER = LOCAL_WORKSPACE / "cms_training_xt.txt"
 STATUS_DIR = config.DATA_DIR / "quote_status"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -95,6 +97,18 @@ def _find_python_script(name: str) -> Path | None:
     return None
 
 
+def _deploy_launcher_assets() -> None:
+    """Copy launcher scripts from the repo into C:\\CMS_Local_Workspace on Windows."""
+    LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    for name in ("CMS_Launcher.vbs", "RunSolidWorksMacro.ps1", "RunTrainingXtLauncher.vbs"):
+        src = REPO_ROOT / name
+        if src.exists():
+            try:
+                shutil.copy2(src, LOCAL_WORKSPACE / name)
+            except Exception:
+                pass
+
+
 def run_dme_price_lookup() -> bool:
     """Refresh DME prices in Purchased Components Prices.csv (same as launcher)."""
     script = _find_python_script("cms_price_lookup.py")
@@ -117,6 +131,12 @@ def run_dme_price_lookup() -> bool:
 def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = None) -> dict:
     """Write handoff files, run DME lookup, start CMS_Launcher /usemail."""
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    _deploy_launcher_assets()
+    if TRAINING_TRIGGER.exists():
+        try:
+            TRAINING_TRIGGER.unlink()
+        except Exception:
+            pass
 
     info = email_info or {}
     lines = {

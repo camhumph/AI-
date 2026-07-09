@@ -330,6 +330,7 @@ Private SimilarToJob As String
 Private ShipDateText As String
 Private gRootJobPath As String          ' resolved month folder (from handoff or computed)
 Private gExactJobFolderName As String    ' exact folder name from launcher handoff (avoids fuzzy match)
+Private gHandoffAttachDir As String      ' email attachment folder when network job folder is missing
 Private gDiagBomPath As String           ' BOM file the macro used (for the end-of-run popup)
 Private gEmailStatus As String           ' result of the proposal email step
 Private gLastJobDiag As String           ' summary of BOM/components/email for the popup
@@ -392,6 +393,7 @@ Private Type HandoffInfo
     JobFolder As String
     CustomerPrefix As String
     CustomerName As String
+    AttachDir As String
 End Type
 
 Private Const HANDOFF_FILE As String = "C:\CMS_Local_Workspace\cms_handoff.txt"
@@ -962,6 +964,7 @@ On Error GoTo eh
                 Case "JOBFOLDER": ReadHandoffFile.JobFolder = v
                 Case "CUSTOMERPREFIX": ReadHandoffFile.CustomerPrefix = v
                 Case "CUSTOMERNAME": ReadHandoffFile.CustomerName = v
+                Case "ATTACHDIR": ReadHandoffFile.AttachDir = v
             End Select
         End If
     Loop
@@ -992,9 +995,11 @@ Private Function ProcessOneJobWithHandoff(ByVal jobText As String, ByRef h As Ha
     SimilarToJob        = h.SimilarTo
     ShipDateText        = h.ShipDate
     gExactJobFolderName = h.JobFolder
+    gHandoffAttachDir = h.AttachDir
     gProcessingHandoff = True
     ProcessOneJobWithHandoff = ProcessOneJob(jobText)
     gProcessingHandoff = False
+    gHandoffAttachDir = ""
 End Function
 
 Private Function ProcessOneJob(ByVal jobSearchText As String) As Boolean
@@ -1017,6 +1022,7 @@ On Error GoTo ErrHandler
         SimilarToJob = ""
         ShipDateText = ""
         gExactJobFolderName = ""
+        gHandoffAttachDir = ""
     End If
     CurrentJobFolder = ""
     NetworkJobFolder = ""
@@ -1028,9 +1034,9 @@ On Error GoTo ErrHandler
     ' This avoids matching a stale folder that happens to share the C-number
     ' (e.g. an old BMS-868000000-C18601 test folder).
     NetworkJobFolder = ""
+    Dim fsoJ As Object
+    Set fsoJ = CreateObject("Scripting.FileSystemObject")
     If gExactJobFolderName <> "" Then
-        Dim fsoJ As Object
-        Set fsoJ = CreateObject("Scripting.FileSystemObject")
         Dim cand As String
         cand = gRootJobPath & "\" & gExactJobFolderName
         If fsoJ.FolderExists(cand) Then
@@ -1041,6 +1047,12 @@ On Error GoTo ErrHandler
         End If
     End If
     If NetworkJobFolder = "" Then NetworkJobFolder = FindJobFolderByText(gRootJobPath, CurrentJobNumber)
+    If NetworkJobFolder = "" And gHandoffAttachDir <> "" Then
+        If fsoJ.FolderExists(gHandoffAttachDir) Then
+            NetworkJobFolder = gHandoffAttachDir
+            LogLine "Using AttachDir fallback from handoff: " & gHandoffAttachDir
+        End If
+    End If
     LogLine "Job folder result: " & NetworkJobFolder
     If NetworkJobFolder = "" Then
         LogErrorText "Could not find job folder for: " & CurrentJobNumber

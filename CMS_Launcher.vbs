@@ -42,6 +42,7 @@ Const SW_MACRO = "C:\CMS_Local_Workspace\Module6121.swp"   ' compiled macro — 
 
 ' Handoff file written for Module6121 to read
 Const HANDOFF_FILE = "C:\CMS_Local_Workspace\cms_handoff.txt"
+Const TRAINING_TRIGGER = "C:\CMS_Local_Workspace\cms_training_xt.txt"
 
 ' Gmail search (Python) settings
 Const USE_GMAIL_SEARCH  = True
@@ -59,6 +60,10 @@ gAttachDir = ""
 
 ' Make sure the local workspace exists (handoff + email files live here)
 If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
+If fso.FileExists(TRAINING_TRIGGER) Then
+    fso.DeleteFile TRAINING_TRIGGER, True
+    LogStep "cleared stale cms_training_xt.txt (live quote, not training)"
+End If
 LogStep "===== launcher started ====="
 
 ' 1. No typing needed - the job number comes from the email and the
@@ -122,9 +127,18 @@ customerPrefix = CleanFolderToken(IIf(gCustomerPrefix <> "", gCustomerPrefix, DE
 customerName = IIf(gCustomerName <> "", gCustomerName, customerPrefix)
 jobFolderName = BuildJobFolderName(customerPrefix, custJobNum, quoteNoHyphen)
 jobFolderPath = CreateJobFolder(monthFolder, jobFolderName, gAttachDir)
+If jobFolderPath = "" Then
+    jobFolderPath = CreateJobFolder(LOCAL_WORKSPACE_ROOT, jobFolderName, gAttachDir)
+    If jobFolderPath <> "" Then
+        monthFolder = LOCAL_WORKSPACE_ROOT
+        LogStep "network share unreachable — staged job files locally: " & jobFolderPath
+    ElseIf gAttachDir <> "" And fso.FolderExists(gAttachDir) Then
+        LogStep "job folder not created — macro will use AttachDir: " & gAttachDir
+    End If
+End If
 
 ' 6. Write the handoff file for Module6121 (includes the month folder + job folder)
-WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName
+WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir
 
 Dim proposalPath
 proposalPath = ""
@@ -298,7 +312,7 @@ End Function
 ' ============================================================
 ' HANDOFF FILE  (Module6121 reads this at startup)
 ' ============================================================
-Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobFolder, customerPrefix, customerName)
+Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobFolder, customerPrefix, customerName, attachDir)
     Dim f
     Set f = fso.CreateTextFile(HANDOFF_FILE, True)
     f.WriteLine "CNum="      & cNum
@@ -310,6 +324,7 @@ Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobF
     f.WriteLine "JobFolder=" & jobFolder
     f.WriteLine "CustomerPrefix=" & customerPrefix
     f.WriteLine "CustomerName=" & customerName
+    If attachDir <> "" Then f.WriteLine "AttachDir=" & attachDir
     f.Close
 End Sub
 
@@ -317,42 +332,60 @@ End Sub
 ' LAUNCH SOLIDWORKS + MACRO
 ' ============================================================
 Function LaunchSolidWorksAndMacro()
-    Dim shell, sw, tries, macroPath, macroFolder
+    Dim shell, sw, tries, macroPath, macroFolder, ps1, cmd, ret, macroErr
     Set shell = CreateObject("WScript.Shell")
+    LaunchSolidWorksAndMacro = False
 
     macroFolder = fso.GetParentFolderName(WScript.ScriptFullName)
     macroPath = SW_MACRO
+    If Not fso.FileExists(macroPath) Then macroPath = LOCAL_WORKSPACE_ROOT & "\Module6121.swp"
     If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swp"
-    If Not fso.FileExists(macroPath) Then macroPath = "C:\CMS_Local_Workspace\Module6121.swb"
-    If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swb"
+    If Not fso.FileExists(macroPath) Then
+        LogStep "Module6121.swp not found at " & SW_MACRO & " — copy compiled macro to C:\CMS_Local_Workspace\"
+        Exit Function
+    End If
+    LogStep "using compiled macro: " & macroPath
+
+    ps1 = LOCAL_WORKSPACE_ROOT & "\RunSolidWorksMacro.ps1"
+    If fso.FileExists(ps1) Then
+        cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File """ & ps1 & """ -MacroPath """ & macroPath & """ -SwExe """ & SW_EXE & """ -ProgId """ & SW_PROGID & """ -Procedure RunFromLauncher"
+        LogStep "starting macro via RunSolidWorksMacro.ps1"
+        ret = shell.Run(cmd, 0, True)
+        If ret = 0 Then
+            LaunchSolidWorksAndMacro = True
+            LogStep "macro started via PowerShell runner"
+            Exit Function
+        End If
+        LogStep "PowerShell macro runner exit code " & ret & " — trying inline RunMacro2"
+    End If
 
     On Error Resume Next
     Set sw = GetObject(, SW_PROGID)
     If sw Is Nothing Then Set sw = CreateObject(SW_PROGID)
     On Error GoTo 0
 
-    If IsNull(sw) Or IsEmpty(sw) Or (sw Is Nothing) Then
+    If sw Is Nothing Then
         If Not fso.FileExists(SW_EXE) Then
-            LogStep "SolidWorks 2023 not found at: " & SW_EXE & ". Update SW_EXE in CMS_Launcher.vbs."
-            LaunchSolidWorksAndMacro = False
+            LogStep "SolidWorks 2023 not found at: " & SW_EXE
             Exit Function
         End If
+        LogStep "starting SolidWorks 2023..."
         shell.Run """" & SW_EXE & """", 1, False
         tries = 0
         Do
             WScript.Sleep 3000
             On Error Resume Next
             Set sw = GetObject(, SW_PROGID)
-            ' Do NOT fall back to generic SldWorks.Application — that can attach to 2025
             On Error GoTo 0
             tries = tries + 1
-        Loop Until (Not (sw Is Nothing)) Or tries > 20
+        Loop Until (Not sw Is Nothing) Or tries > 20
         If sw Is Nothing Then
-            LogStep "SolidWorks 2023 did not start in time at: " & SW_EXE & "; macro not run."
-            LaunchSolidWorksAndMacro = False
+            LogStep "SolidWorks 2023 did not start in time"
             Exit Function
         End If
-        LogStep "Connected to SolidWorks 2023 (" & SW_PROGID & ")"
+        LogStep "connected to SolidWorks 2023 (" & SW_PROGID & ")"
+    Else
+        LogStep "using existing SolidWorks 2023 session"
     End If
 
     On Error Resume Next
@@ -360,19 +393,30 @@ Function LaunchSolidWorksAndMacro()
     On Error GoTo 0
     WScript.Sleep 1500
 
-    If Not fso.FileExists(macroPath) Then
-        LogStep "Module6121.swp/.swb not found next to launcher or at: " & SW_MACRO & ". Macro not run."
-        LaunchSolidWorksAndMacro = False
-        Exit Function
-    End If
+    tries = 0
+    Do While tries < 45
+        On Error Resume Next
+        If Not sw.CommandInProgress Then Exit Do
+        On Error GoTo 0
+        WScript.Sleep 1000
+        tries = tries + 1
+    Loop
+    On Error Resume Next
+    sw.CommandInProgress = False
+    On Error GoTo 0
 
     Dim modNames, mi, okRun, ran
     modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
     ran = False
     For mi = 0 To UBound(modNames)
+        okRun = False
+        macroErr = 0
         On Error Resume Next
         sw.CommandInProgress = True
         okRun = sw.RunMacro(macroPath, modNames(mi), "RunFromLauncher")
+        If Err.Number = 0 And okRun <> True Then
+            okRun = sw.RunMacro2(macroPath, modNames(mi), "RunFromLauncher", 1, macroErr)
+        End If
         sw.CommandInProgress = False
         If Err.Number = 0 And okRun = True Then
             On Error GoTo 0
@@ -380,16 +424,13 @@ Function LaunchSolidWorksAndMacro()
             LogStep "macro started via module '" & modNames(mi) & "' from " & macroPath
             Exit For
         End If
-        LogStep "RunMacro failed module '" & modNames(mi) & "' err=" & Err.Number & " " & Err.Description
+        LogStep "RunMacro(2) failed module '" & modNames(mi) & "' err=" & Err.Number & " macroErr=" & macroErr
         Err.Clear
         On Error GoTo 0
     Next
 
     If Not ran Then
-        LogStep "RunMacro could not start the macro for any known module name from: " & macroPath
-        On Error Resume Next
-        sw.Visible = True
-        On Error GoTo 0
+        LogStep "RunMacro(2) could not start RunFromLauncher from: " & macroPath
     End If
     LaunchSolidWorksAndMacro = ran
 End Function
