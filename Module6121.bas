@@ -780,6 +780,21 @@ On Error GoTo ErrHandler
     End If
     DoEvents
 
+    If isStd Then
+        LogStart "Refine STANDARD *Front from rails/latch after classify"
+        If DefineStandardFrontFromRailsAndFootprint(swModel) Then
+            swModel.ShowNamedView2 "*Top", 5
+            StabilizeActiveView swModel, 50
+            On Error Resume Next
+            swModel.DeleteNamedView CMS_TOP_VIEW_NAME
+            Err.Clear
+            swModel.NameView CMS_TOP_VIEW_NAME
+            On Error GoTo ErrHandler
+            CaptureFinalStandardViewsForStlCoordinateSystem swModel
+        End If
+        LogDone "Refine STANDARD *Front from rails/latch after classify"
+    End If
+
     If FILL_QUOTE_WORKBOOK Then
         LogStart "Fill Quote workbook from active CAD"
         If isStd Then FillStandardBaseQuote Else FillQuoteWorkbookFromBoundingBox
@@ -1422,6 +1437,23 @@ On Error GoTo ErrHandler
 
     If WRITE_PCS_NAMING_ANALYSIS And Not FAST_QUOTE_MODE Then
         WritePcsNamingAnalysis CurrentJobFolder & "\PCS_Naming_Analysis.csv", isStd
+    End If
+
+    ' After standard stack/rails/latch roles are known, refine *Front and
+    ' re-capture the STL coordinate frame.
+    If isStd Then
+        LogStart "Refine STANDARD *Front from rails/latch after classify"
+        If DefineStandardFrontFromRailsAndFootprint(swModel) Then
+            swModel.ShowNamedView2 "*Top", 5
+            StabilizeActiveView swModel, 50
+            On Error Resume Next
+            swModel.DeleteNamedView CMS_TOP_VIEW_NAME
+            Err.Clear
+            swModel.NameView CMS_TOP_VIEW_NAME
+            On Error GoTo ErrHandler
+            CaptureFinalStandardViewsForStlCoordinateSystem swModel
+        End If
+        LogDone "Refine STANDARD *Front from rails/latch after classify"
     End If
 
     If FILL_QUOTE_WORKBOOK Then
@@ -2465,6 +2497,8 @@ On Error GoTo ErrHandler
 
     If model Is Nothing Then Exit Sub
 
+    ' Top first (stack axis already decided by ClassifyStandardBasePlates when
+    ' available; otherwise keep SolidWorks *Top as CMS_TOP).
     model.ShowNamedView2 "*Top", 5
     StabilizeActiveView model, 50
 
@@ -2473,13 +2507,245 @@ On Error GoTo ErrHandler
     Err.Clear
     model.NameView CMS_TOP_VIEW_NAME
     On Error GoTo ErrHandler
+    LogLine "STANDARD mold orientation: SolidWorks *Top saved as CMS_TOP."
 
-    LogLine "STANDARD mold orientation: SolidWorks *Top saved as CMS_TOP. Pot-block holder/pot orientation skipped."
+    ' Front for standard bases (no holders/pots): long side of footprint visible,
+    ' rails spanning left-right, latch-locks / operator hardware toward front.
+    If DefineStandardFrontFromRailsAndFootprint(model) Then
+        LogLine "STANDARD *Front defined from rails / footprint / latch-lock cues."
+        ' Rebuild CMS_TOP from the corrected *Top after front persist.
+        model.ShowNamedView2 "*Top", 5
+        StabilizeActiveView model, 50
+        On Error Resume Next
+        model.DeleteNamedView CMS_TOP_VIEW_NAME
+        Err.Clear
+        model.NameView CMS_TOP_VIEW_NAME
+        On Error GoTo ErrHandler
+    Else
+        LogLine "STANDARD *Front: could not refine from rails/footprint; keeping SolidWorks *Front."
+    End If
     Exit Sub
 
 ErrHandler:
     LogLine "SetStandardBaseOrientation error: " & Err.Description
 End Sub
+
+' Standard-base front (non-BMS): shop molds face the operator with the long
+' side of the base across the view and rails running left-right. Latch-lock /
+' safety-strap hardware, when present, sits on the operator (front) face.
+Private Function DefineStandardFrontFromRailsAndFootprint(ByVal model As Object) As Boolean
+On Error GoTo ErrHandler
+    DefineStandardFrontFromRailsAndFootprint = False
+    If model Is Nothing Then Exit Function
+    If model.GetType <> swDocASSEMBLY Then Exit Function
+    If PartCount < 1 Then Exit Function
+
+    Dim plateIdx As Long
+    Dim i As Long
+    Dim bestFp As Double, fp As Double
+    Dim roleKey As String
+    plateIdx = 0
+    bestFp = 0#
+    For i = 1 To PartCount
+        roleKey = NormalizeKey(StdCadRole(i))
+        If roleKey = "APLATE" Or roleKey = "BPLATE" Or roleKey = "TOPCLAMPPLATE" Or roleKey = "BOTTOMCLAMPPLATE" Then
+            fp = parts(i).Width * parts(i).Length
+            If fp > bestFp Then bestFp = fp: plateIdx = i
+        End If
+    Next i
+    If plateIdx < 1 Then
+        For i = 1 To PartCount
+            fp = parts(i).Width * parts(i).Length
+            If fp > bestFp Then bestFp = fp: plateIdx = i
+        Next i
+    End If
+    If plateIdx < 1 Then
+        LogLine "Standard front skipped: no footprint plate found."
+        Exit Function
+    End If
+
+    Dim railIdx(1 To 20) As Long, nRail As Long
+    Dim latchIdx(1 To 40) As Long, nLatch As Long
+    nRail = 0: nLatch = 0
+    For i = 1 To PartCount
+        roleKey = NormalizeKey(StdCadRole(i))
+        If roleKey = "RAILS" Or InStr(UCase(parts(i).componentName), "RAIL") > 0 Then
+            If nRail < UBound(railIdx) Then nRail = nRail + 1: railIdx(nRail) = i
+        End If
+        If IsLatchLockName(parts(i).componentName) Then
+            If nLatch < UBound(latchIdx) Then nLatch = nLatch + 1: latchIdx(nLatch) = i
+        End If
+    Next i
+
+    ' Start from *Front; if the base long side is into the screen, try *Right.
+    model.ShowNamedView2 "*Front", 1
+    StabilizeActiveView model, 50
+
+    Dim candidateViewName As String
+    Dim oppositeViewName As String
+    Dim oppositeViewId As Long
+    Dim longIntoScreen As Boolean
+    Dim gotLong As Boolean
+
+    candidateViewName = "*Front"
+    oppositeViewName = "*Back"
+    oppositeViewId = 2
+
+    gotLong = IsHolderLongSideIntoCurrentView(model, plateIdx, longIntoScreen)
+    If gotLong And longIntoScreen Then
+        LogLine "Standard front: base long side into screen from *Front -> trying *Right."
+        model.ShowNamedView2 "*Right", 4
+        StabilizeActiveView model, 50
+        candidateViewName = "*Right"
+        oppositeViewName = "*Left"
+        oppositeViewId = 3
+    Else
+        LogLine "Standard front: keeping " & candidateViewName & " as front candidate (long side visible or untested)."
+    End If
+
+    ' Prefer a view where rails span left-right (large view-X separation).
+    If nRail >= 2 Then
+        If Not RailsSpanLeftRightInActiveView(model, railIdx, nRail) Then
+            LogLine "Standard front: rails not spanning left-right in " & candidateViewName & " -> trying alternate face."
+            If candidateViewName = "*Front" Then
+                model.ShowNamedView2 "*Right", 4
+                StabilizeActiveView model, 50
+                candidateViewName = "*Right"
+                oppositeViewName = "*Left"
+                oppositeViewId = 3
+            Else
+                model.ShowNamedView2 "*Front", 1
+                StabilizeActiveView model, 50
+                candidateViewName = "*Front"
+                oppositeViewName = "*Back"
+                oppositeViewId = 2
+            End If
+        End If
+    End If
+
+    ' Latch-locks / safety straps toward the operator (front = larger view depth).
+    If nLatch >= 1 Then
+        Dim flipped As Boolean
+        flipped = False
+        If EnsureLatchLocksCloserToFrontInActiveView(model, latchIdx, nLatch, plateIdx, _
+                                                     oppositeViewName, oppositeViewId, flipped) Then
+            If flipped Then
+                candidateViewName = oppositeViewName
+                LogLine "Standard front: flipped so latch-lock/safety-strap hardware faces operator."
+            End If
+        End If
+    End If
+
+    If PersistCurrentViewAsStandardFront(model) Then
+        model.ShowNamedView2 "*Front", 1
+        StabilizeActiveView model, 50
+        LogLine "Standard front complete. Persisted as SolidWorks *Front (" & candidateViewName & " candidate)."
+        DefineStandardFrontFromRailsAndFootprint = True
+    Else
+        LogLine "Standard front failed: could not persist current view as *Front."
+    End If
+    Exit Function
+ErrHandler:
+    LogLine "DefineStandardFrontFromRailsAndFootprint error: " & Err.Description
+    DefineStandardFrontFromRailsAndFootprint = False
+End Function
+
+' True when the two rails are separated more in view-X than view-Y (span across front).
+Private Function RailsSpanLeftRightInActiveView(ByVal model As Object, _
+                                                ByRef railIdx() As Long, ByVal nRail As Long) As Boolean
+On Error GoTo nope
+    RailsSpanLeftRightInActiveView = False
+    If model Is Nothing Or nRail < 2 Then Exit Function
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+    If swView Is Nothing Then Exit Function
+    Dim mView As Variant
+    mView = swView.Orientation3.ArrayData
+    If IsEmpty(mView) Or IsArray(mView) = False Then Exit Function
+    If UBound(mView) < 8 Then Exit Function
+
+    Dim i As Long
+    Dim px As Double, py As Double, pz As Double
+    Dim vx As Double, vy As Double
+    Dim minX As Double, maxX As Double, minY As Double, maxY As Double
+    Dim got As Boolean
+    minX = 1E+30: maxX = -1E+30: minY = 1E+30: maxY = -1E+30
+    got = False
+
+    For i = 1 To nRail
+        If Not TryGetCadCenterPointForFrontCheck(railIdx(i), False, px, py, pz) Then GoTo nextRail
+        vx = (px * CDbl(mView(0))) + (py * CDbl(mView(3))) + (pz * CDbl(mView(6)))
+        vy = (px * CDbl(mView(1))) + (py * CDbl(mView(4))) + (pz * CDbl(mView(7)))
+        If vx < minX Then minX = vx
+        If vx > maxX Then maxX = vx
+        If vy < minY Then minY = vy
+        If vy > maxY Then maxY = vy
+        got = True
+nextRail:
+    Next i
+    If Not got Then Exit Function
+
+    Dim spanX As Double, spanY As Double
+    spanX = maxX - minX
+    spanY = maxY - minY
+    LogLine "Standard front rails span: viewX=" & FormatNumberForCsv(spanX) & " viewY=" & FormatNumberForCsv(spanY)
+    ' Rails on opposite sides of the mold -> large lateral span across the front view.
+    RailsSpanLeftRightInActiveView = (spanX >= spanY * 0.85 And spanX > 1#)
+    Exit Function
+nope:
+    RailsSpanLeftRightInActiveView = False
+End Function
+
+' Flip to opposite face if latch-lock hardware is behind the mold center (not facing operator).
+Private Function EnsureLatchLocksCloserToFrontInActiveView(ByVal model As Object, _
+                                                           ByRef latchIdx() As Long, ByVal nLatch As Long, _
+                                                           ByVal plateIdx As Long, _
+                                                           ByVal oppositeViewName As String, _
+                                                           ByVal oppositeViewId As Long, _
+                                                           ByRef flipped As Boolean) As Boolean
+On Error GoTo nope
+    EnsureLatchLocksCloserToFrontInActiveView = False
+    flipped = False
+    If model Is Nothing Or nLatch < 1 Then Exit Function
+
+    Dim latchAvg As Double, plateDepth As Double, d As Double
+    Dim i As Long, n As Long
+    Dim px As Double, py As Double, pz As Double
+
+    latchAvg = 0#: n = 0
+    For i = 1 To nLatch
+        If TryGetCadCenterPointForFrontCheck(latchIdx(i), False, px, py, pz) Then
+            If TryProjectPointToActiveViewDepth(model, px, py, pz, d) Then
+                latchAvg = latchAvg + d
+                n = n + 1
+            End If
+        End If
+    Next i
+    If n < 1 Then Exit Function
+    latchAvg = latchAvg / n
+
+    If Not TryGetCadCenterPointForFrontCheck(plateIdx, False, px, py, pz) Then Exit Function
+    If Not TryProjectPointToActiveViewDepth(model, px, py, pz, plateDepth) Then Exit Function
+
+    LogLine "Standard front latch depth: latchAvg=" & FormatNumberForCsv(latchAvg) & _
+            " plate=" & FormatNumberForCsv(plateDepth) & " delta=" & FormatNumberForCsv(latchAvg - plateDepth)
+
+    ' Larger view depth = closer to viewed/front face (same convention as pot/front).
+    If latchAvg >= plateDepth Then
+        EnsureLatchLocksCloserToFrontInActiveView = True
+        Exit Function
+    End If
+
+    LogLine "Standard front: latch locks behind plate center -> flipping to " & oppositeViewName
+    model.ShowNamedView2 oppositeViewName, oppositeViewId
+    StabilizeActiveView model, 50
+    flipped = True
+    EnsureLatchLocksCloserToFrontInActiveView = True
+    Exit Function
+nope:
+    EnsureLatchLocksCloserToFrontInActiveView = False
+End Function
 Private Sub ApplyCmsTopView(ByVal model As Object)
 On Error Resume Next
     If model Is Nothing Then Exit Sub
@@ -10146,9 +10412,10 @@ Private Function NearSameAxisPlane(ByVal aIdx As Long, ByVal bIdx As Long, Optio
     NearSameAxisPlane = ((dx <= tol And dy <= tol) Or (dx <= tol And dz <= tol) Or (dy <= tol And dz <= tol))
 End Function
 
-' Classify each leader pin as PRIMARY (shoulder/LBB bushing match on B plate) or
-' SECONDARY (guided-ejector bushing match — must not decide A/B). Also match
-' unmatched long pins to nearby short bushings (dynacast / T001015 secondary set).
+' Classify leader-pin sets using bushing co-location AND distance from the
+' ejector stack. When two guide-pin sets exist, PRIMARY = the set farther
+' from the ejectors (main LDR-PIN / B-plate set); SECONDARY = the set nearer
+' the ejectors (EJ_LDR_PIN / guided-ejector set). Secondary never decides A/B.
 Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp As Long, _
                                                ByVal ax As Integer, ByVal supportPos As Double)
     Dim i As Long, j As Long
@@ -10160,17 +10427,42 @@ Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp
     Dim shortBushIdx(1 To 120) As Long, nShort As Long
     Dim dia As Double, axisLen As Double, ratio As Double
     Dim matched As Boolean
+    Dim ejMean As Double, ejCount As Long
+    Dim uName As String
 
     If PartCount < 1 Then Exit Sub
     On Error Resume Next
     If UBound(gStdLeaderPinSetByPart) < 1 Then ReDim gStdLeaderPinSetByPart(1 To PartCount)
     On Error GoTo 0
     If Not StdRoleArrayReady() Then
-        ' Ensure role array exists so SetStdCadRole during matching is safe.
         ReDim gStdRoleByPart(1 To PartCount)
     End If
 
+    ' Clear previous set tags for a clean re-run.
+    For i = 1 To PartCount
+        gStdLeaderPinSetByPart(i) = ""
+    Next i
+
     nPin = 0: nShoulder = 0: nEjectorBush = 0: nLong = 0: nShort = 0
+    ejMean = 0#: ejCount = 0
+
+    ' Ejector-stack anchor position (plates + rails) for "farther from ejectors".
+    For i = 1 To PartCount
+        roleKey = NormalizeKey(StdCadRole(i))
+        uName = UCase(parts(i).componentName)
+        If roleKey = "EJECTORPLATE" Or roleKey = "BOTTOMEJECTORPLATE" Or roleKey = "RAILS" Or _
+           InStr(uName, "EJ-RET") > 0 Or InStr(uName, "EJ-BACKUP") > 0 Or _
+           InStr(uName, "EJ_RET") > 0 Or InStr(uName, "EJ_BACKUP") > 0 Then
+            ejMean = ejMean + PartAxisCenter(i, ax)
+            ejCount = ejCount + 1
+        End If
+    Next i
+    If ejCount > 0 Then
+        ejMean = ejMean / ejCount
+    ElseIf supportPos <> 0# Then
+        ejMean = supportPos
+        ejCount = 1
+    End If
 
     For i = 1 To nLp
         roleKey = NormalizeKey(StandardRoundComponentRole(lpIdx(i)))
@@ -10184,8 +10476,6 @@ Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp
         End Select
     Next i
 
-    ' Also scan all round parts for long-pin / short-bushing geometry pairs
-    ' (covers cases where role naming was ambiguous before matching).
     For i = 1 To PartCount
         If Not IsRoundBarLike(i) Then GoTo nextRound
         dia = RoundBarDiameter(i)
@@ -10200,47 +10490,148 @@ Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp
 nextRound:
     Next i
 
-    ' Primary vs secondary from already-named bushings.
-    For i = 1 To nPin
+    ' Ensure pin list includes all long guide pins (not only pre-tagged lpIdx).
+    For i = 1 To nLong
         matched = False
-        For j = 1 To nShoulder
-            If NearSameAxisPlane(pinIdx(i), shoulderIdx(j)) Then
-                gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
-                matched = True
-                Exit For
-            End If
+        For j = 1 To nPin
+            If pinIdx(j) = longPinIdx(i) Then matched = True: Exit For
         Next j
-        If Not matched Then
-            For j = 1 To nEjectorBush
-                If NearSameAxisPlane(pinIdx(i), ejectorBushIdx(j)) Then
-                    gStdLeaderPinSetByPart(pinIdx(i)) = "SECONDARY"
-                    matched = True
-                    Exit For
-                End If
-            Next j
+        If Not matched And nPin < UBound(pinIdx) Then
+            nPin = nPin + 1
+            pinIdx(nPin) = longPinIdx(i)
         End If
     Next i
 
-    ' Geometry fallback: long pin + short bushing on same lateral plane.
-    For i = 1 To nLong
-        If gStdLeaderPinSetByPart(longPinIdx(i)) <> "" Then GoTo nextLong
-        For j = 1 To nShort
-            If NearSameAxisPlane(longPinIdx(i), shortBushIdx(j), LEADER_PIN_BUSHING_PLANE_TOL) Then
-                SetStdCadRole longPinIdx(i), "Leader Pin"
-                SetStdCadRole shortBushIdx(j), "Leader Pin Bushing"
-                If gStdLeaderPinSetByPart(longPinIdx(i)) = "" Then
-                    ' Prefer PRIMARY when bushing is at/above support (B-plate side);
-                    ' SECONDARY when bushing is clearly in the ejector half.
-                    If supportPos <> 0# And PartAxisCenter(shortBushIdx(j), ax) < supportPos - 0.25 Then
-                        gStdLeaderPinSetByPart(longPinIdx(i)) = "SECONDARY"
-                    Else
-                        gStdLeaderPinSetByPart(longPinIdx(i)) = "PRIMARY"
-                    End If
-                End If
+    ' --- Cluster pins by stack-axis center (two sets = two distinct stack positions) ---
+    Dim setPos(1 To 40) As Double
+    Dim setCount(1 To 40) As Long
+    Dim setSum(1 To 40) As Double
+    Dim pinSetId(1 To 120) As Long
+    Dim nSets As Long
+    Dim pPos As Double
+    Dim bestSet As Long
+    Dim bestDist As Double
+    Dim d As Double
+    Const PIN_SET_CLUSTER_TOL As Double = 1.25
+
+    nSets = 0
+    For i = 1 To nPin
+        pPos = PartAxisCenter(pinIdx(i), ax)
+        bestSet = 0
+        bestDist = 1E+30
+        For j = 1 To nSets
+            d = Abs(pPos - setPos(j))
+            If d < bestDist Then bestDist = d: bestSet = j
+        Next j
+        If bestSet > 0 And bestDist <= PIN_SET_CLUSTER_TOL Then
+            pinSetId(i) = bestSet
+            setSum(bestSet) = setSum(bestSet) + pPos
+            setCount(bestSet) = setCount(bestSet) + 1
+            setPos(bestSet) = setSum(bestSet) / setCount(bestSet)
+        ElseIf nSets < UBound(setPos) Then
+            nSets = nSets + 1
+            pinSetId(i) = nSets
+            setSum(nSets) = pPos
+            setCount(nSets) = 1
+            setPos(nSets) = pPos
+        End If
+    Next i
+
+    ' Bushing evidence per cluster: shoulder/LBB vs guided-ejector matches.
+    Dim setShoulderHits(1 To 40) As Long
+    Dim setEjectorHits(1 To 40) As Long
+    Dim sid As Long
+    For i = 1 To nPin
+        sid = pinSetId(i)
+        If sid < 1 Then GoTo nextBushEv
+        For j = 1 To nShoulder
+            If NearSameAxisPlane(pinIdx(i), shoulderIdx(j)) Then
+                setShoulderHits(sid) = setShoulderHits(sid) + 1
                 Exit For
             End If
         Next j
-nextLong:
+        For j = 1 To nEjectorBush
+            If NearSameAxisPlane(pinIdx(i), ejectorBushIdx(j)) Then
+                setEjectorHits(sid) = setEjectorHits(sid) + 1
+                Exit For
+            End If
+        Next j
+        ' Unnamed short bushings on same plane also count as shoulder-like evidence.
+        For j = 1 To nShort
+            If NearSameAxisPlane(pinIdx(i), shortBushIdx(j), LEADER_PIN_BUSHING_PLANE_TOL) Then
+                If setShoulderHits(sid) = 0 And setEjectorHits(sid) = 0 Then
+                    setShoulderHits(sid) = setShoulderHits(sid) + 1
+                End If
+                SetStdCadRole pinIdx(i), "Leader Pin"
+                If StdCadRole(shortBushIdx(j)) = "" Then SetStdCadRole shortBushIdx(j), "Leader Pin Bushing"
+                Exit For
+            End If
+        Next j
+nextBushEv:
+    Next i
+
+    ' Pick PRIMARY set:
+    '   1) If 2+ clusters and we know ejector position -> farther from ejectors wins
+    '   2) Else cluster with more shoulder/LBB hits
+    '   3) Else single cluster / first cluster
+    Dim primarySet As Long
+    Dim secondarySet As Long
+    Dim farDist As Double, nearDist As Double
+    Dim farSet As Long, nearSet As Long
+    Dim bestHits As Long
+    primarySet = 0
+    secondarySet = 0
+
+    If nSets >= 2 And ejCount > 0 Then
+        farDist = -1#
+        nearDist = 1E+30
+        farSet = 1: nearSet = 1
+        For j = 1 To nSets
+            d = Abs(setPos(j) - ejMean)
+            If d > farDist Then farDist = d: farSet = j
+            If d < nearDist Then nearDist = d: nearSet = j
+        Next j
+        primarySet = farSet
+        If nearSet <> farSet Then secondarySet = nearSet
+        LogLine "Leader-pin sets: " & nSets & " clusters; PRIMARY=set" & primarySet & _
+                " (farther from ejectors, dist=" & FormatNumberForCsv(farDist) & _
+                ") SECONDARY=set" & secondarySet & " (nearer ejectors, dist=" & FormatNumberForCsv(nearDist) & _
+                ") ejMean=" & FormatNumberForCsv(ejMean)
+    Else
+        bestHits = -1
+        primarySet = 1
+        For j = 1 To nSets
+            If setShoulderHits(j) > bestHits Then
+                bestHits = setShoulderHits(j)
+                primarySet = j
+            End If
+        Next j
+        For j = 1 To nSets
+            If j <> primarySet And (setEjectorHits(j) > 0 Or setCount(j) > 0) Then
+                If secondarySet = 0 Or setEjectorHits(j) > setEjectorHits(secondarySet) Then secondarySet = j
+            End If
+        Next j
+        LogLine "Leader-pin sets: " & nSets & " cluster(s); PRIMARY=set" & primarySet & _
+                " (bushing/shoulder evidence) SECONDARY=set" & secondarySet
+    End If
+
+    For i = 1 To nPin
+        sid = pinSetId(i)
+        If sid = primarySet Then
+            gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
+            SetStdCadRole pinIdx(i), "Leader Pin"
+        ElseIf sid = secondarySet Or (secondarySet = 0 And setEjectorHits(sid) > setShoulderHits(sid)) Then
+            gStdLeaderPinSetByPart(pinIdx(i)) = "SECONDARY"
+            SetStdCadRole pinIdx(i), "Leader Pin"
+        ElseIf sid > 0 Then
+            ' Extra clusters: treat as secondary if nearer ejectors than primary.
+            If ejCount > 0 And Abs(setPos(sid) - ejMean) + 0.25 < Abs(setPos(primarySet) - ejMean) Then
+                gStdLeaderPinSetByPart(pinIdx(i)) = "SECONDARY"
+            Else
+                gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
+            End If
+            SetStdCadRole pinIdx(i), "Leader Pin"
+        End If
     Next i
 
     Dim nPri As Long, nSec As Long
@@ -10249,7 +10640,7 @@ nextLong:
         If gStdLeaderPinSetByPart(i) = "PRIMARY" Then nPri = nPri + 1
         If gStdLeaderPinSetByPart(i) = "SECONDARY" Then nSec = nSec + 1
     Next i
-    LogLine "Leader-pin sets (Qwen parity): PRIMARY=" & nPri & " (shoulder/LBB plane) SECONDARY=" & nSec & " (guided-ejector plane; does not decide A/B)"
+    LogLine "Leader-pin sets: PRIMARY=" & nPri & " (farther from ejectors / shoulder-LBB) SECONDARY=" & nSec & " (nearer ejectors; does not decide A/B)"
 End Sub
 
 ' Measure whether primary leader pins enter from the top (A) or bottom (B) of
@@ -10324,7 +10715,7 @@ Private Sub BuildStdStackAnalysisText(ByVal ax As Integer, ByVal nFull As Long, 
     gStdStackRules = gStdStackRules & "|Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation."
     gStdStackRules = gStdStackRules & "|Ejector-stack plates: thinner = Ejector Plate, thicker/lower = Bottom Ejector Plate."
     gStdStackRules = gStdStackRules & "|Rails detected as long narrow side-offset blocks in the ejector/rail zone; ejector plates as centered medium-width plates near rails."
-    gStdStackRules = gStdStackRules & "|Round guide hardware separated by diameter/length; primary leader pins matched to shoulder/LBB bushings on the same center plane."
+    gStdStackRules = gStdStackRules & "|Round guide hardware separated by diameter/length; when two leader-pin sets exist, PRIMARY = farther from ejectors (bushing-matched), SECONDARY = nearer ejectors."
     gStdStackRules = gStdStackRules & "|Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) applied before geometry-only rules."
     If nFull = 2 Then
         gStdStackRules = gStdStackRules & "|Two-half mold pattern: 2 full clamps + inner A/B blocks + thin rails/ejector from remaining thin-large parts."
