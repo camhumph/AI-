@@ -66,8 +66,19 @@ XT_CANDIDATES = (
     "XT_Export_CAD_Dimensions.csv",
     "raw/XT_Export_CAD_Dimensions.csv",
 )
-QUOTE_CANDIDATES = ("*quote*.xls*", "*Quote*.xls*", "documents/*quote*.xls*")
-STEEL_CANDIDATES = ("*steel*.xls*", "*J000*.xls*", "documents/*steel*.xls*")
+QUOTE_CANDIDATES = (
+    "*quote*.xls*",
+    "*Quote*.xls*",
+    "Quote Steel*.xls*",
+    "documents/*quote*.xls*",
+)
+STEEL_CANDIDATES = (
+    "*steel*.xls*",
+    "STEEL SHEET.xls*",
+    "STEEL SHEET.xlsx",
+    "*J000*.xls*",
+    "documents/*steel*.xls*",
+)
 
 
 def _norm_name(s: str) -> str:

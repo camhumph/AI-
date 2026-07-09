@@ -1,28 +1,10 @@
 import { useEffect, useState } from "react";
-import { Save, Mail, Send, FolderCog, CheckCircle2, XCircle, Brain, Play } from "lucide-react";
+import { Save, Mail, Send, FolderCog, CheckCircle2, XCircle, Brain, Play, AlertTriangle } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, Spinner } from "../components/ui";
-import { api } from "../api/client";
+import { api, type EmailSettings, type TrainingReport } from "../api/client";
 
 type Rate = { mode: string; rate: number; minimum: number };
-
-type EmailSettings = {
-  imap_host: string;
-  imap_port: number;
-  imap_user: string;
-  imap_password_set: boolean;
-  imap_folder: string;
-  imap_ssl: boolean;
-  smtp_host: string;
-  smtp_port: number;
-  smtp_user: string;
-  smtp_password_set: boolean;
-  smtp_from: string;
-  gmail_address: string;
-  configured: boolean;
-  smtp_configured: boolean;
-  credentials_path: string;
-};
 
 export default function SettingsPage() {
   const [rates, setRates] = useState<Record<string, Rate> | null>(null);
@@ -31,9 +13,10 @@ export default function SettingsPage() {
   const [smtpPassword, setSmtpPassword] = useState("");
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailSaved, setEmailSaved] = useState(false);
-  const [trainingStatus, setTrainingStatus] = useState<{ jobs_processed?: number; jobs_ok?: number } | null>(null);
+  const [trainingStatus, setTrainingStatus] = useState<TrainingReport | null>(null);
   const [trainingRunning, setTrainingRunning] = useState(false);
-  const [jobsRoot, setJobsRoot] = useState("");
+  const [trainingError, setTrainingError] = useState("");
+  const [jobsRoot, setJobsRoot] = useState("C:\\Users\\lenovo\\Downloads\\TRAINING");
 
   useEffect(() => {
     api.getPricing().then(setRates);
@@ -83,9 +66,12 @@ export default function SettingsPage() {
 
   const runTraining = async () => {
     setTrainingRunning(true);
+    setTrainingError("");
     try {
-      const result = await api.runTraining(jobsRoot || undefined);
+      const result = await api.runTraining(jobsRoot.trim() || undefined);
       setTrainingStatus(result);
+    } catch (e) {
+      setTrainingError(e instanceof Error ? e.message : "Training scan failed");
     } finally {
       setTrainingRunning(false);
     }
@@ -148,26 +134,96 @@ export default function SettingsPage() {
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Brain className="h-4 w-4 text-ink-300" />
-              <h3 className="text-sm font-semibold text-ink-100">AI Training from Quote + Steel Sheets</h3>
+              <h3 className="text-sm font-semibold text-ink-100">Training Scan (BMS + Standard)</h3>
             </div>
             <Button onClick={runTraining} disabled={trainingRunning}>
-              <Play className="h-4 w-4" /> {trainingRunning ? "Training..." : "Run Training Scan"}
+              <Play className="h-4 w-4" /> {trainingRunning ? "Scanning..." : "Run Training Scan"}
             </Button>
           </div>
           <p className="mb-3 text-xs text-ink-400">
-            Point at a folder of completed jobs (each with XT export + quote/steel Excel). The AI works backwards:
-            reads plate names from your steel sheets, matches them to CAD dimensions, and writes CORRECT_ME training files.
+            Point at your <strong>TRAINING</strong> folder. Each subfolder is scanned for steel sheets,
+            BOM/moldbase files, and XT exports. BMS jobs are cataloged for the macro BOM path; standard jobs
+            build CORRECT_ME training files and compare live rules vs your steel-sheet ground truth.
           </p>
           <Field
-            label="Jobs root folder (optional)"
+            label="Training folder"
             value={jobsRoot}
             onChange={setJobsRoot}
-            placeholder="C:\CMS_Local_Workspace\AI_Jobs"
+            placeholder="C:\Users\lenovo\Downloads\TRAINING"
           />
-          {trainingStatus && (
-            <p className="mt-3 text-xs text-ink-300">
-              Last run: {trainingStatus.jobs_ok ?? 0} / {trainingStatus.jobs_processed ?? 0} jobs trained successfully.
+          {trainingError && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-accent-rose">
+              <AlertTriangle className="h-3.5 w-3.5" /> {trainingError}
             </p>
+          )}
+          {trainingStatus && (
+            <div className="mt-4 space-y-4">
+              <div className="flex flex-wrap gap-3 text-xs">
+                <Badge tone="neutral">{trainingStatus.jobs_processed ?? 0} jobs scanned</Badge>
+                <Badge tone="success">{trainingStatus.jobs_ok ?? 0} OK</Badge>
+                <Badge tone="warning">{trainingStatus.bms_jobs ?? 0} BMS</Badge>
+                <Badge tone="neutral">{trainingStatus.standard_jobs ?? 0} standard</Badge>
+                <Badge tone={ (trainingStatus.overall_rules_accuracy_pct ?? 0) >= 90 ? "success" : "warning" }>
+                  Rules accuracy {trainingStatus.overall_rules_accuracy_pct ?? 0}%
+                </Badge>
+              </div>
+
+              {trainingStatus.results && trainingStatus.results.length > 0 && (
+                <div className="scrollbar-thin max-h-48 overflow-y-auto rounded border border-ink-700/30">
+                  <table className="w-full text-left text-xs">
+                    <thead className="sticky top-0 bg-ink-850 text-[10px] uppercase tracking-wider text-ink-500">
+                      <tr>
+                        <th className="px-3 py-2">Job</th>
+                        <th className="px-3 py-2">Type</th>
+                        <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Rules %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trainingStatus.results.map((r) => (
+                        <tr key={r.job_id} className="border-t border-ink-700/20">
+                          <td className="px-3 py-2 font-mono text-ink-200">{r.job_id}</td>
+                          <td className="px-3 py-2 uppercase text-ink-400">{r.base_type || "—"}</td>
+                          <td className="px-3 py-2 text-ink-400">{r.status}</td>
+                          <td className="px-3 py-2 text-ink-300">
+                            {r.rules_accuracy_pct ?? r.accuracy_pct ?? "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {trainingStatus.suggestions && trainingStatus.suggestions.length > 0 && (
+                <div>
+                  <div className="section-label mb-2">Rule & macro suggestions</div>
+                  <p className="mb-3 text-[11px] text-ink-500">
+                    These improve accuracy over time — not a guarantee of 100% on every mold. Apply high/critical items first.
+                  </p>
+                  <div className="space-y-2">
+                    {trainingStatus.suggestions.map((s, i) => (
+                      <div
+                        key={i}
+                        className="rounded border border-ink-700/25 bg-ink-900/40 px-3 py-2 text-xs"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Badge tone={s.priority === "critical" ? "warning" : s.priority === "high" ? "neutral" : "neutral"}>
+                            {s.priority}
+                          </Badge>
+                          <span className="font-semibold uppercase tracking-wider text-ink-300">{s.role}</span>
+                          {s.occurrences > 0 && (
+                            <span className="text-ink-600">×{s.occurrences}</span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-ink-400">{s.suggestion}</p>
+                        {s.examples && <p className="mt-1 text-[10px] text-ink-600">{s.examples}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </Card>
       </div>

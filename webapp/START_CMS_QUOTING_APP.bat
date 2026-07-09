@@ -24,6 +24,9 @@ set CMS_WORKSPACE_ROOT=C:\CMS_Local_Workspace
 rem Point the app at the real job folders on this machine (uncomment to use):
 rem set CMS_JOBS_ROOT=C:\CMS_Local_Workspace\AI_Jobs
 
+rem Training scan folder (BMS + standard jobs for Settings ^> Run Training Scan)
+set CMS_TRAINING_ROOT=C:\Users\lenovo\Downloads\TRAINING
+
 echo.
 echo CMS AI Quoting - checking Python...
 where python >nul 2>&1

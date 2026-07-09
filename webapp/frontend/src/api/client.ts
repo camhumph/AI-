@@ -187,6 +187,50 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface TrainingSuggestion {
+  priority: string;
+  role: string;
+  occurrences: number;
+  suggestion: string;
+  examples: string;
+  action: string;
+}
+
+export interface TrainingJobResult {
+  job_id: string;
+  folder?: string;
+  base_type?: string;
+  status?: string;
+  rules_accuracy_pct?: number;
+  accuracy_pct?: number;
+  components_matched?: number;
+  total_components?: number;
+  macro_guidance?: string;
+  detection_signals?: string[];
+}
+
+export interface TrainingReport {
+  jobs_processed?: number;
+  jobs_ok?: number;
+  jobs_skipped?: number;
+  bms_jobs?: number;
+  standard_jobs?: number;
+  overall_rules_accuracy_pct?: number;
+  results?: TrainingJobResult[];
+  suggestions?: TrainingSuggestion[];
+  output_dir?: string;
+  jobs_root?: string;
+}
+
+export interface TrainingSuggestions {
+  markdown: string;
+  suggestions: TrainingSuggestion[];
+  overall_rules_accuracy_pct: number;
+  jobs_processed: number;
+  bms_jobs: number;
+  standard_jobs: number;
+}
+
 export const api = {
   health: () => req<{ ok: boolean; email_configured: boolean; smtp_configured: boolean }>("/health"),
 
@@ -284,9 +328,11 @@ export const api = {
   archiveEmail: (id: string) =>
     req(`/email/messages/${encodeURIComponent(id)}/archive`, { method: "POST" }),
 
-  trainingStatus: () => req<{ jobs_processed?: number; jobs_ok?: number; output_dir?: string }>("/training/status"),
+  trainingStatus: () =>
+    req<TrainingReport>("/training/status"),
+  trainingSuggestions: () => req<TrainingSuggestions>("/training/suggestions"),
   runTraining: (jobsRoot?: string) =>
-    req<{ jobs_processed: number; jobs_ok: number; results: unknown[] }>("/training/run", {
+    req<TrainingReport>("/training/run", {
       method: "POST",
       body: JSON.stringify({ jobs_root: jobsRoot || null, scan: true }),
     }),

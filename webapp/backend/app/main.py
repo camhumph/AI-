@@ -1,4 +1,5 @@
 import mimetypes
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -481,9 +482,26 @@ def api_quote_email(message_id: str, body: QuoteEmailBody = QuoteEmailBody()):
 
 @app.get("/api/training/status")
 def api_training_status():
-    from geometry_classifier import train_from_quote_sheets  # type: ignore
+    _ensure_classifier_path()
+    from geometry_classifier import training_audit  # type: ignore
 
-    return train_from_quote_sheets.status()
+    return training_audit.status()
+
+
+@app.get("/api/training/suggestions")
+def api_training_suggestions():
+    _ensure_classifier_path()
+    from geometry_classifier import training_audit  # type: ignore
+
+    report = training_audit.status()
+    return {
+        "markdown": training_audit.suggestions_markdown(),
+        "suggestions": report.get("suggestions", []),
+        "overall_rules_accuracy_pct": report.get("overall_rules_accuracy_pct", 0),
+        "jobs_processed": report.get("jobs_processed", 0),
+        "bms_jobs": report.get("bms_jobs", 0),
+        "standard_jobs": report.get("standard_jobs", 0),
+    }
 
 
 class TrainingRunBody(BaseModel):
@@ -492,21 +510,30 @@ class TrainingRunBody(BaseModel):
     scan: bool = True
 
 
-@app.post("/api/training/run")
-def api_training_run(body: TrainingRunBody):
-    """Reverse-train the classifier from historical quote + steel sheets."""
+def _ensure_classifier_path():
     import sys
 
     classifier_dir = config.GEOMETRY_CLASSIFIER_DIR
-    if str(classifier_dir) not in sys.path:
-        sys.path.insert(0, str(classifier_dir.parent))
-    try:
-        from geometry_classifier import train_from_quote_sheets  # type: ignore
+    parent = str(classifier_dir.parent)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
 
-        result = train_from_quote_sheets.run_training(
+
+@app.post("/api/training/run")
+def api_training_run(body: TrainingRunBody):
+    """Scan TRAINING folder (BMS + standard), build CORRECT_ME, audit rules, suggest fixes."""
+    _ensure_classifier_path()
+    try:
+        from geometry_classifier import training_audit  # type: ignore
+
+        default_root = os.environ.get(
+            "CMS_TRAINING_ROOT",
+            r"C:\Users\lenovo\Downloads\TRAINING",
+        )
+        jobs_root = body.jobs_root or default_root
+        result = training_audit.run_full_audit(
+            jobs_root=jobs_root if body.scan else None,
             manifest_path=body.manifest_path,
-            jobs_root=body.jobs_root or str(config.JOBS_ROOT),
-            scan=body.scan,
         )
         return result
     except Exception as e:
