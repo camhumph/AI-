@@ -493,6 +493,15 @@ def api_training_status():
     return training_audit.status()
 
 
+@app.get("/api/training/qwen-live")
+def api_training_qwen_live(tail: int = 12000):
+    """Tail of the live Qwen/Ollama stream while training is running."""
+    _ensure_classifier_path()
+    from geometry_classifier import training_audit  # type: ignore
+
+    return training_audit.qwen_live_output(tail_chars=max(0, min(tail, 50000)))
+
+
 @app.post("/api/training/cancel")
 def api_training_cancel():
     """Stop the running training scan (kills Ollama if Qwen is mid-think)."""

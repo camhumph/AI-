@@ -20,6 +20,7 @@ export default function SettingsPage() {
   const [useQwen, setUseQwen] = useState(true);
   const [exportXt, setExportXt] = useState(true);
   const [qwenModel, setQwenModel] = useState("qwen3.5:9b");
+  const [qwenLiveText, setQwenLiveText] = useState("");
 
   const [cancelling, setCancelling] = useState(false);
 
@@ -36,6 +37,19 @@ export default function SettingsPage() {
     }, 1500);
     return () => clearInterval(iv);
   }, [trainingStatus?.running, trainingRunning]);
+
+  useEffect(() => {
+    if (!trainingStatus?.qwen_thinking) {
+      setQwenLiveText("");
+      return;
+    }
+    const poll = () => {
+      api.qwenLive().then((r) => setQwenLiveText(r.text || "")).catch(() => {});
+    };
+    poll();
+    const iv = setInterval(poll, 2000);
+    return () => clearInterval(iv);
+  }, [trainingStatus?.qwen_thinking, trainingStatus?.current_job]);
 
   const saveEmail = async () => {
     if (!emailSettings) return;
@@ -253,15 +267,38 @@ export default function SettingsPage() {
                 />
               </div>
               {trainingStatus?.qwen_thinking && (
-                <div className="mb-2 flex items-center gap-2 rounded-xl border border-accent-amber/30 bg-accent-amber/10 px-3 py-2 text-xs text-accent-amber">
-                  <Brain className="h-3.5 w-3.5 animate-pulse" />
-                  <span>
-                    Qwen is thinking
-                    {trainingStatus.qwen_elapsed_sec
-                      ? ` — ${formatElapsed(trainingStatus.qwen_elapsed_sec)} on this job`
-                      : " — loading model / generating…"}
-                    {trainingStatus.qwen_model ? ` · ${trainingStatus.qwen_model}` : ""}
-                  </span>
+                <div className="mb-2 space-y-2">
+                  <div className="flex items-center gap-2 rounded-xl border border-accent-amber/30 bg-accent-amber/10 px-3 py-2 text-xs text-accent-amber">
+                    <Brain className="h-3.5 w-3.5 animate-pulse" />
+                    <span>
+                      Qwen is thinking
+                      {trainingStatus.qwen_elapsed_sec
+                        ? ` — ${formatElapsed(trainingStatus.qwen_elapsed_sec)} on this job`
+                        : " — loading model / generating…"}
+                      {trainingStatus.qwen_model ? ` · ${trainingStatus.qwen_model}` : ""}
+                    </span>
+                  </div>
+                  <div className="rounded-xl border border-ink-700/40 bg-ink-900/60 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+                      Live Qwen output
+                    </div>
+                    <div className="mt-1 font-mono text-[10px] text-ink-500">
+                      Open in Notepad:{" "}
+                      <span className="text-ink-300">
+                        {trainingStatus.qwen_live_output ||
+                          "C:\\CMS_AI\\geometry_classifier\\data\\training\\qwen_live_output.txt"}
+                      </span>
+                    </div>
+                    {qwenLiveText ? (
+                      <pre className="scrollbar-thin mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-ink-300">
+                        {qwenLiveText}
+                      </pre>
+                    ) : (
+                      <p className="mt-2 text-[10px] text-ink-500">
+                        Waiting for Ollama to stream text… (updates every 2s)
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
               <div className="text-sm text-ink-100">
@@ -307,7 +344,13 @@ export default function SettingsPage() {
           {trainingStatus && (
             <div className="mt-4 space-y-4">
               <div className="flex flex-wrap gap-3 text-xs">
-                <Badge tone="neutral">{trainingStatus.jobs_processed ?? 0} jobs scanned</Badge>
+                <Badge tone="neutral">
+                  {trainingStatus.jobs_completed ?? trainingStatus.jobs_processed ?? 0}{" "}
+                  {trainingStatus.running ? "jobs done" : "jobs scanned"}
+                  {trainingStatus.running && trainingStatus.job_total
+                    ? ` · on ${trainingStatus.job_index ?? 0}/${trainingStatus.job_total}`
+                    : ""}
+                </Badge>
                 <Badge tone="success">{trainingStatus.jobs_ok ?? 0} OK</Badge>
                 {(trainingStatus.xt_exported_jobs ?? 0) > 0 && (
                   <Badge tone="brand">{trainingStatus.xt_exported_jobs} XT exported</Badge>

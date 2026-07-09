@@ -216,6 +216,7 @@ export interface TrainingJobResult {
 
 export interface TrainingReport {
   jobs_processed?: number;
+  jobs_completed?: number;
   jobs_ok?: number;
   jobs_skipped?: number;
   bms_jobs?: number;
@@ -237,6 +238,7 @@ export interface TrainingReport {
   cancelled?: boolean;
   qwen_thinking?: boolean;
   qwen_elapsed_sec?: number;
+  qwen_live_output?: string;
   elapsed_sec?: number;
   started_at?: string;
   updated_at?: string;
@@ -358,6 +360,10 @@ export const api = {
 
   trainingStatus: () =>
     req<TrainingReport>("/training/status"),
+  qwenLive: (tail = 12000) =>
+    req<{ path: string; text: string; size: number; exists: boolean; error?: string }>(
+      `/training/qwen-live?tail=${tail}`
+    ),
   trainingSuggestions: () => req<TrainingSuggestions>("/training/suggestions"),
   cancelTraining: () =>
     req<TrainingReport>("/training/cancel", { method: "POST", body: "{}" }),

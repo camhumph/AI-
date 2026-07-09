@@ -23,6 +23,7 @@ DATA_DIR = BASE / "data" / "training"
 REPORT_PATH = DATA_DIR / "last_audit_report.json"
 SUGGESTIONS_PATH = DATA_DIR / "rule_suggestions.md"
 PROGRESS_PATH = DATA_DIR / "training_progress.json"
+QWEN_LIVE_OUTPUT = DATA_DIR / "qwen_live_output.txt"
 
 _progress_lock = threading.Lock()
 _cancel_event = threading.Event()
@@ -44,6 +45,8 @@ _progress: dict = {
     "cancelled": False,
     "qwen_thinking": False,
     "qwen_elapsed_sec": 0,
+    "qwen_live_output": "",
+    "jobs_completed": 0,
     "started_at": "",
     "elapsed_sec": 0,
 }
@@ -401,7 +404,65 @@ def _audit_predictions_against_truth(
     }
 
 
-def run_qwen_on_xt(xt_path: Path, model: str = "qwen3.5:9b", timeout_minutes: int = 0) -> dict:
+def _overall_accuracy(results: list[dict], key: str = "audit") -> float:
+    total_c = total_ok = 0
+    for r in results:
+        audit = r.get(key, {})
+        if audit.get("compared"):
+            total_c += audit["compared"]
+            total_ok += audit.get("correct", 0)
+    return round(100 * total_ok / max(total_c, 1), 1) if total_c else 0.0
+
+
+def _summary_fields_from_results(
+    results: list[dict],
+    jobs_root: str,
+    use_qwen: bool,
+    qwen_model: str,
+    export_xt: bool,
+) -> dict:
+    """Build summary counters for live progress updates (no file writes)."""
+    return {
+        "jobs_processed": len(results),
+        "jobs_completed": len(results),
+        "jobs_ok": sum(1 for r in results if r.get("status") in ("ok", "ok_bms", "ok_steel_only")),
+        "jobs_skipped": sum(1 for r in results if r.get("status") == "skipped"),
+        "bms_jobs": sum(1 for r in results if r.get("base_type") == "bms"),
+        "standard_jobs": sum(1 for r in results if r.get("base_type") == "standard"),
+        "overall_rules_accuracy_pct": _overall_accuracy(results, "audit"),
+        "overall_qwen_accuracy_pct": _overall_accuracy(results, "qwen_audit"),
+        "use_qwen": use_qwen,
+        "qwen_model": qwen_model if use_qwen else "",
+        "export_xt": export_xt,
+        "xt_exported_jobs": sum(
+            1 for r in results if r.get("xt_export", {}).get("status") == "exported"
+        ),
+        "results": results,
+        "output_dir": str(OUT_DIR),
+        "jobs_root": jobs_root,
+    }
+
+
+def _flush_progress_results(
+    results: list[dict],
+    jobs_root: str,
+    use_qwen: bool,
+    qwen_model: str,
+    export_xt: bool,
+    **extra,
+) -> None:
+    """Push completed job counts + partial results table into the live progress file."""
+    fields = _summary_fields_from_results(results, jobs_root, use_qwen, qwen_model, export_xt)
+    fields.update(extra)
+    _write_progress(**fields)
+
+
+def run_qwen_on_xt(
+    xt_path: Path,
+    model: str = "qwen3.5:9b",
+    timeout_minutes: int = 0,
+    job_id: str = "",
+) -> dict:
     """Run Ollama/Qwen on one XT export with live thinking heartbeats (training only)."""
     global _active_ollama_proc
     from geometry_classifier.qwen_classify_xt_csv import (  # noqa: E402
@@ -439,10 +500,29 @@ def run_qwen_on_xt(xt_path: Path, model: str = "qwen3.5:9b", timeout_minutes: in
         }
 
     started = time.time()
+    live_header = (
+        f"Job: {job_id or Path(xt_path).parent.name}\n"
+        f"XT: {xt_path}\n"
+        f"Model: {model}\n"
+        f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Parts: {n_rows}\n"
+        f"{'=' * 60}\n\n"
+    )
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    QWEN_LIVE_OUTPUT.write_text(live_header + "(waiting for Ollama output…)\n", encoding="utf-8")
+
+    def _write_live_snapshot() -> None:
+        raw_so_far = "".join(stdout_chunks)
+        try:
+            QWEN_LIVE_OUTPUT.write_text(live_header + raw_so_far, encoding="utf-8")
+        except Exception:
+            pass
+
     _write_progress(
         phase="qwen",
         qwen_thinking=True,
         qwen_elapsed_sec=0,
+        qwen_live_output=str(QWEN_LIVE_OUTPUT),
         detail=f"Ollama loading {model} · prompt {prompt_chars:,} chars · {n_rows} parts",
         message=f"Qwen is thinking on {Path(xt_path).name}…",
     )
@@ -538,13 +618,16 @@ def run_qwen_on_xt(xt_path: Path, model: str = "qwen3.5:9b", timeout_minutes: in
             mins = int(elapsed // 60)
             secs = int(elapsed % 60)
             out_len = sum(len(c) for c in stdout_chunks)
+            _write_live_snapshot()
             _write_progress(
                 phase="qwen",
                 qwen_thinking=True,
                 qwen_elapsed_sec=int(elapsed),
+                qwen_live_output=str(QWEN_LIVE_OUTPUT),
                 detail=(
                     f"Qwen thinking… {mins}m {secs:02d}s · model {model} · "
-                    f"{n_rows} parts · output {out_len:,} chars so far"
+                    f"{n_rows} parts · output {out_len:,} chars so far · "
+                    f"live file: {QWEN_LIVE_OUTPUT}"
                 ),
                 message=f"Qwen is thinking on current job ({mins}m {secs:02d}s)…",
             )
@@ -569,6 +652,17 @@ def run_qwen_on_xt(xt_path: Path, model: str = "qwen3.5:9b", timeout_minutes: in
 
     raw = "".join(stdout_chunks)
     err = "".join(stderr_chunks).strip()
+    _write_live_snapshot()
+    if job_id:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        raw_path = OUT_DIR / f"{job_id}_qwen_raw.txt"
+        try:
+            raw_path.write_text(live_header + raw + (f"\n\n--- stderr ---\n{err}" if err else ""), encoding="utf-8")
+        except Exception:
+            raw_path = None
+    else:
+        raw_path = None
+
     if proc.returncode not in (0, None) and not raw.strip():
         _write_progress(qwen_thinking=False, detail=f"Qwen failed: {err[:200]}")
         return {
@@ -593,6 +687,7 @@ def run_qwen_on_xt(xt_path: Path, model: str = "qwen3.5:9b", timeout_minutes: in
             "qwen_model": model,
             "elapsed_sec": elapsed,
             "data": data,
+            "raw_output": str(raw_path) if raw_path else "",
         }
     except Exception as exc:
         fallback = classify_geometry(rows)
@@ -868,6 +963,7 @@ def _run_audit_worker(
     export_xt: bool = True,
 ) -> dict:
     job_folders: list[tuple[str, Path]] = []
+    progress_jobs_root = jobs_root or ""
 
     if manifest_path:
         for entry in train_from_quote_sheets._load_manifest(Path(manifest_path)):
@@ -956,6 +1052,11 @@ def _run_audit_worker(
             _write_progress(detail=f"{job_id} = BMS — cataloging BOM/steel (no AI classify)")
             entry.update(process_bms_job(job_id, folder))
             results.append(entry)
+            _flush_progress_results(
+                results, progress_jobs_root, use_qwen, qwen_model, export_xt,
+                job_index=idx + 1,
+                current_job=job_id,
+            )
             continue
 
         _write_progress(detail=f"{job_id} = {base_type} — matching steel sheet to CAD…")
@@ -987,7 +1088,15 @@ def _run_audit_worker(
                 message=f"Starting Qwen ({qwen_model}) on {job_id}…",
                 detail=f"XT: {Path(xt_path).name}",
             )
-            qwen_out = run_qwen_on_xt(Path(xt_path), model=qwen_model, timeout_minutes=0)
+            _flush_progress_results(
+                results, progress_jobs_root, use_qwen, qwen_model, export_xt,
+                job_index=idx + 1,
+                current_job=job_id,
+                phase="qwen",
+            )
+            qwen_out = run_qwen_on_xt(
+                Path(xt_path), model=qwen_model, timeout_minutes=0, job_id=job_id
+            )
             entry["qwen_ran"] = qwen_out.get("qwen_ran", False)
             entry["qwen_elapsed_sec"] = qwen_out.get("elapsed_sec", 0)
             if qwen_out.get("error"):
@@ -1009,8 +1118,13 @@ def _run_audit_worker(
                 entry["qwen_accuracy_pct"] = q_audit.get("accuracy_pct", 0)
 
         results.append(entry)
+        _flush_progress_results(
+            results, progress_jobs_root, use_qwen, qwen_model, export_xt,
+            job_index=idx + 1,
+            current_job=job_id,
+        )
 
-    return _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
+    return _finalize_summary(results, progress_jobs_root, use_qwen, qwen_model, export_xt)
 
 
 def _finalize_summary(
@@ -1020,6 +1134,7 @@ def _finalize_summary(
     qwen_model: str,
     export_xt: bool = True,
 ) -> dict:
+    summary = _summary_fields_from_results(results, jobs_root, use_qwen, qwen_model, export_xt)
     all_mismatches: list[dict] = []
     qwen_mismatches: list[dict] = []
     for r in results:
@@ -1045,41 +1160,13 @@ def _finalize_summary(
             }
         )
 
-    summary = {
-        "jobs_processed": len(results),
-        "jobs_ok": sum(1 for r in results if r.get("status") in ("ok", "ok_bms", "ok_steel_only")),
-        "jobs_skipped": sum(1 for r in results if r.get("status") == "skipped"),
-        "bms_jobs": sum(1 for r in results if r.get("base_type") == "bms"),
-        "standard_jobs": sum(1 for r in results if r.get("base_type") == "standard"),
-        "overall_rules_accuracy_pct": _overall_accuracy(results, "audit"),
-        "overall_qwen_accuracy_pct": _overall_accuracy(results, "qwen_audit"),
-        "use_qwen": use_qwen,
-        "qwen_model": qwen_model if use_qwen else "",
-        "export_xt": export_xt,
-        "xt_exported_jobs": sum(
-            1 for r in results if r.get("xt_export", {}).get("status") == "exported"
-        ),
-        "results": results,
-        "suggestions": suggestions,
-        "output_dir": str(OUT_DIR),
-        "jobs_root": jobs_root,
-    }
+    summary["suggestions"] = suggestions
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     _write_suggestions_md(suggestions, summary)
     (DATA_DIR / "last_training_run.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
-
-
-def _overall_accuracy(results: list[dict], key: str = "audit") -> float:
-    total_c = total_ok = 0
-    for r in results:
-        audit = r.get(key, {})
-        if audit.get("compared"):
-            total_c += audit["compared"]
-            total_ok += audit.get("correct", 0)
-    return round(100 * total_ok / max(total_c, 1), 1) if total_c else 0.0
 
 
 def _write_suggestions_md(suggestions: list[dict], summary: dict) -> None:
@@ -1123,6 +1210,20 @@ def _write_suggestions_md(suggestions: list[dict], summary: dict) -> None:
     SUGGESTIONS_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
+def qwen_live_output(tail_chars: int = 12000) -> dict:
+    """Return the tail of the live Qwen stream file for the in-progress training job."""
+    path = QWEN_LIVE_OUTPUT
+    if not path.exists():
+        return {"path": str(path), "text": "", "size": 0, "exists": False}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return {"path": str(path), "text": "", "size": 0, "exists": True, "error": str(exc)}
+    if tail_chars > 0 and len(text) > tail_chars:
+        text = "…\n" + text[-tail_chars:]
+    return {"path": str(path), "text": text, "size": path.stat().st_size, "exists": True}
+
+
 def status() -> dict:
     """Live progress always wins while a scan is running or just cancelled."""
     out: dict = {"jobs_processed": 0, "output_dir": str(OUT_DIR), "suggestions": []}
@@ -1130,6 +1231,8 @@ def status() -> dict:
     # Don't let a stale report overwrite a live/cancelled progress state
     if prog.get("running") or prog.get("phase") in ("cancelled", "error", "starting", "scan", "xt_export", "qwen"):
         out.update(prog)
+        if not out.get("qwen_live_output"):
+            out["qwen_live_output"] = str(QWEN_LIVE_OUTPUT)
         if not prog.get("running") and prog.get("phase") == "done" and REPORT_PATH.exists():
             try:
                 report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
