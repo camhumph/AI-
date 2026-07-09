@@ -18,8 +18,10 @@ TRAINING_HANDOFF = LOCAL_WORKSPACE / "cms_training_xt.txt"
 TRAINING_DONE = LOCAL_WORKSPACE / "cms_training_xt_done.txt"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SW_EXE_DEFAULT = r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe"
-SW_PROGID_DEFAULT = "SldWorks.Application.30"
+# SolidWorks 2023 on this shop PC is the "(3)" install.
+# Plain "SOLIDWORKS\SLDWORKS.exe" opens 2025 — do not use that.
+SW_EXE_DEFAULT = r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
+SW_PROGID_DEFAULT = "SldWorks.Application.31"  # 31 = SW 2023 (32=2024, 33=2025)
 
 CAD_PRIORITY: dict[str, int] = {
     ".sldasm": 100,

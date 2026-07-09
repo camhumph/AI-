@@ -34,7 +34,8 @@ Const PROPOSAL_TOTAL_CELL = "D38"
 Const PROPOSAL_TOTAL_SOURCE_CELL = ""   ' leave blank until you tell us the grand-total cell
 
 ' SolidWorks paths  -- this machine has more than one version installed.
-' SolidWorks 2023 is the "(3)" install; the plain path opens 2025.
+' ALWAYS use SolidWorks 2023: the "(3)" install + ProgID .31
+' The plain "SOLIDWORKS\SLDWORKS.EXE" path opens 2025 — never use that.
 Const SW_EXE    = "C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
 Const SW_PROGID = "SldWorks.Application.31"   ' 31 = SolidWorks 2023 (32=2024, 33=2025)
 Const SW_MACRO = "C:\CMS_Local_Workspace\Module6121.swb"   ' source macro first; .swp fallback below
@@ -342,15 +343,16 @@ Function LaunchSolidWorksAndMacro()
             WScript.Sleep 3000
             On Error Resume Next
             Set sw = GetObject(, SW_PROGID)
-            If sw Is Nothing Then Set sw = GetObject(, "SldWorks.Application")
+            ' Do NOT fall back to generic SldWorks.Application — that can attach to 2025
             On Error GoTo 0
             tries = tries + 1
         Loop Until (Not (sw Is Nothing)) Or tries > 20
         If sw Is Nothing Then
-            LogStep "SolidWorks 2023 did not start in time; macro not run."
+            LogStep "SolidWorks 2023 did not start in time at: " & SW_EXE & "; macro not run."
             LaunchSolidWorksAndMacro = False
             Exit Function
         End If
+        LogStep "Connected to SolidWorks 2023 (" & SW_PROGID & ")"
     End If
 
     On Error Resume Next

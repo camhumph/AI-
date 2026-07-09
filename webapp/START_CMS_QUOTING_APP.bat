@@ -27,6 +27,10 @@ rem set CMS_JOBS_ROOT=C:\CMS_Local_Workspace\AI_Jobs
 rem Training scan folder (BMS + standard jobs for Settings ^> Run Training Scan)
 set CMS_TRAINING_ROOT=C:\Users\lenovo\Downloads\TRAINING
 
+rem SolidWorks 2023 only — "(3)" install; plain SOLIDWORKS path is 2025 on this PC
+set CMS_SOLIDWORKS_EXE=C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE
+set CMS_SOLIDWORKS_PROGID=SldWorks.Application.31
+
 echo.
 echo CMS AI Quoting - checking Python...
 where python >nul 2>&1
