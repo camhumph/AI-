@@ -24,3 +24,16 @@ Plate order on steel sheet (rows starting at 19):
 4. ID Pot
 5. OD Pot
 6. BCP
+
+## Tempcraft / Howmet BOM trap (Stock Weight ≠ Length)
+
+Tempcraft Base BOM columns are:
+
+| Lth (in.) | Wth/O.D. (in.) | Hgt/I.D. (in.) | Stock Weight |
+|---|---|---|---|
+| 1.375 | 15.875 | 18.000 | **117.87** (lbs) |
+
+**Never** take Stock Weight as a plate dimension. PDF parse must use the first
+three finished-size decimals (Lth/Wth/Hgt), not `PickThreeLargest` (that bug
+produced TCP Length = 117.87). Prefer CAD finished bbox when present; BOM is
+backup only after Stock-Weight rejection.

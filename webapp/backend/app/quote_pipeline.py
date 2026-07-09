@@ -245,17 +245,59 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     }
 
 
+def _folder_looks_like_bms(folder: Path) -> bool:
+    """Detect Tempcraft / BMS pot-block jobs that must never get A/B/rail AI roles."""
+    blob = folder.name.lower()
+    if any(m in blob for m in ("bms", "tempcraft", "howmet", "potblock", "pot-block", "pot_block")):
+        return True
+    try:
+        for path in folder.rglob("*"):
+            if not path.is_file():
+                continue
+            low = path.name.lower()
+            if any(
+                m in low
+                for m in (
+                    "rfq_mb_asm",
+                    "mb_asm",
+                    "smed",
+                    "holder block",
+                    "pot block",
+                    "id holder",
+                    "od holder",
+                )
+            ):
+                return True
+            if path.suffix.lower() in (".csv", ".txt", ".log") and path.stat().st_size < 2_000_000:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")[:8000].upper()
+                except Exception:
+                    continue
+                if "ID HOLDER" in text or "OD HOLDER" in text or "SMED" in text or "POT BLOCK" in text:
+                    return True
+                if "BASE TYPE: POT" in text or "BOM-DRIVEN" in text:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 def sync_completed_job(job_id: str, folder_path: str, base_type: str = "standard") -> dict:
     """Import finished macro outputs into the webapp registry."""
     folder = Path(folder_path)
     if not folder.exists():
         raise FileNotFoundError(f"Completed job folder not found: {folder_path}")
 
+    # Never let a mis-tagged standard sync run A/B/rail classify on pot-block jobs.
+    resolved_type = (base_type or "standard").strip().lower()
+    if resolved_type != "bms" and _folder_looks_like_bms(folder):
+        resolved_type = "bms"
+
     job = jobs.import_from_folder(str(folder))
-    jobs.update_meta(job_id, base_type=base_type, quote_status="completed", source_folder=str(folder))
+    jobs.update_meta(job_id, base_type=resolved_type, quote_status="completed", source_folder=str(folder))
 
     # Auto-classify if XT exists but no classification yet (non-BMS).
-    if base_type != "bms" and job.get("has_raw_csv") and not job.get("has_classification"):
+    if resolved_type != "bms" and job.get("has_raw_csv") and not job.get("has_classification"):
         try:
             job = jobs.classify_job(job_id, mode="rules")
         except Exception:

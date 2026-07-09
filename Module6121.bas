@@ -180,7 +180,8 @@ Private Const GMAIL_ADDRESS As String = "cms1engineering@gmail.com"
 Private Const EMAIL_CREDENTIALS_FILE As String = "C:\CMS_Local_Workspace\cms_data\email_credentials.json"
 ' Proposal email behavior: "AUTO" sends with no prompt (old behavior),
 ' "PROMPT" asks before sending, "OFF" only writes the preview file.
-Private Const PROPOSAL_EMAIL_MODE As String = "PROMPT"
+' Price purchased parts in the macro / CSV only — do not auto-email proposals.
+Private Const PROPOSAL_EMAIL_MODE As String = "OFF"
 Private Const QUOTE_SHEET_NAME As String = "QuoteWorksheet"
 Private Const POTBLOCK_STEEL_TYPE As String = "#2 4140"
 ' Quote worksheet shows STOCK sizes = finished size rounded UP to the next 1/4".
@@ -2466,10 +2467,12 @@ On Error GoTo ErrHandler
     End If
     easmPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".easm")
     igsPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".igs")
-    ' DXF and X_T go in the MAIN job folder (not the base subfolder).
+    ' DXF, X_T, STL, and ISO JPGs go in the MAIN job folder (not only base\).
     xtPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".x_t")
     dxfPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".dxf")
-    stlPath = GetUniqueFilePath(outputFolder & "\" & baseName & ".stl")
+    stlPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".stl")
+    Dim stlBasePath As String
+    stlBasePath = GetUniqueFilePath(outputFolder & "\" & baseName & ".stl")
 
     ' WHOLE-ASSEMBLY STL first (one file for the entire mold — required).
     ' Force ONE STL for the whole assembly (otherwise SW writes per-component STLs).
@@ -2478,6 +2481,14 @@ On Error GoTo ErrHandler
     On Error GoTo ErrHandler
     SaveModelAs swModel, stlPath
     LogLine "Whole-assembly STL written: " & stlPath
+    ' Also keep a copy under base\ for the comparison package.
+    On Error Resume Next
+    If LCase(stlPath) <> LCase(stlBasePath) Then
+        Dim fsoStl As Object
+        Set fsoStl = CreateObject("Scripting.FileSystemObject")
+        If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
+    End If
+    On Error GoTo ErrHandler
 
     ' Native SolidWorks copy of the whole base + required deliverables.
     SaveModelAs swModel, sldPath
@@ -4090,8 +4101,10 @@ On Error GoTo ErrHandler
         If InStr(nm, "BOM") > 0 Then score = score + 50
         If InStr(nm, "RFQ") > 0 Then score = score + 12
         If InStr(nm, "HTE") > 0 Then score = score + 12     ' customer (Howmet/Tempcraft) BOM prefix
-        If ext = "pdf" Then score = score + 8
-        If ext = "xlsx" Or ext = "xls" Or ext = "xlsm" Then score = score + 6
+        If InStr(nm, "BASE") > 0 And InStr(nm, "BOM") > 0 Then score = score + 20
+        If ext = "xlsm" Then score = score + 10             ' prefer live Tempcraft .xlsm over PDF export
+        If ext = "xlsx" Or ext = "xls" Then score = score + 8
+        If ext = "pdf" Then score = score + 4               ' PDF last — layout OCR often mixes Stock Weight into dims
         If CurrentJobNumber <> "" Then
             If InStr(nm, UCase(CurrentJobNumber)) > 0 Then score = score + 5
         End If
@@ -4099,6 +4112,7 @@ On Error GoTo ErrHandler
             If InStr(nm, UCase(CustomerJobNumber)) > 0 Then score = score + 15
         End If
         If InStr(nm, "QUOTE") > 0 Or InStr(nm, "PROPOSAL") > 0 Then score = score - 40
+        If InStr(nm, "DWG") > 0 And InStr(nm, "BOM") = 0 Then score = score - 30
         If score > bestScore Then bestScore = score: bestPath = p
     Next i
     FindCustomerBomFile = bestPath
@@ -4251,6 +4265,18 @@ On Error GoTo ErrHandler
             If thkCol > 0 Then tt = Val(GetArrayValue(data, r, thkCol))
             If widCol > 0 Then ww = Val(GetArrayValue(data, r, widCol))
             If lenCol > 0 Then ll = Val(GetArrayValue(data, r, lenCol))
+            ' Tempcraft Lth/Wth/Hgt are finished sizes in arbitrary column order —
+            ' always sort into L>=W>=T. Never leave Stock Weight in a size slot.
+            If tt > 0 And ww > 0 And ll > 0 Then
+                Dim srtL As Double, srtW As Double, srtT As Double
+                SortThreeDimensions tt, ww, ll, srtL, srtW, srtT
+                ' Reject absurd "length" that is really stock weight (lbs >> plate size).
+                If BomDimsLookLikeStockWeight(srtT, srtW, srtL) Then
+                    tt = 0#: ww = 0#: ll = 0#
+                Else
+                    tt = srtT: ww = srtW: ll = srtL
+                End If
+            End If
             If Not (tt > 0 And ww > 0 And ll > 0) Then
                 ' No clean dimension columns: look for a combined size cell
                 ' anywhere in the row, e.g. "1.375 X 15.875 X 18".
@@ -4258,15 +4284,22 @@ On Error GoTo ErrHandler
                 Dim sa As Double, sb As Double, scc As Double, sl As Double, sW As Double, sT As Double
                 For cc2 = cLo To cHi
                     cellTxt = GetArrayValue(data, r, cc2)
+                    If InStr(UCase(cellTxt), "LBS") > 0 Or InStr(UCase(cellTxt), "WEIGHT") > 0 Then GoTo NextBomSizeCell
                     If InStr(cellTxt, ".") > 0 Then
                         sn = ExtractDecimalNumbers(cellTxt, snums)
                         If sn >= 3 Then
-                            PickThreeLargest snums, sn, sa, sb, scc
-                            SortThreeDimensions sa, sb, scc, sl, sW, sT
-                            tt = sT: ww = sW: ll = sl
-                            Exit For
+                            ' Prefer first three decimals (finished sizes), not three largest
+                            ' (which pulls Stock Weight into Length).
+                            If PickThreeFinishedSizeDims(snums, sn, sa, sb, scc) Then
+                                SortThreeDimensions sa, sb, scc, sl, sW, sT
+                                If Not BomDimsLookLikeStockWeight(sT, sW, sl) Then
+                                    tt = sT: ww = sW: ll = sl
+                                    Exit For
+                                End If
+                            End If
                         End If
                     End If
+NextBomSizeCell:
                 Next cc2
             End If
             ' Still nothing: parse fractional dims embedded in the description,
@@ -4363,14 +4396,35 @@ End Function
 
 Private Sub FindBomDimensionColumnsInArrayRow(ByVal data As Variant, ByVal r As Long, ByVal cLo As Long, ByVal cHi As Long, _
                                              ByRef thkCol As Long, ByRef widCol As Long, ByRef lenCol As Long)
+    ' Tempcraft / Howmet BOMs use Lth / Wth.O.D. / Hgt.I.D. — those are finished
+    ' size columns, NOT "thickness=Hgt". Map them as three size columns; callers
+    ' must SortThreeDimensions so Stock Weight is never treated as a size.
     thkCol = 0: widCol = 0: lenCol = 0
     Dim c As Long, t As String
+    Dim lthCol As Long, wthCol As Long, hgtCol As Long
+    lthCol = 0: wthCol = 0: hgtCol = 0
     For c = cLo To cHi
         t = NormalizeText(GetArrayValue(data, r, c))
-        If thkCol = 0 And (t = "THICKNESS" Or t = "THICK" Or t = "THK" Or t = "T" Or InStr(t, "HGT") > 0 Or InStr(t, "HEIGHT") > 0 Or InStr(t, "I D") > 0) Then thkCol = c
-        If widCol = 0 And (t = "WIDTH" Or t = "WIDE" Or t = "W" Or InStr(t, "WTH") > 0 Or InStr(t, "O D") > 0) Then widCol = c
-        If lenCol = 0 And (t = "LENGTH" Or t = "LONG" Or t = "LEN" Or t = "L" Or InStr(t, "LTH") > 0) Then lenCol = c
+        ' Never treat Stock Weight / Volume / Area as a dimension column.
+        If InStr(t, "WEIGHT") > 0 Or InStr(t, "VOLUME") > 0 Or InStr(t, "AREA") > 0 Or InStr(t, "STOCK WT") > 0 Then GoTo NextBomDimCol
+        If InStr(t, "ORACLE") > 0 Or InStr(t, "UOM") > 0 Then GoTo NextBomDimCol
+        If lthCol = 0 And (InStr(t, "LTH") > 0 Or t = "LTH" Or t = "LTH IN") Then lthCol = c
+        If wthCol = 0 And (InStr(t, "WTH") > 0 Or InStr(t, "O D") > 0 Or t = "WTH" Or t = "WTH IN") Then wthCol = c
+        If hgtCol = 0 And (InStr(t, "HGT") > 0 Or InStr(t, "I D") > 0 Or t = "HGT" Or t = "HGT IN") Then hgtCol = c
+        If thkCol = 0 And (t = "THICKNESS" Or t = "THICK" Or t = "THK" Or t = "T" Or InStr(t, "HEIGHT") > 0) Then
+            If InStr(t, "HGT") = 0 And InStr(t, "I D") = 0 Then thkCol = c
+        End If
+        If widCol = 0 And (t = "WIDTH" Or t = "WIDE" Or t = "W") Then widCol = c
+        If lenCol = 0 And (t = "LENGTH" Or t = "LONG" Or t = "LEN" Or t = "L") Then lenCol = c
+NextBomDimCol:
     Next c
+    ' Prefer explicit Tempcraft Lth/Wth/Hgt trio: store as len/wid/thk slots then
+    ' the row reader sorts them into T/W/L (smallest/middle/largest).
+    If lthCol > 0 And wthCol > 0 And hgtCol > 0 Then
+        lenCol = lthCol
+        widCol = wthCol
+        thkCol = hgtCol
+    End If
 End Sub
 
 Private Function IsLikelyBomWorksheet(ByVal ws As Object) As Boolean
@@ -4499,13 +4553,62 @@ On Error GoTo ErrHandler
     Dim mat As String
     mat = ExtractTempcraftPdfMaterial(raw)
     Dim a As Double, b As Double, c As Double, l As Double, w As Double, t As Double
-    PickThreeLargest nums, nCount, a, b, c
+    ' Tempcraft PDF layout after description/material:
+    '   Lth  Wth/O.D.  Hgt/I.D.  [Oracle]  [UOM]  StockWeight
+    ' NEVER PickThreeLargest — that turns Stock Weight (117.87 lbs) into Length.
+    If Not PickThreeFinishedSizeDims(nums, nCount, a, b, c) Then Exit Function
     SortThreeDimensions a, b, c, l, w, t
+    If BomDimsLookLikeStockWeight(t, w, l) Then Exit Function
     AddBomRow desc, qty, mat, t, w, l, (l > 0 And w > 0 And t > 0)
     TryParseTempcraftBasePdfMaterialLine = True
     Exit Function
 ErrHandler:
     TryParseTempcraftBasePdfMaterialLine = False
+End Function
+
+' Prefer the first three plausible finished-size decimals on a Tempcraft BOM line.
+' Skips leading Det No / Qty integers (ExtractDecimalNumbers only keeps dotted values)
+' and drops trailing Stock Weight when a 4th+ number is much larger than the plate.
+Private Function PickThreeFinishedSizeDims(ByRef nums() As Double, ByVal n As Long, _
+                                           ByRef a As Double, ByRef b As Double, ByRef c As Double) As Boolean
+    PickThreeFinishedSizeDims = False
+    a = 0#: b = 0#: c = 0#
+    If n < 3 Then Exit Function
+    Dim i As Long, picked As Long
+    Dim cand(1 To 12) As Double
+    picked = 0
+    For i = 1 To n
+        ' Finished plate sizes are almost always under ~80"; stock weight often 50–300+.
+        If nums(i) > 0.05 And nums(i) < 80# Then
+            picked = picked + 1
+            If picked <= 12 Then cand(picked) = nums(i)
+        End If
+    Next i
+    If picked >= 3 Then
+        a = cand(1): b = cand(2): c = cand(3)
+        PickThreeFinishedSizeDims = True
+        Exit Function
+    End If
+    ' Fallback: first three decimals regardless (still better than three largest).
+    a = nums(1): b = nums(2): c = nums(3)
+    PickThreeFinishedSizeDims = True
+End Function
+
+' True when the "length" looks like Tempcraft Stock Weight (lbs), not inches.
+' Example bug: TCP 1.375 x 15.875 x 117.87  ← 117.87 is weight, real L is 18.
+Private Function BomDimsLookLikeStockWeight(ByVal t As Double, ByVal w As Double, ByVal l As Double) As Boolean
+    BomDimsLookLikeStockWeight = False
+    If t <= 0 Or w <= 0 Or l <= 0 Then Exit Function
+    ' Length far larger than the other two and in the typical weight band.
+    If l >= 50# And l > (w * 2.5) And l > (t * 8#) Then
+        BomDimsLookLikeStockWeight = True
+        Exit Function
+    End If
+    ' Density sanity: steel ~0.283 lb/in^3. If L were inches, mass ≈ T*W*L*0.283.
+    ' If L is actually weight, T*W*L is huge vs any real plate.
+    Dim vol As Double
+    vol = t * w * l
+    If vol > 8000# And l > 40# Then BomDimsLookLikeStockWeight = True
 End Function
 
 Private Function ExtractDecimalNumbers(ByVal s As String, ByRef nums() As Double) As Long
@@ -4531,6 +4634,7 @@ Private Function ExtractDecimalNumbers(ByVal s As String, ByRef nums() As Double
 End Function
 
 Private Sub PickThreeLargest(ByRef nums() As Double, ByVal n As Long, ByRef a As Double, ByRef b As Double, ByRef c As Double)
+    ' Prefer PickThreeFinishedSizeDims for BOM lines that may include Stock Weight.
     a = 0#: b = 0#: c = 0#
     Dim i As Long, v As Double
     For i = 1 To n
@@ -4720,6 +4824,12 @@ On Error GoTo ErrHandler
 
         StandardPlateName = "POT BLOCK"
         Exit Function
+    End If
+
+    ' Tempcraft: "Top Pot Block Material" / "Bottom Pot Block Material" without "POT " token edge cases
+    If InStr(s, "POT") > 0 And InStr(s, "BLOCK") > 0 Then
+        If IsLikelyOdSideName(s) Then StandardPlateName = "OD POT BLOCK": Exit Function
+        If IsLikelyIdSideName(s) Then StandardPlateName = "ID POT BLOCK": Exit Function
     End If
 
     If InStr(s, "SMED") > 0 Then
@@ -5408,6 +5518,8 @@ End Function
 
 Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String, ByRef usedPart() As Boolean, _
                               ByRef t As Double, ByRef w As Double, ByRef l As Double, ByRef srcOut As String) As Boolean
+    ' Prefer CAD finished bbox (T/W/L already sorted). BOM is backup only when
+    ' CAD has no match — and BOM dims that look like Stock Weight are rejected.
     GetPlateDims = False
     Dim ci As Long
     ci = FindPartIndexByKeys(pipeKeys, usedPart)
@@ -5418,18 +5530,7 @@ Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String,
         GetPlateDims = True
         Exit Function
     End If
-    Dim bi As Long
-    bi = FindBomIndexByStdName(stdName)
-    If bi > 0 Then
-        If BomRows(bi).hasDims Then
-            t = BomRows(bi).BomThickness: w = BomRows(bi).BomWidth: l = BomRows(bi).BomLength
-            srcOut = "BOM:" & BomRows(bi).Description
-            GetPlateDims = True
-            Exit Function
-        End If
-    End If
-    ' 3) CAD geometry classification (e.g. .x_t imports with generic body names
-    '    and/or a BOM that carries no sizes).
+    ' Geometry classification before BOM so bad PDF Stock-Weight dims cannot win.
     Dim gi As Long
     gi = GeometryIndexForStd(stdName)
     If gi > 0 Then
@@ -5438,6 +5539,21 @@ Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String,
         srcOut = "CAD-geom:" & parts(gi).componentName
         GetPlateDims = True
         Exit Function
+    End If
+    Dim bi As Long
+    bi = FindBomIndexByStdName(stdName)
+    If bi > 0 Then
+        If BomRows(bi).hasDims Then
+            t = BomRows(bi).BomThickness: w = BomRows(bi).BomWidth: l = BomRows(bi).BomLength
+            If BomDimsLookLikeStockWeight(t, w, l) Then
+                LogLine "GetPlateDims: rejecting BOM dims that look like Stock Weight for " & stdName & _
+                        " (T=" & t & " W=" & w & " L=" & l & ")"
+            Else
+                srcOut = "BOM:" & BomRows(bi).Description
+                GetPlateDims = True
+                Exit Function
+            End If
+        End If
     End If
 End Function
 
@@ -6017,8 +6133,34 @@ Private Function LooksLikeBmsJob() As Boolean
                   CurrentJobFolder & "|" & gHandoffAttachDir & "|" & JobBaseName)
     If InStr(blob, "BMS") > 0 Then LooksLikeBmsJob = True: Exit Function
     If InStr(blob, "POTBLOCK") > 0 Or InStr(blob, "POT-BLOCK") > 0 Or InStr(blob, "POT_BLOCK") > 0 Then
-        LooksLikeBmsJob = True
+        LooksLikeBmsJob = True: Exit Function
     End If
+    ' Tempcraft / Howmet pot-block RFQs (often no "BMS" in the folder name).
+    If InStr(blob, "TEMPCRAFT") > 0 Or InStr(blob, "HOWMET") > 0 Or InStr(blob, "HTE") > 0 Then
+        LooksLikeBmsJob = True: Exit Function
+    End If
+    If InStr(blob, "RFQ_MB_ASM") > 0 Or InStr(blob, "MB_ASM") > 0 Then
+        LooksLikeBmsJob = True: Exit Function
+    End If
+    ' BOM already names pot-block plates → never treat as standard mold.
+    ' TCP/BCP alone are NOT enough (standard molds also have clamp plates).
+    Dim i As Long, d As String, q As String
+    For i = 1 To BomCount
+        q = NormalizeKey(BomRows(i).quoteName)
+        Select Case q
+            Case "IDHOLDER", "ODHOLDER", "IDPOT", "IDPOTBLOCK", "ODPOT", "ODPOTBLOCK", "SMEDPLATE"
+                LooksLikeBmsJob = True: Exit Function
+        End Select
+        d = NormalizeText(BomRows(i).Description)
+        If InStr(d, "SMED") > 0 Or InStr(d, "POT BLOCK") > 0 Or InStr(d, "HOLDER BLOCK") > 0 Then
+            LooksLikeBmsJob = True: Exit Function
+        End If
+        If InStr(d, "ID HOLDER") > 0 Or InStr(d, "OD HOLDER") > 0 Or InStr(d, "TOP HOLDER") > 0 Or InStr(d, "BOTTOM HOLDER") > 0 Then
+            LooksLikeBmsJob = True: Exit Function
+        End If
+    Next i
+    ' Geometry already resolved holder/pot plates (not just clamps).
+    If gIdxIDH > 0 Or gIdxODH > 0 Or gIdxIDP > 0 Or gIdxODP > 0 Then LooksLikeBmsJob = True
 End Function
 
 Private Sub AddStdPlate(ByVal nm As String, ByVal t As Double, ByVal w As Double, ByVal l As Double, ByVal qty As Long, Optional ByVal gradeHint As String = "")
