@@ -2437,7 +2437,20 @@ On Error Resume Next
 End Sub
 
 Private Sub StabilizeActiveView(ByVal model As Object, Optional ByVal waitMs As Long = 200)
-    Exit Sub
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+
+    If DISABLE_STABILIZE_DELAYS Then Exit Sub
+
+    model.ViewZoomtofit2
+    model.GraphicsRedraw2
+    DoEvents
+
+    If waitMs > 0 Then WaitMilliseconds waitMs
+
+    model.GraphicsRedraw2
+    DoEvents
 End Sub
 
 Private Sub RotateViewZSteps(ByVal model As Object, ByVal steps As Long)
@@ -10545,21 +10558,31 @@ End Sub
 '  ORIENTATION SUBSYSTEM ported verbatim from gemini1.bas
 '  (top from TCP/BCP centers; front from holder long-side + pot/holder
 '   depth so the pot blocks sit closer to the front than the holders).
-'  BuildFrontOrientIndexCollections is adapted to use this macro's own
-'  geometry classification (gIdxIDH/ODH holders, gIdxIDP/ODP pots).
 ' =====================================================================
 
-' Holders + pots for the front check, sourced from CAD geometry classification.
 Private Sub BuildFrontOrientIndexCollections(ByRef holderIndexes As Collection, _
                                              ByRef potIndexes As Collection)
 On Error GoTo ErrHandler
+
     Set holderIndexes = New Collection
     Set potIndexes = New Collection
-    AddUniqueCadIndexToCollection holderIndexes, gIdxIDH
-    AddUniqueCadIndexToCollection holderIndexes, gIdxODH
-    AddUniqueCadIndexToCollection potIndexes, gIdxIDP
-    AddUniqueCadIndexToCollection potIndexes, gIdxODP
+
+    AddUniqueCadIndexToCollection holderIndexes, _
+        FindCadIndexForOrientationQuoteOrKeys("ID HOLDER", ID_HOLDER_KEYS)
+
+    AddUniqueCadIndexToCollection holderIndexes, _
+        FindCadIndexForOrientationQuoteOrKeys("OD HOLDER", OD_HOLDER_KEYS)
+
+    AddUniqueCadIndexToCollection potIndexes, _
+        FindCadIndexForOrientationQuoteOrKeys("ID POT BLOCK", _
+            "ID POT BLOCK|ID POT|TOP POT BLOCK|TOP POT|TCP POT BLOCK|TCP POT")
+
+    AddUniqueCadIndexToCollection potIndexes, _
+        FindCadIndexForOrientationQuoteOrKeys("OD POT BLOCK", _
+            "OD POT BLOCK|OD POT|BOTTOM POT BLOCK|BOT POT BLOCK|BOTTOM POT|BOT POT|BCP POT BLOCK|BCP POT")
+
     Exit Sub
+
 ErrHandler:
     LogLine "BuildFrontOrientIndexCollections error: " & Err.Description
     Set holderIndexes = New Collection
@@ -11605,6 +11628,62 @@ On Error GoTo ErrHandler
 
 ErrHandler:
     TryGetComponentViewY = False
+End Function
+
+Private Function FindCadIndexForOrientationQuoteOrKeys(ByVal quoteName As String, _
+                                                       ByVal fallbackKeys As String) As Long
+On Error GoTo ErrHandler
+
+    FindCadIndexForOrientationQuoteOrKeys = 0
+
+    Dim cadIdx As Long
+
+    cadIdx = FindCadIndexFromExportQuote(quoteName)
+
+    If cadIdx <= 0 Then
+        cadIdx = FindCadPartIndexByQuoteOrKeys(quoteName, fallbackKeys)
+    End If
+
+    If cadIdx > 0 And cadIdx <= PartCount Then
+        FindCadIndexForOrientationQuoteOrKeys = cadIdx
+    End If
+
+    Exit Function
+
+ErrHandler:
+    FindCadIndexForOrientationQuoteOrKeys = 0
+End Function
+
+Private Function FindCadPartIndexByQuoteOrKeys(ByVal quoteName As String, ByVal pipeKeys As String) As Long
+On Error GoTo ErrHandler
+
+    FindCadPartIndexByQuoteOrKeys = 0
+
+    Dim i As Long
+    Dim hay As String
+
+    For i = 1 To PartCount
+        hay = parts(i).cleanName & " " & parts(i).componentName & " " & parts(i).filePath
+        If ContainsAnyPipeKey(hay, pipeKeys) Then
+            FindCadPartIndexByQuoteOrKeys = i
+            Exit Function
+        End If
+    Next i
+
+    Dim k As String
+    k = NormalizeKey(quoteName)
+
+    For i = 1 To ExportCount
+        If NormalizeKey(ExportRows(i).quoteName) = k And ExportRows(i).HasCad Then
+            FindCadPartIndexByQuoteOrKeys = ExportRows(i).CadPartIndex
+            Exit Function
+        End If
+    Next i
+
+    Exit Function
+
+ErrHandler:
+    FindCadPartIndexByQuoteOrKeys = 0
 End Function
 
 Private Sub AddUniqueCadIndexToCollection(ByVal col As Collection, ByVal cadIdx As Long)
