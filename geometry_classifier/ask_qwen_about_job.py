@@ -40,7 +40,10 @@ Rules/knowledge:
 {knowledge}
 
 Task:
-Classify the CAD rows below. Use geometry only. Do not trust component names.
+Classify the CAD rows below. Exact shop-standard name tokens (A-PLATE, B-PLATE,
+SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB, PLC75/LATCH-LOCK/
+SAFETY-STRAP) are strong anchor evidence; only fall back to geometry when names
+are generic or missing.
 Return a concise table with:
 Index, Role, Confidence, Geometry Reason.
 

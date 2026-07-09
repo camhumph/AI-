@@ -191,10 +191,14 @@ def main():
                         }
                     )
                 prompt = (
-                    "Classify these mold-base CAD parts using geometry only. "
-                    "Do not trust component names. Use dimensions, center positions, "
-                    "stack order, full-footprint plates, rails, ejector stack, leader pins, "
-                    "bushings, support pillars, and parting-line logic."
+                    "Classify these mold-base CAD parts. Exact shop-standard name tokens "
+                    "(A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, "
+                    "LDR-PIN, LBB, PLC75/LATCH-LOCK/SAFETY-STRAP) are strong anchor evidence; "
+                    "only fall back to geometry when names are generic or missing. Use "
+                    "dimensions, center positions, stack order, full-footprint plates, rails, "
+                    "ejector stack, leader pins, bushings, support pillars, and parting-line "
+                    "logic. Anchor stack orientation from rails/ejector stack first; leader "
+                    "pins only decide orientation when rails/ejector plates are missing."
                 )
                 jsonl_f.write(
                     json.dumps(

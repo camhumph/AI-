@@ -21,14 +21,34 @@ Important exception: exact shop-standard tokens in an imported STEP can be stron
 - `B-PLATE`, `B_PLATE` -> B Plate
 - `SC-RETAINER-PLATE` -> SC Retainer Plate
 - `SC-BACKUP-PLATE` -> SC Backup Plate
-- `EJ-RET-PLATE` -> Ejector Plate in CMS naming
-- `EJ-BACKUP-PLATE` -> Ejector Retainer Plate / ejector backing plate
+- `EJ-RET-PLATE` -> Ejector Plate in CMS naming (the thinner ejector-stack plate)
+- `EJ-BACKUP-PLATE` -> Bottom Ejector Plate in CMS naming (the thicker/lower ejector-stack plate; never call this or the thinner plate "Ejector Retainer Plate")
 - `RAIL-BOTTOM`, `RAIL-TOP`, `RAIL` -> Rails
 - `LDR-PIN` -> Leader Pin
 - `LBB` -> Leader Pin Bushing
-- `PLC75`, `LATCH-LOCK`, `SAFETY-STRAP` -> sequenced/latch-lock standard base clues
+- `PLC75`, `LATCH-LOCK`, `SAFETY-STRAP` (also seen misspelled `SAFTEY-STRAP`) -> sequenced/latch-lock standard base clues
 
 Treat those exact tokens differently from vague copied names like "plate", "block", "base", or stale assembly names.
+
+## Stack Orientation: Bottom-Up Anchoring
+
+Decide the bottom of the mold stack from the rails and ejector-stack plates
+first. Rails and the ejector assembly are the primary, most reliable
+orientation signal. Leader pins and bushings only decide stack orientation
+when rails/ejector plates are missing or ambiguous.
+
+Do not let leader-pin direction flip a stack orientation, or an A/B plate
+identity, that is already clear from the rail/ejector stack or from a strong
+shop-name token (`A-PLATE`, `B-PLATE`). On plate-sequenced or Stripper-Core
+(SC) bases, leader pins can seat in the B-plate area and run upward toward the
+A-side (reversed/seated leader pins) -- this must never force an incorrect
+A/B flip.
+
+## Quote Row Mapping
+
+Ejector-stack and pin-plate rows must never be mapped or merged into the
+A Plate row in the quoting workbook. Keep A Plate, B Plate, ejector_plate,
+bottom_ejector_plate, and pin_plate as distinct quote rows.
 
 ## Standard DME / PCS Mold Base Stack
 
@@ -121,8 +141,13 @@ Typical geometry:
 - Long dimension close to base length
 - Width smaller than full base width
 - Usually narrower than top/core/support/full plates
-- Pin Plate / Ejector Retainer is above the Ejector Plate
-- Ejector Plate is below the retainer/pin plate
+- Pin Plate is above the Ejector Plate in the stack
+
+CMS ejector-plate naming rule: in the ejector assembly, the thinner plate is
+always the **Ejector Plate**. The thicker/lower plate is the **Bottom Ejector
+Plate**. Do not name the thinner plate "Ejector Retainer Plate" -- that name
+is deprecated; only "Ejector Plate" and "Bottom Ejector Plate" should be used
+in CMS output.
 
 Small cavity/core inserts are not ejector plates even if their area is large enough. They are usually not long across the base.
 
@@ -204,8 +229,10 @@ Correct classification:
 - `T001015_SC-BACKUP-PLATE` -> SC Backup Plate
 - `T001015_CLAMP-PLATE` -> Bottom Clamp Plate
 - `T001015_RAIL-BOTTOM` / `T001015_RAIL-TOP` -> Rails
-- `T001015_EJ-BACKUP-PLATE` -> Ejector Retainer Plate
-- `T001015_EJ-RET-PLATE` -> Ejector Plate
+- `T001015_EJ-BACKUP-PLATE` -> Bottom Ejector Plate (thicker/lower ejector-stack plate)
+- `T001015_EJ-RET-PLATE` -> Ejector Plate (thinner ejector-stack plate)
+- `T0010115_LATCH-LOCK_ASM-*` / `T001015_PLC75-*` -> latch-lock hardware; confirms this is a plate-sequenced/latch-lock standard base with secondary opening/parting lines, not a plain A/B/support stack
+- `PROGRESSIVE-SAFETY-STRAP_ASM-*` (component itself spelled `PROGRESSIVE-SAFTEY-STRAP`) -> Progressive Components safety strap, same latch-lock/sequenced-base clue
 
 Why B Plate is B Plate:
 
