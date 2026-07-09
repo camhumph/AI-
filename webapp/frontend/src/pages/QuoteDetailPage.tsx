@@ -8,7 +8,7 @@ import Layout from "../components/Layout";
 import { Card, Button, Spinner, EmptyState } from "../components/ui";
 import PartsTable from "../components/PartsTable";
 import ImageGallery from "../components/ImageGallery";
-import { api, type JobDetail, type QuoteSheet } from "../api/client";
+import { api, type JobDetail, type QuoteSheet, type PartRow } from "../api/client";
 
 const StlViewer = lazy(() => import("../components/StlViewer"));
 
@@ -83,6 +83,25 @@ export default function QuoteDetailPage() {
   const priceByIndex: Record<string, QuoteSheet["line_items"][number]> = {};
   quote?.line_items.forEach((li) => (priceByIndex[li.index] = li));
 
+  // Merge macro purchased-component lines into the Parts table (BMS jobs have no AI parts).
+  const purchasedParts: PartRow[] = (quote?.purchased_components || []).map((li) => ({
+    index: String(li.index),
+    role: li.role || "purchased_component",
+    role_label: li.role_label || "Purchased Component",
+    role_group: li.role_group || "Purchased Components",
+    confidence: li.confidence || "HIGH",
+    reason: li.price_source || "Purchased Components Quote.csv",
+    quote: true,
+    Component: li.component || "",
+    Thickness: "",
+    Width: "",
+    Length: "",
+    CenterX: "",
+    CenterY: "",
+    CenterZ: "",
+  }));
+  const displayParts = [...job.parts, ...purchasedParts];
+
   return (
     <Layout
       title={job.job_id}
@@ -106,7 +125,8 @@ export default function QuoteDetailPage() {
 
       {job.base_type === "bms" && (
         <div className="mb-4 border border-accent-amber/30 px-4 py-3 text-xs text-accent-amber">
-          BMS base — BOM-driven by Module6121. AI classification disabled.
+          BMS / pot-block base — Module6121 fills steel + quote from BOM/CAD. Purchased components
+          come from Purchased Components Quote.csv. AI A/B/rail classification is disabled.
         </div>
       )}
 
@@ -142,7 +162,7 @@ export default function QuoteDetailPage() {
             </div>
             <div>
               <div className="text-ink-500">Parts</div>
-              <div className="mt-1 text-ink-100">{quote?.total_part_count ?? 0}</div>
+              <div className="mt-1 text-ink-100">{quote?.total_part_count ?? displayParts.length}</div>
             </div>
             <div>
               <div className="text-ink-500">Quoted</div>
@@ -153,6 +173,13 @@ export default function QuoteDetailPage() {
               <div className="mt-1 text-ink-100">{job.base_type === "bms" ? "BMS" : "Standard"}</div>
             </div>
           </div>
+          {(job.images.length === 0 || job.models.length === 0) && (
+            <p className="mt-3 text-[10px] text-ink-500">
+              {job.models.length === 0 ? "No STL in registry yet — " : ""}
+              {job.images.length === 0 ? "No ISO images in registry yet. " : ""}
+              Re-sync the job folder after the macro finishes (job-complete), or re-import the C-number folder.
+            </p>
+          )}
         </Card>
       </div>
 
@@ -160,7 +187,7 @@ export default function QuoteDetailPage() {
         <div className="tab-bar inline-flex min-w-max">
           {[
             { id: "overview", label: "Overview", icon: Layers },
-            { id: "parts", label: "Parts & Pricing", icon: FileText },
+            { id: "parts", label: `Parts & Pricing (${displayParts.length})`, icon: FileText },
             { id: "images", label: `Images (${job.images.length})`, icon: ImageIcon },
             { id: "model", label: `3D (${job.models.length})`, icon: Box },
             { id: "documents", label: `Docs (${job.documents.length})`, icon: FileText },
@@ -180,7 +207,9 @@ export default function QuoteDetailPage() {
         <Card className="p-5">
           <div className="section-label mb-3">Module6121 Bridge</div>
           <p className="mb-4 text-xs leading-relaxed text-ink-400">
-            Part names export to the macro at 127.0.0.1 after classification.
+            {job.base_type === "bms"
+              ? "BMS jobs stay BOM-driven in the macro. Purchased components are priced from Purchased Components Quote.csv."
+              : "Part names export to the macro at 127.0.0.1 after classification."}
           </p>
           <div className="flex flex-wrap gap-2">
             <a href={api.bridgeCsvUrl(job.job_id)} download>
@@ -190,7 +219,7 @@ export default function QuoteDetailPage() {
         </Card>
       )}
 
-      {tab === "parts" && <PartsTable parts={job.parts} prices={priceByIndex} />}
+      {tab === "parts" && <PartsTable parts={displayParts} prices={priceByIndex} />}
 
       {tab === "images" && (
         job.images.length === 0 ? (

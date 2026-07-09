@@ -6160,7 +6160,37 @@ Private Function LooksLikeBmsJob() As Boolean
         End If
     Next i
     ' Geometry already resolved holder/pot plates (not just clamps).
-    If gIdxIDH > 0 Or gIdxODH > 0 Or gIdxIDP > 0 Or gIdxODP > 0 Then LooksLikeBmsJob = True
+    If gIdxIDH > 0 Or gIdxODH > 0 Or gIdxIDP > 0 Or gIdxODP > 0 Then LooksLikeBmsJob = True: Exit Function
+
+    ' Geometry-only pot-block (generic asm_objects names, no BMS in folder):
+    ' ~2 thin full clamps + >=2 thick non-full holders + 0.25" sheets.
+    If PartCount >= 6 Then
+        Dim maxFp As Double, i2 As Long, fp As Double
+        Dim nFullThin As Long, nThickInner As Long, nThinSheet As Long, nPotLike As Long
+        maxFp = 0#
+        For i2 = 1 To PartCount
+            fp = parts(i2).Width * parts(i2).Length
+            If fp > maxFp Then maxFp = fp
+        Next i2
+        If maxFp > 0 Then
+            For i2 = 1 To PartCount
+                fp = parts(i2).Width * parts(i2).Length
+                If fp >= 0.85 * maxFp And parts(i2).Thickness >= 0.75 And parts(i2).Thickness <= 2.5 Then
+                    nFullThin = nFullThin + 1
+                End If
+                If parts(i2).Thickness >= 3# And fp < 0.85 * maxFp And fp >= 0.15 * maxFp Then
+                    nThickInner = nThickInner + 1
+                End If
+                If Abs(parts(i2).Thickness - 0.25) <= 0.06 Then nThinSheet = nThinSheet + 1
+                If parts(i2).Thickness >= 3# And parts(i2).Width >= 3# And parts(i2).Length >= 3# And fp < 0.55 * maxFp Then
+                    nPotLike = nPotLike + 1
+                End If
+            Next i2
+            If nFullThin <= 2 And nThickInner >= 2 And (nThinSheet >= 2 Or nPotLike >= 2) Then
+                LooksLikeBmsJob = True
+            End If
+        End If
+    End If
 End Function
 
 Private Sub AddStdPlate(ByVal nm As String, ByVal t As Double, ByVal w As Double, ByVal l As Double, ByVal qty As Long, Optional ByVal gradeHint As String = "")

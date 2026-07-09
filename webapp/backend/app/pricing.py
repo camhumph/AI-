@@ -84,9 +84,45 @@ def build_quote_sheet(job: dict) -> dict:
             }
         )
 
+    # Always surface Module6121 purchased-component lines (BMS jobs have no AI parts).
+    purchased_items = []
+    for i, row in enumerate(job_purchased, start=1):
+        desc = (row.get("Description") or row.get("Component") or "").strip()
+        if not desc or desc.upper() == "TOTAL":
+            continue
+        qty = sheet_pricing._safe_float(row.get("QTY") or row.get("Qty") or 1, 1.0)
+        unit = sheet_pricing._safe_float(row.get("UnitPrice"))
+        ext = sheet_pricing._safe_float(row.get("Extended"))
+        if ext <= 0 and unit > 0:
+            ext = unit * max(qty, 1)
+        if ext > 0:
+            total += ext
+            csv_priced += 1
+        else:
+            missing += 1
+        purchased_items.append(
+            {
+                "index": f"P{i}",
+                "component": desc,
+                "role": "purchased_component",
+                "role_label": "Purchased Component",
+                "role_group": "Purchased Components",
+                "confidence": "HIGH",
+                "quote": True,
+                "price": round(ext, 2),
+                "price_source": "job_csv:Purchased Components Quote.csv",
+                "vendor": row.get("Vendor") or "",
+                "part_number": row.get("PartNumber") or "",
+                "qty": qty,
+                "unit_price": unit,
+            }
+        )
+        line_items.append(purchased_items[-1])
+
     return {
         "job_id": job_id,
         "line_items": line_items,
+        "purchased_components": purchased_items,
         "total_price": round(total, 2),
         "quoted_part_count": sum(1 for li in line_items if li["quote"]),
         "total_part_count": len(line_items),

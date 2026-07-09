@@ -330,10 +330,138 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
     }
 
 
+def _folder_looks_like_bms(folder: Path) -> bool:
+    """Detect Tempcraft / BMS pot-block jobs that must never get A/B/rail AI roles."""
+    blob = folder.name.lower()
+    if any(m in blob for m in ("bms", "tempcraft", "howmet", "potblock", "pot-block", "pot_block")):
+        return True
+    try:
+        for path in folder.rglob("*"):
+            if not path.is_file():
+                continue
+            low = path.name.lower()
+            if any(
+                m in low
+                for m in (
+                    "rfq_mb_asm",
+                    "mb_asm",
+                    "smed",
+                    "holder block",
+                    "pot block",
+                    "id holder",
+                    "od holder",
+                )
+            ):
+                return True
+            if path.suffix.lower() in (".csv", ".txt", ".log") and path.stat().st_size < 2_000_000:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")[:8000].upper()
+                except Exception:
+                    continue
+                if "ID HOLDER" in text or "OD HOLDER" in text or "SMED" in text or "POT BLOCK" in text:
+                    return True
+                if "BASE TYPE: POT" in text or "BOM-DRIVEN" in text:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _hoist_macro_deliverables(src: Path, job_dir: Path) -> dict:
+    """Copy Module6121 root/base deliverables into images/ and models/.
+
+    The macro writes `{base} ISO.jpg`, `{base} BACK ISO.jpg`, and `{base}.stl`
+    to the job ROOT (and a copy under base\\). The UI only lists images/ and
+    models/, so without this hoist the Quotes page shows No STL / No images.
+    """
+    images = job_dir / "images"
+    models = job_dir / "models"
+    images.mkdir(exist_ok=True)
+    models.mkdir(exist_ok=True)
+    copied = {"images": 0, "models": 0}
+
+    search_roots = [src]
+    base_sub = src / "base"
+    if base_sub.is_dir():
+        search_roots.append(base_sub)
+
+    for root in search_roots:
+        for f in root.iterdir():
+            if not f.is_file():
+                continue
+            low = f.name.lower()
+            ext = f.suffix.lower()
+            if ext in IMAGE_EXTS and (
+                "iso" in low or "front" in low or "back" in low or "view" in low
+            ):
+                dest = images / f.name
+                if not dest.exists() or dest.stat().st_size != f.stat().st_size:
+                    shutil.copy2(f, dest)
+                    copied["images"] += 1
+            elif ext in MODEL_EXTS:
+                dest = models / f.name
+                if not dest.exists() or dest.stat().st_size != f.stat().st_size:
+                    shutil.copy2(f, dest)
+                    copied["models"] += 1
+    return copied
+
+
+def _xt_looks_like_pot_block(job_dir: Path) -> bool:
+    """Geometry heuristic: 2 thin full clamps + thick non-full holders + 0.25\" sheets."""
+    xt = job_dir / "XT_Export_CAD_Dimensions.csv"
+    if not xt.exists():
+        return False
+    try:
+        with xt.open(newline="", encoding="utf-8-sig") as fh:
+            rows = list(csv.DictReader(fh))
+    except Exception:
+        return False
+    if len(rows) < 6:
+        return False
+
+    def _f(row: dict, *keys: str) -> float:
+        for k in keys:
+            if k in row and str(row[k]).strip():
+                try:
+                    return float(str(row[k]).strip())
+                except ValueError:
+                    pass
+        return 0.0
+
+    parsed = []
+    for r in rows:
+        t = _f(r, "Thickness", "thickness")
+        w = _f(r, "Width", "width")
+        l = _f(r, "Length", "length")
+        if t > 0 and w > 0 and l > 0:
+            parsed.append((t, w, l, w * l))
+    if len(parsed) < 6:
+        return False
+
+    max_fp = max(p[3] for p in parsed)
+    full_thin = [
+        p for p in parsed
+        if p[3] >= max_fp * 0.85 and 0.75 <= p[0] <= 2.5
+    ]
+    thick_inner = [
+        p for p in parsed
+        if p[0] >= 3.0 and p[3] < max_fp * 0.85 and p[3] >= max_fp * 0.15
+    ]
+    thin_sheets = [p for p in parsed if abs(p[0] - 0.25) <= 0.06]
+    pot_like = [
+        p for p in parsed
+        if p[0] >= 3.0 and p[1] >= 3.0 and p[2] >= 3.0 and p[3] < max_fp * 0.55
+    ]
+    # Pot-block signature: ~2 clamp plates, >=2 thick holders, insulation sheets,
+    # and usually pot cubes — never a 5+ full-footprint standard stack.
+    if len(full_thin) <= 2 and len(thick_inner) >= 2 and (len(thin_sheets) >= 2 or len(pot_like) >= 2):
+        return True
+    return False
+
+
 def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
     """Register a quote from an existing folder on disk (C-number job)."""
     import re
-    import shutil
 
     src = Path(folder_path)
     if not src.exists() or not src.is_dir():
@@ -365,6 +493,9 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
                 if f.is_file():
                     shutil.copy2(f, dest_sub / f.name)
 
+    # Module6121 writes STL + ISO JPGs at job root / base\ — hoist into UI folders.
+    _hoist_macro_deliverables(src, job_dir)
+
     # Flat files in job root -> documents/
     docs = job_dir / "documents"
     docs.mkdir(exist_ok=True)
@@ -392,11 +523,32 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
     )
     if "created_at" not in meta:
         meta["created_at"] = meta["updated_at"]
+
+    # Force BMS when geometry/folder looks like pot-block (holders + insulation).
+    if meta.get("base_type") != "bms":
+        if _folder_looks_like_bms(src) or _xt_looks_like_pot_block(job_dir):
+            meta["base_type"] = "bms"
+
+    # Drop stale standard-stack classification when this is a pot-block job.
+    if meta.get("base_type") == "bms":
+        for stale in ("classification.json", "classification.csv"):
+            p = job_dir / stale
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+
     (job_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     job = get_job(job_id)
 
-    if job.get("has_raw_csv") and not job.get("has_classification"):
+    # Never run standard A/B/rail classify on BMS / pot-block jobs.
+    if (
+        meta.get("base_type") != "bms"
+        and job.get("has_raw_csv")
+        and not job.get("has_classification")
+    ):
         try:
             job = classify_job(job_id, mode="rules")
         except Exception:

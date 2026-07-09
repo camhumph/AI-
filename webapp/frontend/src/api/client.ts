@@ -77,6 +77,7 @@ export interface QuoteLineItem {
 export interface QuoteSheet {
   job_id: string;
   line_items: QuoteLineItem[];
+  purchased_components?: QuoteLineItem[];
   total_price: number;
   quoted_part_count: number;
   total_part_count: number;

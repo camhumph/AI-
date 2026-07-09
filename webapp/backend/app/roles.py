@@ -35,6 +35,8 @@ ROLE_LABELS = {
     "pullcore": "Pull Core",
     "insert_or_core_detail": "Insert / Core Detail",
     "hardware_other": "Other Hardware",
+    "other_hardware": "Other Hardware",
+    "purchased_component": "Purchased Component",
     "ignore": "Ignored",
 }
 
@@ -57,7 +59,8 @@ ROLE_GROUPS = {
         "support_pillar",
     },
     "Core / Cavity Details": {"insert_or_core_detail", "pullcore"},
-    "Other Hardware": {"hardware_other"},
+    "Purchased Components": {"purchased_component"},
+    "Other Hardware": {"hardware_other", "other_hardware"},
     "Ignored": {"ignore"},
 }
 

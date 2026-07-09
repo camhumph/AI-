@@ -10,6 +10,7 @@ const GROUP_ORDER = [
   "Latch Locks / Safety",
   "Guide Hardware",
   "Core / Cavity Details",
+  "Purchased Components",
   "Other Hardware",
   "Ignored",
 ];
