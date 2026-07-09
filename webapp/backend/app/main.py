@@ -488,6 +488,15 @@ def api_training_status():
     return training_audit.status()
 
 
+@app.post("/api/training/cancel")
+def api_training_cancel():
+    """Stop the running training scan (kills Ollama if Qwen is mid-think)."""
+    _ensure_classifier_path()
+    from geometry_classifier import training_audit  # type: ignore
+
+    return training_audit.request_cancel()
+
+
 @app.get("/api/training/suggestions")
 def api_training_suggestions():
     _ensure_classifier_path()

@@ -232,7 +232,14 @@ export interface TrainingReport {
   job_index?: number;
   job_total?: number;
   message?: string;
+  detail?: string;
   error?: string;
+  cancelled?: boolean;
+  qwen_thinking?: boolean;
+  qwen_elapsed_sec?: number;
+  elapsed_sec?: number;
+  started_at?: string;
+  updated_at?: string;
   background?: boolean;
   started?: boolean;
   results?: TrainingJobResult[];
@@ -350,6 +357,8 @@ export const api = {
   trainingStatus: () =>
     req<TrainingReport>("/training/status"),
   trainingSuggestions: () => req<TrainingSuggestions>("/training/suggestions"),
+  cancelTraining: () =>
+    req<TrainingReport>("/training/cancel", { method: "POST", body: "{}" }),
   runTraining: (jobsRoot?: string, useQwen = true, qwenModel = "qwen3.5:9b", exportXt = true) =>
     req<TrainingReport>("/training/run", {
       method: "POST",

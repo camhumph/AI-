@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +24,10 @@ SUGGESTIONS_PATH = DATA_DIR / "rule_suggestions.md"
 PROGRESS_PATH = DATA_DIR / "training_progress.json"
 
 _progress_lock = threading.Lock()
+_cancel_event = threading.Event()
+_active_ollama_proc: subprocess.Popen | None = None
+_active_ollama_lock = threading.Lock()
+
 _progress: dict = {
     "running": False,
     "phase": "idle",
@@ -30,10 +35,16 @@ _progress: dict = {
     "job_index": 0,
     "job_total": 0,
     "message": "",
+    "detail": "",
     "use_qwen": False,
     "qwen_model": "",
     "export_xt": False,
     "error": "",
+    "cancelled": False,
+    "qwen_thinking": False,
+    "qwen_elapsed_sec": 0,
+    "started_at": "",
+    "elapsed_sec": 0,
 }
 
 # Import sibling modules
@@ -242,6 +253,13 @@ def _write_progress(**fields) -> None:
     with _progress_lock:
         _progress.update(fields)
         _progress["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        started = _progress.get("started_at") or ""
+        if started and _progress.get("running"):
+            try:
+                t0 = time.mktime(time.strptime(started, "%Y-%m-%dT%H:%M:%S"))
+                _progress["elapsed_sec"] = int(time.time() - t0)
+            except Exception:
+                pass
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         PROGRESS_PATH.write_text(json.dumps(_progress, indent=2), encoding="utf-8")
 
@@ -255,7 +273,53 @@ def get_progress() -> dict:
         except Exception:
             pass
     with _progress_lock:
-        return dict(_progress)
+        out = dict(_progress)
+    started = out.get("started_at") or ""
+    if started and out.get("running"):
+        try:
+            t0 = time.mktime(time.strptime(started, "%Y-%m-%dT%H:%M:%S"))
+            out["elapsed_sec"] = int(time.time() - t0)
+        except Exception:
+            pass
+    return out
+
+
+def is_cancelled() -> bool:
+    return _cancel_event.is_set()
+
+
+def request_cancel() -> dict:
+    """Signal the running training scan to stop; kill Ollama if mid-think."""
+    _cancel_event.set()
+    killed = False
+    with _active_ollama_lock:
+        proc = _active_ollama_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                killed = True
+            except Exception:
+                pass
+    _write_progress(
+        cancelled=True,
+        qwen_thinking=False,
+        message="Cancel requested — stopping after current step…",
+        detail="Ollama process killed" if killed else "Waiting for current step to exit",
+    )
+    return get_progress()
+
+
+def _check_cancelled(results: list[dict] | None = None) -> bool:
+    if not is_cancelled():
+        return False
+    _write_progress(
+        running=False,
+        phase="cancelled",
+        qwen_thinking=False,
+        message="Training cancelled by user",
+        detail=f"Stopped after {len(results or [])} job(s)",
+    )
+    return True
 
 
 def _load_truth_from_correct_me(correct_me_path: Path) -> dict[str, str]:
@@ -298,36 +362,206 @@ def _audit_predictions_against_truth(
 
 
 def run_qwen_on_xt(xt_path: Path, model: str = "qwen3.5:9b", timeout_minutes: int = 0) -> dict:
-    """Run Ollama/Qwen on one XT export (slow — for training only)."""
+    """Run Ollama/Qwen on one XT export with live thinking heartbeats (training only)."""
+    global _active_ollama_proc
     from geometry_classifier.qwen_classify_xt_csv import (  # noqa: E402
         build_prompt,
         classify_geometry,
         extract_json,
         read_rows,
-        run_ollama,
     )
 
     rows = read_rows(str(xt_path), include_names=True)
-    if len(rows) > 5000:
+    n_rows = len(rows)
+    if n_rows > 5000:
         rows = rows[:5000]
+        n_rows = 5000
+
+    _write_progress(
+        phase="qwen",
+        qwen_thinking=False,
+        qwen_elapsed_sec=0,
+        detail=f"Building prompt from {n_rows} CAD components…",
+        message=f"Preparing Qwen ({model}) for current job…",
+    )
     prompt = build_prompt(rows, str(xt_path), long_knowledge=True)
+    prompt_chars = len(prompt)
+
+    import shutil
+
+    if shutil.which("ollama") is None:
+        return {
+            "qwen_ran": False,
+            "qwen_model": model,
+            "error": "Ollama is not installed or not on PATH",
+            "elapsed_sec": 0,
+            "data": classify_geometry(rows),
+        }
+
     started = time.time()
+    _write_progress(
+        phase="qwen",
+        qwen_thinking=True,
+        qwen_elapsed_sec=0,
+        detail=f"Ollama loading {model} · prompt {prompt_chars:,} chars · {n_rows} parts",
+        message=f"Qwen is thinking on {Path(xt_path).name}…",
+    )
+
+    cmd = ["ollama", "run", model]
     try:
-        raw = run_ollama(prompt, model, timeout_minutes)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return {
+            "qwen_ran": False,
+            "qwen_model": model,
+            "error": "Ollama is not installed or not on PATH",
+            "elapsed_sec": 0,
+            "data": classify_geometry(rows),
+        }
+
+    with _active_ollama_lock:
+        _active_ollama_proc = proc
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    cancelled = False
+
+    def _reader(stream, bucket: list[str]) -> None:
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                bucket.append(chunk)
+        except Exception:
+            pass
+
+    t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+    except Exception as exc:
+        proc.kill()
+        with _active_ollama_lock:
+            _active_ollama_proc = None
+        return {
+            "qwen_ran": False,
+            "qwen_model": model,
+            "error": f"Failed to send prompt to Ollama: {exc}",
+            "elapsed_sec": round(time.time() - started, 1),
+            "data": classify_geometry(rows),
+        }
+
+    timeout_sec = timeout_minutes * 60 if timeout_minutes > 0 else None
+    last_beat = 0.0
+    while True:
+        if is_cancelled():
+            cancelled = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            break
+        rc = proc.poll()
+        elapsed = time.time() - started
+        if timeout_sec and elapsed > timeout_sec:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            with _active_ollama_lock:
+                _active_ollama_proc = None
+            return {
+                "qwen_ran": False,
+                "qwen_model": model,
+                "error": f"Ollama timed out after {timeout_minutes} minutes",
+                "elapsed_sec": round(elapsed, 1),
+                "data": classify_geometry(rows),
+            }
+        if rc is not None:
+            break
+        if elapsed - last_beat >= 2.0:
+            last_beat = elapsed
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            out_len = sum(len(c) for c in stdout_chunks)
+            _write_progress(
+                phase="qwen",
+                qwen_thinking=True,
+                qwen_elapsed_sec=int(elapsed),
+                detail=(
+                    f"Qwen thinking… {mins}m {secs:02d}s · model {model} · "
+                    f"{n_rows} parts · output {out_len:,} chars so far"
+                ),
+                message=f"Qwen is thinking on current job ({mins}m {secs:02d}s)…",
+            )
+        time.sleep(0.5)
+
+    t_out.join(timeout=5)
+    t_err.join(timeout=5)
+    with _active_ollama_lock:
+        _active_ollama_proc = None
+
+    elapsed = round(time.time() - started, 1)
+    if cancelled:
+        _write_progress(qwen_thinking=False, detail="Qwen cancelled")
+        return {
+            "qwen_ran": False,
+            "qwen_model": model,
+            "error": "cancelled",
+            "elapsed_sec": elapsed,
+            "data": {},
+            "cancelled": True,
+        }
+
+    raw = "".join(stdout_chunks)
+    err = "".join(stderr_chunks).strip()
+    if proc.returncode not in (0, None) and not raw.strip():
+        _write_progress(qwen_thinking=False, detail=f"Qwen failed: {err[:200]}")
+        return {
+            "qwen_ran": False,
+            "qwen_model": model,
+            "error": err or f"Ollama exit code {proc.returncode}",
+            "elapsed_sec": elapsed,
+            "data": classify_geometry(rows),
+        }
+
+    try:
         data = extract_json(raw)
+        n_cls = len(data.get("classifications", [])) if isinstance(data, dict) else 0
+        _write_progress(
+            qwen_thinking=False,
+            qwen_elapsed_sec=int(elapsed),
+            detail=f"Qwen finished in {elapsed}s · {n_cls} classifications",
+            message="Qwen finished — scoring against steel sheet…",
+        )
         return {
             "qwen_ran": True,
             "qwen_model": model,
-            "elapsed_sec": round(time.time() - started, 1),
+            "elapsed_sec": elapsed,
             "data": data,
         }
     except Exception as exc:
         fallback = classify_geometry(rows)
+        _write_progress(qwen_thinking=False, detail=f"Qwen parse failed: {exc}")
         return {
             "qwen_ran": False,
             "qwen_model": model,
             "error": str(exc),
-            "elapsed_sec": round(time.time() - started, 1),
+            "elapsed_sec": elapsed,
             "data": fallback,
         }
 
@@ -532,30 +766,56 @@ def start_background_audit(
     if get_progress().get("running"):
         raise RuntimeError("Training already running")
 
+    _cancel_event.clear()
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     _write_progress(
         running=True,
         phase="starting",
-        message="Starting training scan...",
+        message="Starting training scan…",
+        detail="Discovering job folders",
         use_qwen=use_qwen,
         qwen_model=qwen_model if use_qwen else "",
         export_xt=export_xt,
         error="",
+        cancelled=False,
+        qwen_thinking=False,
+        qwen_elapsed_sec=0,
         job_index=0,
         job_total=0,
         current_job="",
+        started_at=started_at,
+        elapsed_sec=0,
     )
 
     def _thread():
         try:
-            _run_audit_worker(
+            summary = _run_audit_worker(
                 jobs_root, manifest_path, use_qwen=use_qwen, qwen_model=qwen_model, export_xt=export_xt
             )
+            if is_cancelled() or summary.get("cancelled"):
+                _write_progress(
+                    running=False,
+                    phase="cancelled",
+                    qwen_thinking=False,
+                    message="Training cancelled",
+                    detail=f"Partial results saved ({summary.get('jobs_processed', 0)} jobs)",
+                )
+            else:
+                _write_progress(
+                    running=False,
+                    phase="done",
+                    qwen_thinking=False,
+                    message="Training complete",
+                    detail=f"{summary.get('jobs_processed', 0)} jobs · rules {summary.get('overall_rules_accuracy_pct', 0)}%",
+                )
         except Exception as exc:
-            _write_progress(running=False, phase="error", error=str(exc), message=str(exc))
-        finally:
-            with _progress_lock:
-                if _progress.get("phase") != "error":
-                    _write_progress(running=False, phase="done", message="Training complete")
+            _write_progress(
+                running=False,
+                phase="error",
+                qwen_thinking=False,
+                error=str(exc),
+                message=str(exc),
+            )
 
     threading.Thread(target=_thread, daemon=True).start()
 
@@ -576,21 +836,42 @@ def _run_audit_worker(
                 job_folders.append((entry.get("job_id") or folder.name, folder))
     elif jobs_root:
         root = Path(jobs_root)
-        _write_progress(phase="scan", message=f"Discovering jobs in {root}...")
+        _write_progress(
+            phase="scan",
+            message=f"Discovering jobs in {root}…",
+            detail="Walking TRAINING folder tree",
+        )
         for folder in discover_job_folders(root):
+            if is_cancelled():
+                break
             job_folders.append((extract_job_id(folder), folder))
     else:
         return {"error": "jobs_root or manifest_path required", "jobs_processed": 0}
 
-    _write_progress(job_total=len(job_folders), job_index=0)
+    if is_cancelled():
+        return {"cancelled": True, "jobs_processed": 0, "results": []}
+
+    _write_progress(
+        job_total=len(job_folders),
+        job_index=0,
+        detail=f"Found {len(job_folders)} job folder(s)",
+        message=f"Found {len(job_folders)} jobs — starting scan…",
+    )
     results: list[dict] = []
 
     for idx, (job_id, folder) in enumerate(job_folders):
+        if _check_cancelled(results):
+            summary = _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
+            summary["cancelled"] = True
+            return summary
+
         _write_progress(
             job_index=idx + 1,
             current_job=job_id,
             phase="scan",
-            message=f"Scanning {job_id} ({idx + 1}/{len(job_folders)})...",
+            qwen_thinking=False,
+            message=f"Scanning {job_id} ({idx + 1}/{len(job_folders)})…",
+            detail=f"Detecting base type · {folder.name}",
         )
         base_type, signals = detect_base_type(folder)
         entry: dict = {
@@ -606,10 +887,19 @@ def _run_audit_worker(
                     job_index=idx + 1,
                     current_job=job_id,
                     phase="xt_export",
-                    message=f"SolidWorks exporting CAD dimensions for {job_id} ({idx + 1}/{len(job_folders)})...",
+                    message=f"SolidWorks exporting CAD dimensions for {job_id}…",
+                    detail=f"Opening CAD in {folder.name} ({idx + 1}/{len(job_folders)})",
                 )
+                if is_cancelled():
+                    results.append(entry)
+                    summary = _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
+                    summary["cancelled"] = True
+                    return summary
                 xt_result = training_xt_export.ensure_xt_export(folder, job_id)
                 entry["xt_export"] = xt_result
+                _write_progress(
+                    detail=f"XT export: {xt_result.get('status')} · {xt_result.get('reason') or xt_result.get('message') or ''}"
+                )
             else:
                 entry["xt_export"] = {
                     "ok": False,
@@ -618,10 +908,12 @@ def _run_audit_worker(
                 }
 
         if base_type == "bms":
+            _write_progress(detail=f"{job_id} = BMS — cataloging BOM/steel (no AI classify)")
             entry.update(process_bms_job(job_id, folder))
             results.append(entry)
             continue
 
+        _write_progress(detail=f"{job_id} = {base_type} — matching steel sheet to CAD…")
         proc = train_from_quote_sheets.process_job(job_id, folder)
         entry.update(proc)
         entry["base_type"] = base_type if base_type != "unknown" else "standard"
@@ -632,21 +924,34 @@ def _run_audit_worker(
             xt_path = str(found) if found else ""
 
         if proc.get("status") == "ok" and proc.get("output") and xt_path:
+            _write_progress(detail=f"Auditing rules vs steel sheet for {job_id}…")
             audit = audit_rules_against_correct_me(Path(proc["output"]), Path(xt_path))
             entry["audit"] = audit
             entry["rules_accuracy_pct"] = audit.get("accuracy_pct", 0)
 
         if use_qwen and xt_path:
+            if is_cancelled():
+                results.append(entry)
+                summary = _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
+                summary["cancelled"] = True
+                return summary
             _write_progress(
                 phase="qwen",
                 current_job=job_id,
-                message=f"Qwen ({qwen_model}) analyzing {job_id} — 15–40+ min/job on CPU...",
+                job_index=idx + 1,
+                message=f"Starting Qwen ({qwen_model}) on {job_id}…",
+                detail=f"XT: {Path(xt_path).name}",
             )
             qwen_out = run_qwen_on_xt(Path(xt_path), model=qwen_model, timeout_minutes=0)
             entry["qwen_ran"] = qwen_out.get("qwen_ran", False)
             entry["qwen_elapsed_sec"] = qwen_out.get("elapsed_sec", 0)
             if qwen_out.get("error"):
                 entry["qwen_error"] = qwen_out["error"]
+            if qwen_out.get("cancelled"):
+                results.append(entry)
+                summary = _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
+                summary["cancelled"] = True
+                return summary
 
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             qwen_json_path = OUT_DIR / f"{job_id}_qwen_training.json"
@@ -774,19 +1079,20 @@ def _write_suggestions_md(suggestions: list[dict], summary: dict) -> None:
 
 
 def status() -> dict:
+    """Live progress always wins while a scan is running."""
     out: dict = {"jobs_processed": 0, "output_dir": str(OUT_DIR), "suggestions": []}
     prog = get_progress()
-    out.update(prog)
-    if REPORT_PATH.exists():
-        try:
-            out.update(json.loads(REPORT_PATH.read_text(encoding="utf-8")))
-        except Exception:
-            pass
-    elif (DATA_DIR / "last_training_run.json").exists():
-        try:
-            out.update(json.loads((DATA_DIR / "last_training_run.json").read_text(encoding="utf-8")))
-        except Exception:
-            pass
+    if not prog.get("running"):
+        if REPORT_PATH.exists():
+            try:
+                out.update(json.loads(REPORT_PATH.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+        elif (DATA_DIR / "last_training_run.json").exists():
+            try:
+                out.update(json.loads((DATA_DIR / "last_training_run.json").read_text(encoding="utf-8")))
+            except Exception:
+                pass
     out.update(prog)
     return out
 
