@@ -55,10 +55,12 @@ Const EMAIL_OUTPUT_FILE = "C:\CMS_Local_Workspace\cms_email.txt"
 ' ============================================================
 Dim fso
 Set fso = CreateObject("Scripting.FileSystemObject")
-Dim gAttachDir, gPreferredCNum, gCadPath
+Dim gAttachDir, gPreferredCNum, gCadPath, gCustomerPrefix, gCustomerName
 gAttachDir = ""
 gPreferredCNum = ""
 gCadPath = ""
+gCustomerPrefix = ""
+gCustomerName = ""
 
 ' Make sure the local workspace exists (handoff + email files live here)
 If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
