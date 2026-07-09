@@ -38,7 +38,7 @@ Const PROPOSAL_TOTAL_SOURCE_CELL = ""   ' leave blank until you tell us the gran
 ' The plain "SOLIDWORKS\SLDWORKS.EXE" path opens 2025 — never use that.
 Const SW_EXE    = "C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
 Const SW_PROGID = "SldWorks.Application.31"   ' 31 = SolidWorks 2023 (32=2024, 33=2025)
-Const SW_MACRO = "C:\CMS_Local_Workspace\Module6121.swb"   ' source macro first; .swp fallback below
+Const SW_MACRO = "C:\CMS_Local_Workspace\Module6121.swp"   ' compiled macro — use .swp (RunMacro expects this)
 
 ' Handoff file written for Module6121 to read
 Const HANDOFF_FILE = "C:\CMS_Local_Workspace\cms_handoff.txt"
@@ -322,9 +322,9 @@ Function LaunchSolidWorksAndMacro()
 
     macroFolder = fso.GetParentFolderName(WScript.ScriptFullName)
     macroPath = SW_MACRO
-    If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swb"
-    If Not fso.FileExists(macroPath) Then macroPath = "C:\CMS_Local_Workspace\Module6121.swp"
     If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swp"
+    If Not fso.FileExists(macroPath) Then macroPath = "C:\CMS_Local_Workspace\Module6121.swb"
+    If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swb"
 
     On Error Resume Next
     Set sw = GetObject(, SW_PROGID)
@@ -361,7 +361,7 @@ Function LaunchSolidWorksAndMacro()
     WScript.Sleep 1500
 
     If Not fso.FileExists(macroPath) Then
-        LogStep "Module6121.swb/.swp not found next to launcher or at: " & SW_MACRO & ". Macro not run."
+        LogStep "Module6121.swp/.swb not found next to launcher or at: " & SW_MACRO & ". Macro not run."
         LaunchSolidWorksAndMacro = False
         Exit Function
     End If

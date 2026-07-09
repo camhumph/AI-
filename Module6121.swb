@@ -867,6 +867,14 @@ End Sub
 ' ============================================================
 Sub RunFromLauncher()
 On Error GoTo ErrHandler
+    ' Training scan writes cms_training_xt.txt — same entry style as live quotes.
+    Dim fsoTrain As Object
+    Set fsoTrain = CreateObject("Scripting.FileSystemObject")
+    If fsoTrain.FileExists(TRAINING_XT_HANDOFF) Then
+        RunTrainingXtExport
+        Exit Sub
+    End If
+
     Set swApp = Application.SldWorks
 
     If RUN_SOLIDWORKS_INVISIBLE Then

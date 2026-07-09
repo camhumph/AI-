@@ -11,7 +11,7 @@ Const LOCAL_WORKSPACE_ROOT = "C:\CMS_Local_Workspace"
 Const TRAINING_HANDOFF     = "C:\CMS_Local_Workspace\cms_training_xt.txt"
 Const SW_EXE               = "C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
 Const SW_PROGID            = "SldWorks.Application.31"
-Const SW_MACRO             = "C:\CMS_Local_Workspace\Module6121.swb"
+Const SW_MACRO             = "C:\CMS_Local_Workspace\Module6121.swp"
 Const LOG_FILE             = "C:\CMS_Local_Workspace\CMS_Training_XT_Launcher_Log.txt"
 
 Dim fso, shell
@@ -90,14 +90,28 @@ End Sub
 
 Function LaunchSolidWorksTrainingMacro()
     LaunchSolidWorksTrainingMacro = False
-    Dim sw, tries, macroPath, macroFolder
+    Dim sw, tries, macroPath, macroFolder, macroPaths(), mpIdx, pathCount
     macroFolder = fso.GetParentFolderName(WScript.ScriptFullName)
-    macroPath = SW_MACRO
-    If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swb"
-    If Not fso.FileExists(macroPath) Then macroPath = LOCAL_WORKSPACE_ROOT & "\Module6121.swp"
-    If Not fso.FileExists(macroPath) Then macroPath = macroFolder & "\Module6121.swp"
+    pathCount = 0
+    If fso.FileExists(LOCAL_WORKSPACE_ROOT & "\Module6121.swp") Then
+        ReDim macroPaths(0)
+        macroPaths(0) = LOCAL_WORKSPACE_ROOT & "\Module6121.swp"
+        pathCount = 1
+        LogStep "using compiled macro: Module6121.swp"
+    ElseIf fso.FileExists(SW_MACRO) Then
+        ReDim macroPaths(0)
+        macroPaths(0) = SW_MACRO
+        pathCount = 1
+    ElseIf fso.FileExists(LOCAL_WORKSPACE_ROOT & "\Module6121.swb") Then
+        ReDim macroPaths(0)
+        macroPaths(0) = LOCAL_WORKSPACE_ROOT & "\Module6121.swb"
+        pathCount = 1
+        LogStep "WARNING: Module6121.swp not found — falling back to .swb"
+    Else
+        LogStep "ERROR: Module6121.swp not found at " & LOCAL_WORKSPACE_ROOT
+        Exit Function
+    End If
 
-    LogStep "macro path: " & macroPath
     LogStep "sw exe: " & SW_EXE & "  progid: " & SW_PROGID
 
     On Error Resume Next
@@ -134,32 +148,53 @@ Function LaunchSolidWorksTrainingMacro()
     On Error GoTo 0
     WScript.Sleep 1500
 
-    If Not fso.FileExists(macroPath) Then
-        LogStep "Module6121 macro not found"
-        Exit Function
-    End If
+    tries = 0
+    Do While tries < 45
+        On Error Resume Next
+        If Not sw.CommandInProgress Then Exit Do
+        On Error GoTo 0
+        WScript.Sleep 1000
+        tries = tries + 1
+    Loop
+    On Error Resume Next
+    sw.CommandInProgress = False
+    On Error GoTo 0
 
-    Dim modNames, mi, okRun, ran, procNames, pi
+    Dim modNames, mi, okRun, ran, procNames, pi, macroErr
     modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
-    procNames = Array("RunTrainingXtExport", "main")
+    procNames = Array("main", "RunFromLauncher", "RunTrainingXtExport")
     ran = False
 
-    For pi = 0 To UBound(procNames)
-        For mi = 0 To UBound(modNames)
-            On Error Resume Next
-            sw.CommandInProgress = True
-            okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
-            sw.CommandInProgress = False
-            If Err.Number = 0 And okRun = True Then
-                On Error GoTo 0
-                ran = True
-                LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi)
-                Exit For
-            End If
-            LogStep "RunMacro failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number
-            Err.Clear
-            On Error GoTo 0
-        Next
+    For mpIdx = 0 To pathCount - 1
+        macroPath = macroPaths(mpIdx)
+        LogStep "macro path: " & macroPath
+        If Not fso.FileExists(macroPath) Then
+            LogStep "macro missing: " & macroPath
+        Else
+            For pi = 0 To UBound(procNames)
+                For mi = 0 To UBound(modNames)
+                    okRun = False
+                    macroErr = 0
+                    On Error Resume Next
+                    sw.CommandInProgress = True
+                    okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
+                    If Err.Number = 0 And okRun <> True Then
+                        okRun = sw.RunMacro2(macroPath, modNames(mi), procNames(pi), 1, macroErr)
+                    End If
+                    sw.CommandInProgress = False
+                    If Err.Number = 0 And okRun = True Then
+                        On Error GoTo 0
+                        ran = True
+                        LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi) & " path=" & macroPath
+                        Exit For
+                    End If
+                    LogStep "RunMacro(2) failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number & " macroErr=" & macroErr
+                    Err.Clear
+                    On Error GoTo 0
+                Next
+                If ran Then Exit For
+            Next
+        End If
         If ran Then Exit For
     Next
 
