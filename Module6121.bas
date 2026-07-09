@@ -52,14 +52,16 @@ Private Const WRITE_PCS_NAMING_ANALYSIS As Boolean = True
 Private Const RUN_SOLIDWORKS_INVISIBLE As Boolean = True
 Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
 
-' Fast quote mode: skip slow ISO JPEGs / visual inspection / per-plate STLs.
-' Whole-assembly STL is ALWAYS written (required for quoted-vs-final compare).
-Private Const FAST_QUOTE_MODE As Boolean = True
-Private Const CREATE_ISO_JPEGS As Boolean = False
+' Deliverable exports: always write STL + DXF + IGS + EASM + ISO JPGs.
+' Per-plate STLs and visual inspection stay optional (slower).
+Private Const FAST_QUOTE_MODE As Boolean = False
+Private Const CREATE_ISO_JPEGS As Boolean = True
 Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = False
 Private Const CREATE_DIM_DXF As Boolean = False   ' DIM DXF removed per request
 Private Const EXPORT_PER_PLATE_STLS As Boolean = False
-Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False  ' skip .easm/.igs when True=False for speed
+Private Const EXPORT_HEAVY_NEUTRALS As Boolean = True   ' write .easm + .igs
+Private Const EXPORT_BASE_DXF As Boolean = True
+Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
 Private Const CMS_BASE_TOP_VIEW_NAME As String = "*Bottom"
@@ -1892,9 +1894,27 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
     If Left(fileName, 2) = "~$" Then CadFilePriority = 0: Exit Function
     Dim bonus As Long
     bonus = 0
-    If InStr(nameUpper, CurrentJobNumber) > 0 Then bonus = 5
-    If InStr(nameUpper, "ASSEM") > 0 Or InStr(nameUpper, "ASSY") > 0 Or InStr(nameUpper, "BASE") > 0 _
-       Or InStr(nameUpper, "MOLDBASE") > 0 Then bonus = bonus + 3
+    ' Strongly prefer the assembly that belongs to THIS C-number / job folder.
+    ' Example: 863700126-C18614.sldasm beats 863700102_RFQ_MB_ASM_....sldasm
+    If CurrentJobNumber <> "" Then
+        If InStr(nameUpper, UCase(CurrentJobNumber)) > 0 Then bonus = bonus + 500
+    End If
+    If gExactJobFolderName <> "" Then
+        If InStr(nameUpper, UCase(CleanFileName(gExactJobFolderName))) > 0 Then bonus = bonus + 200
+    End If
+    If JobBaseName <> "" Then
+        If InStr(nameUpper, UCase(JobBaseName)) > 0 Then bonus = bonus + 100
+    End If
+    ' Prefer mold-base naming, but do NOT boost every *.sldasm via "ASM" substring
+    ' (that incorrectly preferred RFQ_MB_ASM over the C-number assembly).
+    If InStr(nameUpper, "MOLDBASE") > 0 Or InStr(nameUpper, "MOLD_BASE") > 0 Or InStr(nameUpper, "MOLD BASE") > 0 Then
+        bonus = bonus + 30
+    ElseIf InStr(nameUpper, "BASE") > 0 And InStr(nameUpper, "DATABASE") = 0 Then
+        bonus = bonus + 10
+    End If
+    ' Deprioritize obvious leftovers / other jobs
+    If InStr(nameUpper, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
+    If InStr(nameUpper, "_EXTRACT") > 0 Or InStr(nameUpper, "OLD_") > 0 Then bonus = bonus - 80
     Select Case ext
         Case "sldasm": CadFilePriority = 100 + bonus
         Case "easm": CadFilePriority = 90 + bonus
@@ -1906,6 +1926,7 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
         Case "prt": CadFilePriority = 45 + bonus
         Case Else: CadFilePriority = 0
     End Select
+    If CadFilePriority < 0 Then CadFilePriority = 0
 End Function
 
 Private Function OpenCadFile(ByVal cadPath As String) As Object
@@ -2415,31 +2436,33 @@ On Error GoTo ErrHandler
     SaveModelAs swModel, stlPath
     LogLine "Whole-assembly STL written: " & stlPath
 
-    ' Native SolidWorks copy of the whole base.
+    ' Native SolidWorks copy of the whole base + required deliverables.
     SaveModelAs swModel, sldPath
     SaveModelAs swModel, xtPath
     If EXPORT_HEAVY_NEUTRALS Then
-        If swModel.GetType = swDocASSEMBLY Then SaveModelAs swModel, easmPath
+        If swModel.GetType = swDocASSEMBLY Then
+            SaveModelAs swModel, easmPath
+            LogLine "EASM written: " & easmPath
+        End If
         SaveModelAs swModel, igsPath
-    Else
-        LogLine "Fast quote: skipped .easm/.igs (EXPORT_HEAVY_NEUTRALS=False)"
+        LogLine "IGS written: " & igsPath
     End If
 
     ' Per-plate STLs (TCP, BCP, ID/OD Holder, ID/OD Pot) — optional / slow.
-    If EXPORT_PER_PLATE_STLS And Not FAST_QUOTE_MODE Then
+    If EXPORT_PER_PLATE_STLS Then
         ExportPlateStlsForComparison CurrentJobFolder & "\stl"
     End If
 
-    ' Front + back ISO JPGs go in the MAIN job folder (not the base subfolder).
-    If CREATE_ISO_JPEGS And Not FAST_QUOTE_MODE Then
+    ' Front + back ISO JPGs in the MAIN job folder.
+    If CREATE_ISO_JPEGS Then
         ExportFrontAndBackIsoJpegs CurrentJobFolder, baseName
+        LogLine "ISO JPGs written to job folder"
     End If
 
-    ' Base DXF (4 projected views). Skip in fast mode — STL + X_T are enough for quoting.
-    If Not FAST_QUOTE_MODE Then
+    ' Base DXF (4 projected views) in the MAIN job folder.
+    If EXPORT_BASE_DXF Then
         CreateBaseDxfWithoutPyropel sldPath, dxfPath
-    Else
-        LogLine "Fast quote: skipped base DXF"
+        LogLine "DXF written: " & dxfPath
     End If
 
     ApplyCmsTopView swModel
@@ -3430,9 +3453,8 @@ On Error GoTo ErrHandler
     vBox = mdl.GetBox(False, False)
     On Error GoTo ErrHandler
     If IsValidBoxArray(vBox) = False Then Exit Function
-    dx = Abs(CDbl(vBox(3)) - CDbl(vBox(0))) * INCHES_PER_METER
-    dy = Abs(CDbl(vBox(4)) - CDbl(vBox(1))) * INCHES_PER_METER
-    dz = Abs(CDbl(vBox(5)) - CDbl(vBox(2))) * INCHES_PER_METER
+    Dim cxTmp As Double, cyTmp As Double, czTmp As Double
+    BoxCornersToInches vBox, dx, dy, dz, cxTmp, cyTmp, czTmp
     TryGetModelDocBoxDimsInches = True
     Exit Function
 ErrHandler:
@@ -3479,10 +3501,11 @@ On Error GoTo ErrHandler
         GetPartBoundingBoxInches = False
         Exit Function
     End If
-    dxIn = Abs(xmax - xmin) * INCHES_PER_METER
-    dyIn = Abs(ymax - ymin) * INCHES_PER_METER
-    dzIn = Abs(zmax - zmin) * INCHES_PER_METER
-    GetPartBoundingBoxInches = True
+    Dim fakeBox(0 To 5) As Double, cxT As Double, cyT As Double, czT As Double
+    fakeBox(0) = xmin: fakeBox(1) = ymin: fakeBox(2) = zmin
+    fakeBox(3) = xmax: fakeBox(4) = ymax: fakeBox(5) = zmax
+    BoxCornersToInches fakeBox, dxIn, dyIn, dzIn, cxT, cyT, czT
+    GetPartBoundingBoxInches = (dxIn > 0 And dyIn > 0 And dzIn > 0)
     Exit Function
 ErrHandler:
     GetPartBoundingBoxInches = False
@@ -3494,6 +3517,61 @@ Private Function IsValidBoxArray(ByVal vBox As Variant) As Boolean
     If UBound(vBox) < 5 Then Exit Function
     IsValidBoxArray = True
 End Function
+
+' SolidWorks box APIs normally return meters. Some imports / document-unit
+' edge cases return inches (or mm) already — blindly *39.37 makes dims huge.
+' Pick the scale that yields sane mold-base sizes (under ~10 ft on an axis).
+Private Function BoxAxisToInches(ByVal rawDelta As Double) As Double
+    Dim asMeters As Double, asInches As Double, asMm As Double
+    Dim best As Double
+    asMeters = Abs(rawDelta) * INCHES_PER_METER
+    asInches = Abs(rawDelta)
+    asMm = Abs(rawDelta) / 25.4
+    best = asMeters
+    ' Prefer already-inches when meter conversion is absurdly large for a mold plate
+    If asMeters > MAX_SANE_MOLD_DIM_IN And asInches <= MAX_SANE_MOLD_DIM_IN And asInches > 0.05 Then
+        best = asInches
+    ElseIf asMeters > MAX_SANE_MOLD_DIM_IN And asMm <= MAX_SANE_MOLD_DIM_IN And asMm > 0.05 Then
+        best = asMm
+    ElseIf asMeters <= 0.05 And asInches > 0.05 And asInches <= MAX_SANE_MOLD_DIM_IN Then
+        ' Meter conversion collapsed to near-zero — raw was likely already inches
+        best = asInches
+    End If
+    BoxAxisToInches = best
+End Function
+
+Private Sub BoxCornersToInches(ByVal vBox As Variant, _
+                               ByRef dxIn As Double, ByRef dyIn As Double, ByRef dzIn As Double, _
+                               ByRef cxIn As Double, ByRef cyIn As Double, ByRef czIn As Double)
+    Dim rx As Double, ry As Double, rz As Double
+    rx = Abs(CDbl(vBox(3)) - CDbl(vBox(0)))
+    ry = Abs(CDbl(vBox(4)) - CDbl(vBox(1)))
+    rz = Abs(CDbl(vBox(5)) - CDbl(vBox(2)))
+    ' Detect scale from the largest axis so all three share one unit system
+    Dim scale As Double
+    Dim rawMax As Double
+    rawMax = rx
+    If ry > rawMax Then rawMax = ry
+    If rz > rawMax Then rawMax = rz
+    Dim asMeters As Double, asInches As Double, asMm As Double
+    asMeters = rawMax * INCHES_PER_METER
+    asInches = rawMax
+    asMm = rawMax / 25.4
+    scale = INCHES_PER_METER
+    If asMeters > MAX_SANE_MOLD_DIM_IN And asInches <= MAX_SANE_MOLD_DIM_IN And asInches > 0.05 Then
+        scale = 1#
+        LogLine "Box units: treating as inches (meter convert was " & FormatNumberForCsv(asMeters) & " in)"
+    ElseIf asMeters > MAX_SANE_MOLD_DIM_IN And asMm <= MAX_SANE_MOLD_DIM_IN And asMm > 0.05 Then
+        scale = 1# / 25.4
+        LogLine "Box units: treating as mm (meter convert was " & FormatNumberForCsv(asMeters) & " in)"
+    End If
+    dxIn = rx * scale
+    dyIn = ry * scale
+    dzIn = rz * scale
+    cxIn = ((CDbl(vBox(0)) + CDbl(vBox(3))) / 2#) * scale
+    cyIn = ((CDbl(vBox(1)) + CDbl(vBox(4))) / 2#) * scale
+    czIn = ((CDbl(vBox(2)) + CDbl(vBox(5))) / 2#) * scale
+End Sub
 
 Private Sub SortThreeDimensions(ByVal a As Double, ByVal b As Double, ByVal c As Double, _
                                 ByRef l As Double, ByRef w As Double, ByRef t As Double)
@@ -3741,12 +3819,7 @@ On Error GoTo ErrHandler
         If Not swBody Is Nothing Then
             vBox = swBody.GetBodyBox
             If Not IsEmpty(vBox) Then
-                dx = Abs(CDbl(vBox(3)) - CDbl(vBox(0))) * INCHES_PER_METER
-                dy = Abs(CDbl(vBox(4)) - CDbl(vBox(1))) * INCHES_PER_METER
-                dz = Abs(CDbl(vBox(5)) - CDbl(vBox(2))) * INCHES_PER_METER
-                cx = ((CDbl(vBox(0)) + CDbl(vBox(3))) / 2#) * INCHES_PER_METER
-                cy = ((CDbl(vBox(1)) + CDbl(vBox(4))) / 2#) * INCHES_PER_METER
-                cz = ((CDbl(vBox(2)) + CDbl(vBox(5))) / 2#) * INCHES_PER_METER
+                BoxCornersToInches vBox, dx, dy, dz, cx, cy, cz
                 massV = GetBodyMassOrVolumeValue(swBody)
                 AddCadPart baseName & " [" & swBody.Name & "]", partModel.GetPathName, "", swBody.Name, _
                            dx, dy, dz, massV, True, cx, cy, cz, True
@@ -3763,8 +3836,25 @@ Private Sub AddCadPart(ByVal compName As String, ByVal filePath As String, ByVal
                        ByVal massV As Double, ByVal hasC As Boolean, ByVal cx As Double, ByVal cy As Double, _
                        ByVal cz As Double, ByVal bodyOnly As Boolean)
     Dim l As Double, w As Double, t As Double
+    ' Final sanity: if still absurdly large, assume inches were double-converted and undo *39.37
+    If dx > MAX_SANE_MOLD_DIM_IN Or dy > MAX_SANE_MOLD_DIM_IN Or dz > MAX_SANE_MOLD_DIM_IN Then
+        If (dx / INCHES_PER_METER) <= MAX_SANE_MOLD_DIM_IN And (dy / INCHES_PER_METER) <= MAX_SANE_MOLD_DIM_IN Then
+            LogLine "Dim sanity: undoing meter scale for " & compName & " (was " & FormatNumberForCsv(dx) & "x" & FormatNumberForCsv(dy) & "x" & FormatNumberForCsv(dz) & ")"
+            dx = dx / INCHES_PER_METER
+            dy = dy / INCHES_PER_METER
+            dz = dz / INCHES_PER_METER
+            cx = cx / INCHES_PER_METER
+            cy = cy / INCHES_PER_METER
+            cz = cz / INCHES_PER_METER
+        End If
+    End If
     SortThreeDimensions dx, dy, dz, l, w, t
     If l * w * t <= 0 Then Exit Sub
+    ' Skip hardware-scale noise and still-impossible mold sizes
+    If l > MAX_SANE_MOLD_DIM_IN Then
+        LogLine "Skipping part with impossible size: " & compName & " L=" & FormatNumberForCsv(l)
+        Exit Sub
+    End If
     PartCount = PartCount + 1
     ReDim Preserve parts(1 To PartCount)
     parts(PartCount).componentName = compName
@@ -3818,13 +3908,12 @@ End Function
 Private Function TryGetComponentCenterInches(ByVal swComp As Object, ByRef cx As Double, ByRef cy As Double, ByRef cz As Double) As Boolean
 On Error GoTo ErrHandler
     Dim vBox As Variant
+    Dim dxT As Double, dyT As Double, dzT As Double
     vBox = swComp.GetBox(False, False)
     If IsEmpty(vBox) Then Exit Function
     If IsArray(vBox) = False Then Exit Function
     If UBound(vBox) < 5 Then Exit Function
-    cx = ((CDbl(vBox(0)) + CDbl(vBox(3))) / 2#) * INCHES_PER_METER
-    cy = ((CDbl(vBox(1)) + CDbl(vBox(4))) / 2#) * INCHES_PER_METER
-    cz = ((CDbl(vBox(2)) + CDbl(vBox(5))) / 2#) * INCHES_PER_METER
+    BoxCornersToInches vBox, dxT, dyT, dzT, cx, cy, cz
     TryGetComponentCenterInches = True
     Exit Function
 ErrHandler:

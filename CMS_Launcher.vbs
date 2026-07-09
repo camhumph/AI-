@@ -435,13 +435,28 @@ Function ExtractCNumberToken(s)
     Loop
 End Function
 
-' Rank CAD files the same way the macro does (sldasm > step/x_t > sldprt).
+' Rank CAD files: strongly prefer the assembly that matches this job's C-number.
+' Example: 863700126-C18614.sldasm beats 863700102_RFQ_MB_ASM_....sldasm
 Function CadPriority(ext, fileName)
     Dim e, bonus, u
     e = LCase(ext)
     u = UCase(fileName)
     bonus = 0
-    If InStr(u, "MOLD") > 0 Or InStr(u, "BASE") > 0 Or InStr(u, "ASM") > 0 Then bonus = 20
+    If cNum <> "" Then
+        If InStr(u, UCase(cNum)) > 0 Then bonus = bonus + 500
+    End If
+    If quoteNoHyphen <> "" Then
+        If InStr(u, UCase(quoteNoHyphen)) > 0 Then bonus = bonus + 400
+    End If
+    If jobFolderName <> "" Then
+        If InStr(u, UCase(jobFolderName)) > 0 Then bonus = bonus + 200
+    End If
+    If InStr(u, "MOLDBASE") > 0 Or InStr(u, "MOLD_BASE") > 0 Then
+        bonus = bonus + 30
+    ElseIf InStr(u, "BASE") > 0 And InStr(u, "DATABASE") = 0 Then
+        bonus = bonus + 10
+    End If
+    If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
     Select Case e
         Case "sldasm": CadPriority = 100 + bonus
         Case "step", "stp": CadPriority = 80 + bonus
@@ -451,6 +466,7 @@ Function CadPriority(ext, fileName)
         Case "prt": CadPriority = 45 + bonus
         Case Else: CadPriority = 0
     End Select
+    If CadPriority < 0 Then CadPriority = 0
 End Function
 
 Function FindBestCadInFolder(folderPath)
