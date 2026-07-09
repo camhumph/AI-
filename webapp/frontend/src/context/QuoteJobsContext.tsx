@@ -100,7 +100,7 @@ export function QuoteJobsProvider({ children }: { children: ReactNode }) {
           /* keep polling */
         }
       }
-    }, 3000);
+    }, 5000);
     return () => clearInterval(iv);
   }, [jobs]);
 

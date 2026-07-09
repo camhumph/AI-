@@ -40,15 +40,49 @@ def is_windows() -> bool:
     return platform.system() == "Windows"
 
 
-def folder_has_cad(folder: Path) -> bool:
+def folder_has_cad(folder: Path, max_depth: int = 2) -> bool:
+    """Shallow CAD check — avoid slow network rglob."""
     if not folder.exists():
         return False
-    for path in folder.rglob("*"):
-        if not path.is_file() or path.name.startswith("~$"):
-            continue
-        if path.suffix.lower() in CAD_PRIORITY:
-            return True
-    return False
+
+    def walk(p: Path, depth: int) -> bool:
+        try:
+            for child in p.iterdir():
+                if child.name.startswith("~$") or child.name.startswith("."):
+                    continue
+                if child.is_file() and child.suffix.lower() in CAD_PRIORITY:
+                    return True
+                if child.is_dir() and depth < max_depth and walk(child, depth + 1):
+                    return True
+        except (PermissionError, OSError):
+            return False
+        return False
+
+    return walk(folder, 0)
+
+
+_active_xt_proc: subprocess.Popen | None = None
+_xt_cancel = False
+
+
+def request_xt_cancel() -> None:
+    """Break any in-progress XT export wait loop and kill the PowerShell launcher."""
+    global _xt_cancel, _active_xt_proc
+    _xt_cancel = True
+    try:
+        TRAINING_DONE.write_text(
+            "Status=CANCELLED\nMessage=Cancelled by user\nXtCsv=\nPartCount=0\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    proc = _active_xt_proc
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    _active_xt_proc = None
 
 
 def deploy_runtime_files() -> None:
@@ -96,6 +130,8 @@ def _parse_done_file(path: Path) -> dict[str, str]:
 
 def export_xt_via_macro(folder: Path, job_id: str, timeout_sec: int = 1200) -> dict:
     """Run SolidWorks macro to write XT_Export_CAD_Dimensions.csv into folder."""
+    global _active_xt_proc, _xt_cancel
+    _xt_cancel = False
     folder = folder.resolve()
     if not is_windows():
         return {"ok": False, "status": "skipped", "reason": "SolidWorks XT export requires Windows"}
@@ -152,15 +188,20 @@ def export_xt_via_macro(folder: Path, job_id: str, timeout_sec: int = 1200) -> d
     ]
 
     try:
-        subprocess.Popen(cmd, close_fds=True)
+        _active_xt_proc = subprocess.Popen(cmd, close_fds=True)
     except Exception as exc:
+        _active_xt_proc = None
         return {"ok": False, "status": "error", "reason": str(exc)}
 
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
+        if _xt_cancel:
+            _active_xt_proc = None
+            return {"ok": False, "status": "cancelled", "reason": "Cancelled by user"}
         done = _parse_done_file(TRAINING_DONE)
         status = done.get("Status", "").upper()
         if status:
+            _active_xt_proc = None
             xt_path = Path(done.get("XtCsv") or output_csv)
             if status == "OK" and xt_path.exists():
                 return {
@@ -170,13 +211,16 @@ def export_xt_via_macro(folder: Path, job_id: str, timeout_sec: int = 1200) -> d
                     "part_count": done.get("PartCount", ""),
                     "message": done.get("Message", ""),
                 }
+            if status == "CANCELLED":
+                return {"ok": False, "status": "cancelled", "reason": "Cancelled by user"}
             return {
                 "ok": False,
                 "status": "error",
                 "reason": done.get("Message") or f"XT export returned {status}",
             }
-        time.sleep(2)
+        time.sleep(0.4)
 
+    _active_xt_proc = None
     return {
         "ok": False,
         "status": "timeout",

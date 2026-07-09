@@ -106,7 +106,8 @@ def _extract_name_addr(from_hdr: str) -> tuple[str, str]:
     return from_hdr, from_hdr
 
 
-def list_messages(limit: int = 50, query: str = "", folder: str | None = None) -> list:
+def list_messages(limit: int = 40, query: str = "", folder: str | None = None) -> list:
+    """Fast inbox list — headers + flags only (no body peek per message)."""
     imap = _connect()
     try:
         if folder and folder != config.IMAP_FOLDER:
@@ -115,37 +116,56 @@ def list_messages(limit: int = 50, query: str = "", folder: str | None = None) -
         q = (query or "").strip()
         if q:
             safe = q.replace('"', "")
-            criteria = f'(OR SUBJECT "{safe}" FROM "{safe}" BODY "{safe}")'
+            # Subject/From only — BODY search is very slow on large mailboxes
+            criteria = f'(OR SUBJECT "{safe}" FROM "{safe}")'
         status, data = imap.search(None, criteria)
         if status != "OK":
             return []
         ids = data[0].split()
         ids = ids[-limit:][::-1]
+        if not ids:
+            return []
+
+        # Batch fetch headers for all IDs in one round-trip
+        id_list = b",".join(ids)
+        status, msg_data = imap.fetch(
+            id_list,
+            "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])",
+        )
+        if status != "OK" or not msg_data:
+            return []
+
+        # Build id -> (flags, header_bytes) from fetch response
+        by_id: dict[bytes, tuple[dict, bytes]] = {}
+        current_id: bytes | None = None
+        for item in msg_data:
+            if isinstance(item, bytes):
+                # e.g. b')' separators — ignore
+                continue
+            if not isinstance(item, tuple) or len(item) < 2:
+                continue
+            meta = item[0] or b""
+            meta_s = meta.decode("utf-8", errors="replace") if isinstance(meta, bytes) else str(meta)
+            # Extract message sequence number from fetch meta like b'123 (FLAGS ...'
+            m = re.match(r"(\d+)\s*\(", meta_s)
+            if m:
+                current_id = m.group(1).encode()
+            flags = _parse_flags(item) if "FLAGS" in meta_s.upper() else {"seen": False, "starred": False}
+            header_bytes = item[1] or b""
+            if current_id is not None:
+                prev = by_id.get(current_id)
+                if prev:
+                    # merge flags if we already have header
+                    merged_flags = prev[0] if prev[0].get("seen") or prev[0].get("starred") else flags
+                    by_id[current_id] = (merged_flags if "FLAGS" in meta_s.upper() else prev[0], header_bytes or prev[1])
+                else:
+                    by_id[current_id] = (flags, header_bytes)
+
         messages = []
         for msg_id in ids:
-            status, msg_data = imap.fetch(
-                msg_id,
-                "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)] BODY.PEEK[TEXT]<0.400>)",
-            )
-            if status != "OK" or not msg_data:
+            flags, header_bytes = by_id.get(msg_id, ({"seen": False, "starred": False}, b""))
+            if not header_bytes:
                 continue
-            flags = {"seen": False, "starred": False}
-            header_bytes = b""
-            snippet_bytes = b""
-            for item in msg_data:
-                if not isinstance(item, tuple):
-                    continue
-                meta = item[0].decode("utf-8", errors="replace") if item[0] else ""
-                if "FLAGS" in meta.upper():
-                    flags = _parse_flags(item)
-                if b"HEADER" in (item[0] or b""):
-                    header_bytes = item[1] or b""
-                elif item[1] and not header_bytes:
-                    snippet_bytes = item[1] or b""
-                elif item[1] and header_bytes and not snippet_bytes:
-                    snippet_bytes = item[1] or b""
-            if not header_bytes and msg_data and isinstance(msg_data[0], tuple):
-                header_bytes = msg_data[0][1] or b""
             msg = email.message_from_bytes(header_bytes)
             subject = _decode(msg.get("Subject"))
             from_ = _decode(msg.get("From"))
@@ -155,8 +175,6 @@ def list_messages(limit: int = 50, query: str = "", folder: str | None = None) -
                 date_iso = parsedate_to_datetime(date_hdr).isoformat() if date_hdr else ""
             except Exception:
                 date_iso = date_hdr or ""
-            snippet = re.sub(r"\s+", " ", snippet_bytes.decode("utf-8", errors="replace")).strip()
-            snippet = snippet[:120] + ("…" if len(snippet) > 120 else "")
             messages.append(
                 {
                     "id": msg_id.decode(),
@@ -165,9 +183,9 @@ def list_messages(limit: int = 50, query: str = "", folder: str | None = None) -
                     "from_addr": addr,
                     "subject": subject,
                     "date": date_iso,
-                    "snippet": snippet,
-                    "seen": flags["seen"],
-                    "starred": flags["starred"],
+                    "snippet": "",
+                    "seen": flags.get("seen", False),
+                    "starred": flags.get("starred", False),
                     "job_tokens": guess_job_tokens(subject),
                 }
             )

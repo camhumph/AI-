@@ -190,7 +190,7 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
                     </div>
                     <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-ink-600" />
                   </button>
-                  {(entry.has_xt_csv || entry.c_number || entry.name.match(/\.(sldasm|sldprt|x_t|step|stp|zip)$/i)) && (
+                  {(entry.has_xt_csv || entry.c_number || entry.has_quote_sheet || entry.has_steel_sheet) && (
                     <Button
                       variant="primary"
                       className="shrink-0 px-3 py-1.5 text-[10px]"

@@ -95,9 +95,16 @@ export default function SettingsPage() {
     setCancelling(true);
     try {
       const result = await api.cancelTraining();
-      setTrainingStatus(result);
+      setTrainingStatus({ ...result, running: false, phase: "cancelled" });
+      setTrainingRunning(false);
+      setCancelling(false);
     } catch (e) {
       setTrainingError(e instanceof Error ? e.message : "Cancel failed");
+      // Force UI clear even if API fails
+      setTrainingStatus((prev) =>
+        prev ? { ...prev, running: false, phase: "cancelled", message: "Training cancelled" } : prev
+      );
+      setTrainingRunning(false);
       setCancelling(false);
     }
   };
@@ -219,7 +226,7 @@ export default function SettingsPage() {
             />
             Run Qwen deep learning after XT export (slow — uncheck for fast scan only)
           </label>
-          {((trainingStatus?.running) || trainingRunning) && (
+          {((trainingStatus?.running) || trainingRunning) && trainingStatus?.phase !== "cancelled" && (
             <div className="glass-panel-strong mb-4 overflow-hidden rounded-2xl p-4">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-200">

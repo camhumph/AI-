@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import platform
 import re
 import subprocess
 import sys
@@ -251,7 +252,19 @@ def _compact_row(row: dict) -> dict:
 
 def _write_progress(**fields) -> None:
     with _progress_lock:
+        # After a hard cancel, ignore worker updates that try to keep running=True
+        if _cancel_event.is_set() and fields.get("running") is True:
+            return
+        if _cancel_event.is_set() and _progress.get("phase") == "cancelled":
+            # Only allow final cancelled/error writes
+            if fields.get("phase") not in (None, "cancelled", "error", "done"):
+                fields = {k: v for k, v in fields.items() if k in ("detail", "message", "elapsed_sec", "updated_at")}
+                if not fields:
+                    return
         _progress.update(fields)
+        if _cancel_event.is_set() and _progress.get("phase") == "cancelled":
+            _progress["running"] = False
+            _progress["qwen_thinking"] = False
         _progress["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         started = _progress.get("started_at") or ""
         if started and _progress.get("running"):
@@ -289,22 +302,49 @@ def is_cancelled() -> bool:
 
 
 def request_cancel() -> dict:
-    """Signal the running training scan to stop; kill Ollama if mid-think."""
+    """Force-stop training immediately: kill Ollama + XT export wait, clear running flag."""
+    global _active_ollama_proc
     _cancel_event.set()
-    killed = False
+    killed: list[str] = []
+
     with _active_ollama_lock:
         proc = _active_ollama_proc
         if proc is not None and proc.poll() is None:
             try:
                 proc.kill()
-                killed = True
+                killed.append("ollama")
             except Exception:
                 pass
+        _active_ollama_proc = None
+
+    try:
+        training_xt_export.request_xt_cancel()
+        killed.append("xt_export")
+    except Exception:
+        pass
+
+    # Hard-kill leftover ollama CLI on Windows if still running
+    if platform.system() == "Windows":
+        for name in ("ollama.exe",):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", name],
+                    capture_output=True,
+                    timeout=5,
+                )
+                killed.append(name)
+            except Exception:
+                pass
+
     _write_progress(
+        running=False,
+        phase="cancelled",
         cancelled=True,
         qwen_thinking=False,
-        message="Cancel requested — stopping after current step…",
-        detail="Ollama process killed" if killed else "Waiting for current step to exit",
+        qwen_elapsed_sec=0,
+        message="Training cancelled",
+        detail="Stopped immediately" + (f" · killed {', '.join(killed)}" if killed else ""),
+        error="",
     )
     return get_progress()
 
@@ -897,6 +937,11 @@ def _run_audit_worker(
                     return summary
                 xt_result = training_xt_export.ensure_xt_export(folder, job_id)
                 entry["xt_export"] = xt_result
+                if xt_result.get("status") == "cancelled" or is_cancelled():
+                    results.append(entry)
+                    summary = _finalize_summary(results, jobs_root or "", use_qwen, qwen_model, export_xt)
+                    summary["cancelled"] = True
+                    return summary
                 _write_progress(
                     detail=f"XT export: {xt_result.get('status')} · {xt_result.get('reason') or xt_result.get('message') or ''}"
                 )
@@ -1079,20 +1124,32 @@ def _write_suggestions_md(suggestions: list[dict], summary: dict) -> None:
 
 
 def status() -> dict:
-    """Live progress always wins while a scan is running."""
+    """Live progress always wins while a scan is running or just cancelled."""
     out: dict = {"jobs_processed": 0, "output_dir": str(OUT_DIR), "suggestions": []}
     prog = get_progress()
-    if not prog.get("running"):
-        if REPORT_PATH.exists():
+    # Don't let a stale report overwrite a live/cancelled progress state
+    if prog.get("running") or prog.get("phase") in ("cancelled", "error", "starting", "scan", "xt_export", "qwen"):
+        out.update(prog)
+        if not prog.get("running") and prog.get("phase") == "done" and REPORT_PATH.exists():
             try:
-                out.update(json.loads(REPORT_PATH.read_text(encoding="utf-8")))
+                report = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+                for k in ("results", "suggestions", "jobs_processed", "jobs_ok", "overall_rules_accuracy_pct", "overall_qwen_accuracy_pct", "bms_jobs", "standard_jobs", "xt_exported_jobs"):
+                    if k in report:
+                        out[k] = report[k]
             except Exception:
                 pass
-        elif (DATA_DIR / "last_training_run.json").exists():
-            try:
-                out.update(json.loads((DATA_DIR / "last_training_run.json").read_text(encoding="utf-8")))
-            except Exception:
-                pass
+        return out
+
+    if REPORT_PATH.exists():
+        try:
+            out.update(json.loads(REPORT_PATH.read_text(encoding="utf-8")))
+        except Exception:
+            pass
+    elif (DATA_DIR / "last_training_run.json").exists():
+        try:
+            out.update(json.loads((DATA_DIR / "last_training_run.json").read_text(encoding="utf-8")))
+        except Exception:
+            pass
     out.update(prog)
     return out
 

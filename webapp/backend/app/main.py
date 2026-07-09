@@ -345,9 +345,9 @@ def api_email_status():
 
 
 @app.get("/api/email/messages")
-def api_email_messages(limit: int = 50, q: str = ""):
+def api_email_messages(limit: int = 40, q: str = ""):
     try:
-        messages = email_service.list_messages(limit, query=q)
+        messages = email_service.list_messages(min(limit, 60), query=q)
     except email_service.EmailNotConfigured as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:

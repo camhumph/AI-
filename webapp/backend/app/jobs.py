@@ -236,8 +236,12 @@ def _workspace_roots() -> list[Path]:
     return out
 
 
-def browse_workspace(path: str = "") -> dict:
-    """List subfolders/files under a workspace path for the folder picker."""
+def browse_workspace(path: str = "", quick: bool = True) -> dict:
+    """List subfolders under a workspace path for the folder picker.
+
+    quick=True (default): only list names + C-number from folder name — no
+    per-folder glob of quote/steel sheets (those are slow on network shares).
+    """
     from . import config as cfg
 
     base = Path(path) if path else cfg.WORKSPACE_ROOT
@@ -252,23 +256,34 @@ def browse_workspace(path: str = "") -> dict:
 
     entries = []
     try:
-        for child in sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+        children = list(base.iterdir())
+        children.sort(key=lambda p: (not p.is_dir(), p.name.lower()))
+        for child in children:
             if child.name.startswith("."):
                 continue
-            c_num = _extract_c_number(child.name)
-            has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
-            has_quote = any(child.glob("*quote*.xls*")) or any(child.glob("*Quote*.xls*"))
-            has_steel = any(child.glob("*steel*.xls*")) or any(child.glob("*J000*.xls*"))
+            is_dir = child.is_dir()
+            c_num = _extract_c_number(child.name) if is_dir else None
+            # Fast path: skip expensive network globs when browsing month folders
+            has_xt = False
+            has_quote = False
+            has_steel = False
+            if is_dir and not quick:
+                has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
+                has_quote = any(child.glob("*quote*.xls*")) or any(child.glob("*Quote*.xls*"))
+                has_steel = any(child.glob("*steel*.xls*")) or any(child.glob("*J000*.xls*"))
+            elif is_dir and quick:
+                # Cheap single-file check only (no wildcards)
+                has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
             entries.append(
                 {
                     "name": child.name,
                     "path": str(child),
-                    "is_dir": child.is_dir(),
+                    "is_dir": is_dir,
                     "c_number": c_num,
                     "has_xt_csv": has_xt,
                     "has_quote_sheet": has_quote,
                     "has_steel_sheet": has_steel,
-                    "quote_ready": child.is_dir() and (has_xt or has_quote or has_steel),
+                    "quote_ready": is_dir and (bool(c_num) or has_xt or has_quote or has_steel),
                 }
             )
     except PermissionError:
