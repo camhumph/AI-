@@ -244,6 +244,10 @@ Private Type PartInfo
     Length As Double
     Width As Double
     Thickness As Double
+    ' Raw assembly-axis box extents before CMS-view L/W/T assignment.
+    BoxDx As Double
+    BoxDy As Double
+    BoxDz As Double
     BBoxVolume As Double
     massValue As Double
     hasMassCenter As Boolean
@@ -257,6 +261,15 @@ Private Type PartInfo
     UsedForBomMatch As Boolean
     isBodyOnly As Boolean
 End Type
+
+' CMS DXF view-frame axes (after CMS_TOP / *Front / *Right are locked).
+' Top view horizontal = Length, Top view vertical = Width, Top view depth = Thickness.
+' Right-side view of that top: DXF X = Thickness, DXF Y = Length.
+' Front view: DXF X = Width. Model XYZ alone is not used for L/W/T.
+Private gCmsViewFrameReady As Boolean
+Private gCmsLenAxisX As Double, gCmsLenAxisY As Double, gCmsLenAxisZ As Double
+Private gCmsWidAxisX As Double, gCmsWidAxisY As Double, gCmsWidAxisZ As Double
+Private gCmsThkAxisX As Double, gCmsThkAxisY As Double, gCmsThkAxisZ As Double
 
 Private Type BomInfo
     Description As String
@@ -673,6 +686,7 @@ On Error GoTo ErrHandler
 
     JobStartTime = Now
     FinalStlCoordFrameReady = False
+    ResetCmsViewFrame
     Dim stlCoordI As Long
     For stlCoordI = 0 To 8
         FinalStlCoordM(stlCoordI) = 0#
@@ -755,6 +769,9 @@ On Error GoTo ErrHandler
         LogDone "Set BMS pot-block TCP/top orientation (active CAD)"
     End If
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
+    CaptureCmsViewFrameFromModel swModel
+    ApplyCmsViewDimsToAllParts
+    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
     If (Not FAST_QUOTE_MODE) Or (Not gJobIsStandardBase) Then
         UnsuppressAllAssemblyComponents swModel
         ShowAllAssemblyComponents swModel
@@ -791,6 +808,9 @@ On Error GoTo ErrHandler
             swModel.NameView CMS_TOP_VIEW_NAME
             On Error GoTo ErrHandler
             CaptureFinalStandardViewsForStlCoordinateSystem swModel
+            CaptureCmsViewFrameFromModel swModel
+            ApplyCmsViewDimsToAllParts
+            WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
         End If
         LogDone "Refine STANDARD *Front from rails/latch after classify"
     End If
@@ -1244,6 +1264,7 @@ On Error GoTo ErrHandler
     CurrentJobNumber = UCase(Trim(jobSearchText))
     JobStartTime = Now
     FinalStlCoordFrameReady = False
+    ResetCmsViewFrame
     Dim stlCoordI As Long
     For stlCoordI = 0 To 8
         FinalStlCoordM(stlCoordI) = 0#
@@ -1423,6 +1444,9 @@ On Error GoTo ErrHandler
 
     ' gemini1: capture corrected *Front matrix so merged STL post-rotates correctly.
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
+    CaptureCmsViewFrameFromModel swModel
+    ApplyCmsViewDimsToAllParts
+    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
 
     ' Quote/steel FIRST so the webapp has numbers even if export is still running.
     ' (Previously export ran before ClassifyStandardBasePlates — quote waited on STL/DXF.)
@@ -1440,7 +1464,7 @@ On Error GoTo ErrHandler
     End If
 
     ' After standard stack/rails/latch roles are known, refine *Front and
-    ' re-capture the STL coordinate frame.
+    ' re-capture the STL coordinate frame + CMS view L/W/T dims.
     If isStd Then
         LogStart "Refine STANDARD *Front from rails/latch after classify"
         If DefineStandardFrontFromRailsAndFootprint(swModel) Then
@@ -1452,6 +1476,9 @@ On Error GoTo ErrHandler
             swModel.NameView CMS_TOP_VIEW_NAME
             On Error GoTo ErrHandler
             CaptureFinalStandardViewsForStlCoordinateSystem swModel
+            CaptureCmsViewFrameFromModel swModel
+            ApplyCmsViewDimsToAllParts
+            WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
         End If
         LogDone "Refine STANDARD *Front from rails/latch after classify"
     End If
@@ -3927,6 +3954,8 @@ On Error GoTo ErrHandler
     centerY = E_SHEET_HEIGHT_IN / 2#
 
     Dim projectedXOffset As Double, projectedYOffset As Double
+    ' Parent view is CMS_TOP: sheet X ~ Length, sheet Y ~ Width.
+    ' Projected RIGHT sits to the side: its DXF X is Thickness, DXF Y is Length.
     projectedXOffset = ((partL / 2#) + DXF_PROJECTED_VIEW_GAP_IN + (partT / 2#)) * scaleVal
     projectedYOffset = ((partW / 2#) + DXF_PROJECTED_VIEW_GAP_IN + (partT / 2#)) * scaleVal
 
@@ -4422,7 +4451,12 @@ On Error GoTo ErrHandler
     swApp.CloseDoc mdl.GetTitle
     On Error GoTo ErrHandler
     If gotBox = False Then Exit Function
-    SortThreeDimensions dx, dy, dz, l, w, t
+    ' Prefer CMS Top/Right/Front axes when the view frame is locked.
+    If gCmsViewFrameReady Then
+        AssignLengthWidthThicknessFromAxes dx, dy, dz, l, w, t
+    Else
+        SortThreeDimensions dx, dy, dz, l, w, t
+    End If
     l = Round(l, DIM_DECIMALS): w = Round(w, DIM_DECIMALS): t = Round(t, DIM_DECIMALS)
     TryGetNativeModelDimsInches = (l > 0 And w > 0 And t > 0)
     Exit Function
@@ -4577,6 +4611,239 @@ Private Sub SortThreeDimensions(ByVal a As Double, ByVal b As Double, ByVal c As
     Next i
     l = arr(1): w = arr(2): t = arr(3)
 End Sub
+
+' ============================================================
+' CMS DXF VIEW-FRAME dimensions (L/W/T follow oriented views)
+'
+' After CMS_TOP / *Front / *Right are locked:
+'   TOP view:   horizontal = Length, vertical = Width, into-screen = Thickness
+'   RIGHT view: DXF X = Thickness, DXF Y = Length
+'   FRONT view: DXF X = Width
+' Model XYZ alone is NOT L/W/T — the frame rotates with the views.
+' ============================================================
+Private Sub ResetCmsViewFrame()
+    gCmsViewFrameReady = False
+    gCmsLenAxisX = 1#: gCmsLenAxisY = 0#: gCmsLenAxisZ = 0#
+    gCmsWidAxisX = 0#: gCmsWidAxisY = 1#: gCmsWidAxisZ = 0#
+    gCmsThkAxisX = 0#: gCmsThkAxisY = 0#: gCmsThkAxisZ = 1#
+End Sub
+
+Private Sub NormalizeAxis3(ByRef ax As Double, ByRef ay As Double, ByRef az As Double)
+    Dim mag As Double
+    mag = Sqr(ax * ax + ay * ay + az * az)
+    If mag <= 0.0000001 Then
+        ax = 0#: ay = 0#: az = 0#
+    Else
+        ax = ax / mag: ay = ay / mag: az = az / mag
+    End If
+End Sub
+
+Private Function AbsDotAxis3(ByVal ax As Double, ByVal ay As Double, ByVal az As Double, _
+                             ByVal bx As Double, ByVal by As Double, ByVal bz As Double) As Double
+    AbsDotAxis3 = Abs(ax * bx + ay * by + az * bz)
+End Function
+
+' Capture Length/Width/Thickness model-space axes from the oriented CMS views.
+' Uses ActiveView.Orientation3 like the pot/front depth code:
+'   view X = col0 [m0,m3,m6], view Y = col1 [m1,m4,m7], depth = col2 [m2,m5,m8]
+Private Function CaptureCmsViewFrameFromModel(ByVal model As Object) As Boolean
+On Error GoTo eh
+    CaptureCmsViewFrameFromModel = False
+    ResetCmsViewFrame
+    If model Is Nothing Then Exit Function
+
+    Dim errs As Long
+    swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+    EnsureSwHidden
+
+    Dim swView As Object
+    Dim m As Variant
+    Dim lx As Double, ly As Double, lz As Double
+    Dim wx As Double, wy As Double, wz As Double
+    Dim tx As Double, ty As Double, tz As Double
+    Dim fx As Double, fy As Double, fz As Double
+    Dim fudx As Double, fudy As Double, fudz As Double
+    Dim rx As Double, ry As Double, rz As Double
+    Dim rudx As Double, rudy As Double, rudz As Double
+    Dim gotTop As Boolean, gotFront As Boolean
+    gotTop = False
+    gotFront = False
+
+    ' --- TOP / CMS_TOP: Length = view X, Width = view Y, Thickness = into screen ---
+    On Error Resume Next
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    If Err.Number <> 0 Then
+        Err.Clear
+        model.ShowNamedView2 "*Top", 5
+    End If
+    On Error GoTo eh
+    StabilizeActiveView model, 30
+    Set swView = model.ActiveView
+    If Not swView Is Nothing Then
+        m = swView.Orientation3.ArrayData
+        If (Not IsEmpty(m)) And IsArray(m) Then
+            If UBound(m) >= 8 Then
+                lx = CDbl(m(0)): ly = CDbl(m(3)): lz = CDbl(m(6))   ' view X -> Length
+                wx = CDbl(m(1)): wy = CDbl(m(4)): wz = CDbl(m(7))   ' view Y -> Width
+                tx = CDbl(m(2)): ty = CDbl(m(5)): tz = CDbl(m(8))   ' into screen -> Thickness
+                NormalizeAxis3 lx, ly, lz
+                NormalizeAxis3 wx, wy, wz
+                NormalizeAxis3 tx, ty, tz
+                gotTop = (Abs(lx) + Abs(ly) + Abs(lz) > 0.1)
+            End If
+        End If
+    End If
+
+    ' --- FRONT: confirm Width = front view X (and refine if TOP failed) ---
+    model.ShowNamedView2 "*Front", 1
+    StabilizeActiveView model, 30
+    Set swView = model.ActiveView
+    If Not swView Is Nothing Then
+        m = swView.Orientation3.ArrayData
+        If (Not IsEmpty(m)) And IsArray(m) Then
+            If UBound(m) >= 8 Then
+                fx = CDbl(m(0)): fy = CDbl(m(3)): fz = CDbl(m(6))     ' front X = Width
+                fudx = CDbl(m(1)): fudy = CDbl(m(4)): fudz = CDbl(m(7)) ' front Y = up
+                NormalizeAxis3 fx, fy, fz
+                NormalizeAxis3 fudx, fudy, fudz
+                gotFront = (Abs(fx) + Abs(fy) + Abs(fz) > 0.1)
+                If gotFront Then
+                    If gotTop Then
+                        ' Prefer TOP-derived Length/Width/Thickness; force Width toward front X.
+                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, lx, ly, lz) And _
+                           AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, tx, ty, tz) Then
+                            wx = fx: wy = fy: wz = fz
+                        End If
+                    Else
+                        wx = fx: wy = fy: wz = fz
+                        lx = fudx: ly = fudy: lz = fudz
+                        tx = ly * wz - lz * wy
+                        ty = lz * wx - lx * wz
+                        tz = lx * wy - ly * wx
+                        NormalizeAxis3 tx, ty, tz
+                        gotTop = True
+                    End If
+                End If
+            End If
+        End If
+    End If
+
+    ' --- RIGHT: DXF X must be Thickness, DXF Y must be Length ---
+    model.ShowNamedView2 "*Right", 4
+    StabilizeActiveView model, 30
+    Set swView = model.ActiveView
+    If Not swView Is Nothing Then
+        m = swView.Orientation3.ArrayData
+        If (Not IsEmpty(m)) And IsArray(m) Then
+            If UBound(m) >= 8 Then
+                rx = CDbl(m(0)): ry = CDbl(m(3)): rz = CDbl(m(6))       ' right X = Thickness
+                rudx = CDbl(m(1)): rudy = CDbl(m(4)): rudz = CDbl(m(7)) ' right Y = Length
+                NormalizeAxis3 rx, ry, rz
+                NormalizeAxis3 rudx, rudy, rudz
+                If Abs(rx) + Abs(ry) + Abs(rz) > 0.1 Then
+                    tx = rx: ty = ry: tz = rz
+                    If Abs(rudx) + Abs(rudy) + Abs(rudz) > 0.1 Then
+                        lx = rudx: ly = rudy: lz = rudz
+                    End If
+                    ' Rebuild Width orthogonal to Length & Thickness.
+                    wx = ly * tz - lz * ty
+                    wy = lz * tx - lx * tz
+                    wz = lx * ty - ly * tx
+                    NormalizeAxis3 wx, wy, wz
+                    gotTop = True
+                End If
+            End If
+        End If
+    End If
+
+    On Error Resume Next
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    If Err.Number <> 0 Then Err.Clear: model.ShowNamedView2 "*Top", 5
+    On Error GoTo eh
+
+    If Not gotTop Then
+        LogLine "CMS view frame: could not read TOP/RIGHT orientations; dims stay sort-based until frame is ready."
+        Exit Function
+    End If
+
+    gCmsLenAxisX = lx: gCmsLenAxisY = ly: gCmsLenAxisZ = lz
+    gCmsWidAxisX = wx: gCmsWidAxisY = wy: gCmsWidAxisZ = wz
+    gCmsThkAxisX = tx: gCmsThkAxisY = ty: gCmsThkAxisZ = tz
+    gCmsViewFrameReady = True
+    CaptureCmsViewFrameFromModel = True
+    LogLine "CMS view frame L/W/T axes locked from TOP/RIGHT/FRONT:" & _
+            " L=[" & FormatNumberForCsv(lx) & "," & FormatNumberForCsv(ly) & "," & FormatNumberForCsv(lz) & "]" & _
+            " W=[" & FormatNumberForCsv(wx) & "," & FormatNumberForCsv(wy) & "," & FormatNumberForCsv(wz) & "]" & _
+            " T=[" & FormatNumberForCsv(tx) & "," & FormatNumberForCsv(ty) & "," & FormatNumberForCsv(tz) & "]"
+    Exit Function
+eh:
+    LogLine "CaptureCmsViewFrameFromModel error: " & Err.Description
+    ResetCmsViewFrame
+    CaptureCmsViewFrameFromModel = False
+End Function
+
+' Map assembly-axis box extents (dx,dy,dz along model X/Y/Z) onto CMS L/W/T axes.
+Private Sub AssignLengthWidthThicknessFromAxes(ByVal dx As Double, ByVal dy As Double, ByVal dz As Double, _
+                                               ByRef l As Double, ByRef w As Double, ByRef t As Double)
+    If Not gCmsViewFrameReady Then
+        SortThreeDimensions dx, dy, dz, l, w, t
+        Exit Sub
+    End If
+
+    ' Extent along an axis ~ |axis · modelAxis| * size on that model axis, summed.
+    l = Abs(gCmsLenAxisX) * dx + Abs(gCmsLenAxisY) * dy + Abs(gCmsLenAxisZ) * dz
+    w = Abs(gCmsWidAxisX) * dx + Abs(gCmsWidAxisY) * dy + Abs(gCmsWidAxisZ) * dz
+    t = Abs(gCmsThkAxisX) * dx + Abs(gCmsThkAxisY) * dy + Abs(gCmsThkAxisZ) * dz
+
+    If l <= 0 Or w <= 0 Or t <= 0 Then
+        SortThreeDimensions dx, dy, dz, l, w, t
+    End If
+End Sub
+
+Private Sub ApplyCmsViewDimsToAllParts()
+    Dim i As Long
+    Dim l As Double, w As Double, t As Double
+    Dim n As Long
+    If PartCount < 1 Then Exit Sub
+    If Not gCmsViewFrameReady Then
+        LogLine "CMS view dims: frame not ready — leaving sort-based L/W/T."
+        Exit Sub
+    End If
+    n = 0
+    For i = 1 To PartCount
+        If parts(i).BoxDx > 0 And parts(i).BoxDy > 0 And parts(i).BoxDz > 0 Then
+            AssignLengthWidthThicknessFromAxes parts(i).BoxDx, parts(i).BoxDy, parts(i).BoxDz, l, w, t
+            parts(i).Length = Round(l, DIM_DECIMALS)
+            parts(i).Width = Round(w, DIM_DECIMALS)
+            parts(i).Thickness = Round(t, DIM_DECIMALS)
+            parts(i).BBoxVolume = l * w * t
+            n = n + 1
+        End If
+    Next i
+    LogLine "CMS view dims applied to " & n & " parts (TOP W/L, RIGHT T/L, FRONT W)."
+End Sub
+
+Private Function TryGetCmsOrientedAssemblyDims(ByVal model As Object, _
+                                               ByRef l As Double, ByRef w As Double, ByRef t As Double) As Boolean
+On Error GoTo nope
+    TryGetCmsOrientedAssemblyDims = False
+    l = 0#: w = 0#: t = 0#
+    If model Is Nothing Then Exit Function
+    Dim dx As Double, dy As Double, dz As Double
+    If TryGetModelDocBoxDimsInches(model, dx, dy, dz) = False Then Exit Function
+    If Not gCmsViewFrameReady Then
+        If Not CaptureCmsViewFrameFromModel(model) Then
+            SortThreeDimensions dx, dy, dz, l, w, t
+            TryGetCmsOrientedAssemblyDims = (l > 0 And w > 0 And t > 0)
+            Exit Function
+        End If
+    End If
+    AssignLengthWidthThicknessFromAxes dx, dy, dz, l, w, t
+    TryGetCmsOrientedAssemblyDims = (l > 0 And w > 0 And t > 0)
+    Exit Function
+nope:
+    TryGetCmsOrientedAssemblyDims = False
+End Function
 
 ' ============================================================
 ' GENERAL HELPERS
@@ -4840,7 +5107,9 @@ Private Sub AddCadPart(ByVal compName As String, ByVal filePath As String, ByVal
             cz = cz / INCHES_PER_METER
         End If
     End If
-    SortThreeDimensions dx, dy, dz, l, w, t
+    ' Keep raw assembly-axis extents. L/W/T are assigned from the CMS Top/Right/Front
+    ' view frame after orientation (not by sorting XYZ largest-first forever).
+    AssignLengthWidthThicknessFromAxes dx, dy, dz, l, w, t
     If l * w * t <= 0 Then Exit Sub
     ' Skip hardware-scale noise and still-impossible mold sizes
     If l > MAX_SANE_MOLD_DIM_IN Then
@@ -4855,6 +5124,9 @@ Private Sub AddCadPart(ByVal compName As String, ByVal filePath As String, ByVal
     parts(PartCount).configName = configName
     parts(PartCount).bodyName = bodyName
     parts(PartCount).Quantity = 1
+    parts(PartCount).BoxDx = Round(dx, DIM_DECIMALS)
+    parts(PartCount).BoxDy = Round(dy, DIM_DECIMALS)
+    parts(PartCount).BoxDz = Round(dz, DIM_DECIMALS)
     parts(PartCount).Length = Round(l, DIM_DECIMALS)
     parts(PartCount).Width = Round(w, DIM_DECIMALS)
     parts(PartCount).Thickness = Round(t, DIM_DECIMALS)
