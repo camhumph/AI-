@@ -212,6 +212,13 @@ If gCadPath <> "" Then
     LogStep "CAD to open first (local XT preferred): " & gCadPath
 Else
     LogStep "WARNING: no CAD/XT file found yet in local/job/attach folders"
+    LogStep "CAD search paths: local=" & gLocalJobFolder & " job=" & jobFolderPath & " attach=" & gAttachDir
+    If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
+        LogStep "local folder file sample: " & SampleFolderFiles(gLocalJobFolder)
+    End If
+    If jobFolderPath <> "" And fso.FolderExists(jobFolderPath) Then
+        LogStep "job folder file sample: " & SampleFolderFiles(jobFolderPath)
+    End If
 End If
 
 ' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
@@ -534,6 +541,29 @@ Function ExtractCNumberToken(s)
     Loop
 End Function
 
+Function SampleFolderFiles(ByVal folderPath)
+    SampleFolderFiles = ""
+    On Error Resume Next
+    Dim f, n, parts
+    n = 0
+    parts = ""
+    For Each f In fso.GetFolder(folderPath).Files
+        If n > 0 Then parts = parts & ", "
+        parts = parts & f.Name
+        n = n + 1
+        If n >= 8 Then Exit For
+    Next
+    Dim sub1
+    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+        If n >= 8 Then Exit For
+        If n > 0 Then parts = parts & ", "
+        parts = parts & "[" & sub1.Name & "/]"
+        n = n + 1
+    Next
+    If parts = "" Then parts = "(empty)"
+    SampleFolderFiles = parts
+End Function
+
 Function IsGeneratedBaseCadPath(ByVal p)
     IsGeneratedBaseCadPath = False
     Dim u
@@ -755,9 +785,53 @@ Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
     Else
         LogStep "stage skipped — no source folder for " & dest
     End If
+    ' Expand ZIPs so FindBestXt can see Parasolid/STEP before SolidWorks opens.
+    ExtractZipsInFolder dest
     On Error GoTo 0
     If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
 End Function
+
+' Unzip *.zip into the same folder (Shell.NameSpace). Non-fatal on failure.
+Sub ExtractZipsInFolder(ByVal folderPath)
+    On Error Resume Next
+    If folderPath = "" Then Exit Sub
+    If Not fso.FolderExists(folderPath) Then Exit Sub
+    Dim sh, f, zipPath, destNs, zipNs, n
+    Set sh = CreateObject("Shell.Application")
+    n = 0
+    For Each f In fso.GetFolder(folderPath).Files
+        If LCase(fso.GetExtensionName(f.Name)) = "zip" Then
+            zipPath = f.Path
+            Set zipNs = sh.NameSpace(zipPath)
+            Set destNs = sh.NameSpace(folderPath)
+            If Not zipNs Is Nothing And Not destNs Is Nothing Then
+                destNs.CopyHere zipNs.Items, 16+4+512   ' NoUI + YesToAll + NoProgressUI
+                n = n + 1
+                LogStep "extracted zip for CAD search: " & f.Name
+                WScript.Sleep 1500
+            End If
+        End If
+    Next
+    ' One level of subfolders (common: CAD.zip dropped in a nested attach folder)
+    Dim sub1, f2
+    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+        If UCase(sub1.Name) <> "BASE" Then
+            For Each f2 In sub1.Files
+                If LCase(fso.GetExtensionName(f2.Name)) = "zip" Then
+                    Set zipNs = sh.NameSpace(f2.Path)
+                    Set destNs = sh.NameSpace(sub1.Path)
+                    If Not zipNs Is Nothing And Not destNs Is Nothing Then
+                        destNs.CopyHere zipNs.Items, 16+4+512
+                        n = n + 1
+                        LogStep "extracted nested zip for CAD search: " & sub1.Name & "\" & f2.Name
+                        WScript.Sleep 1500
+                    End If
+                End If
+            Next
+        End If
+    Next
+    If n > 0 Then LogStep "zip extract count=" & n
+End Sub
 
 Function FindBestCadInFolder(folderPath)
     FindBestCadInFolder = ""
@@ -955,12 +1029,7 @@ Function LaunchSolidWorksOpenCadThenMacro()
     For mpIdx = 0 To pathCount - 1
         macroPath = macroPaths(mpIdx)
         LogStep "running macro with retry: " & macroPath
-        If RunMacroWithRetry(sw, macroPath, "Module6121", "main", 90) Then
-            ran = True
-            Exit For
-        End If
-        ' Fallback: call RunFromLauncher directly if main routing fails.
-        If RunMacroWithRetry(sw, macroPath, "Module6121", "RunFromLauncher", 60) Then
+        If RunMacroWithRetry(sw, macroPath, 90) Then
             ran = True
             Exit For
         End If
@@ -968,14 +1037,23 @@ Function LaunchSolidWorksOpenCadThenMacro()
 
     If Not ran Then
         LogStep "ERROR: SolidWorks opened, but Module6121 did not acknowledge launch (no cms_macro_started.txt)."
+        LogStep "HINT: Recompile Module6121.bas -> Module6121.swp in SolidWorks VBA, save to C:\CMS_Local_Workspace\Module6121.swp"
+        LogStep "HINT: Close SolidWorks dialogs, then retry. Check cms_macro_error.txt and CMS_Quote_Log.txt"
     End If
     LaunchSolidWorksOpenCadThenMacro = ran
 End Function
 
-Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal moduleName, ByVal procName, ByVal timeoutSeconds)
+' Try common module/proc name variants. NEVER set CommandInProgress=True before RunMacro —
+' that makes RunMacro2 return False with macroErr=0 on SW 2023.
+Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
     RunMacroWithRetry = False
 
     Dim startTime, attempt, runOk, runErr, waitStart
+    Dim modNames, procNames, mi, pi, moduleName, procName
+    Dim vbaErr
+    modNames = Array("Module6121", "Module61211", "Module612111", "Module1")
+    procNames = Array("main", "RunFromLauncher")
+
     startTime = Timer
     attempt = 0
 
@@ -984,41 +1062,60 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal moduleName, ByVal
         DeleteIfExists MACRO_STARTED_FILE
         DeleteIfExists MACRO_ERROR_FILE
 
-        runOk = False
-        runErr = 0
-
         On Error Resume Next
-        Err.Clear
-        swApp.CommandInProgress = True
-        runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
-        If Err.Number <> 0 Or runOk = False Then
-            Err.Clear
-            runOk = swApp.RunMacro(macroPath, moduleName, procName)
-        End If
         swApp.CommandInProgress = False
+        swApp.UserControl = True
         On Error GoTo 0
 
-        LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & " ok=" & CStr(runOk) & " macroErr=" & runErr
+        For pi = 0 To UBound(procNames)
+            For mi = 0 To UBound(modNames)
+                moduleName = modNames(mi)
+                procName = procNames(pi)
+                runOk = False
+                runErr = 0
+                vbaErr = 0
 
-        waitStart = Timer
-        Do
-            If fso.FileExists(MACRO_STARTED_FILE) Then
-                LogStep "macro acknowledged STARTED via " & MACRO_STARTED_FILE
-                RunMacroWithRetry = True
-                Exit Function
-            End If
-            If fso.FileExists(MACRO_ERROR_FILE) Then
-                LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
-                RunMacroWithRetry = True
-                Exit Function
-            End If
-            WaitSeconds 1
-            If Timer < waitStart Then Exit Do
-            If Timer - waitStart >= 10 Then Exit Do
-        Loop
+                On Error Resume Next
+                Err.Clear
+                ' Option 0 = default; do not mark CommandInProgress beforehand.
+                runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
+                vbaErr = Err.Number
+                If (runOk = False) Or (vbaErr <> 0) Then
+                    Err.Clear
+                    runOk = swApp.RunMacro2(macroPath, moduleName, procName, 1, runErr)
+                    vbaErr = Err.Number
+                End If
+                If (runOk = False) Or (vbaErr <> 0) Then
+                    Err.Clear
+                    runOk = swApp.RunMacro(macroPath, moduleName, procName)
+                    vbaErr = Err.Number
+                    If vbaErr = 0 And runOk <> False Then runOk = True
+                End If
+                On Error GoTo 0
+
+                LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
+                        " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
+
+                waitStart = Timer
+                Do
+                    If fso.FileExists(MACRO_STARTED_FILE) Then
+                        LogStep "macro acknowledged STARTED via " & MACRO_STARTED_FILE & " (module=" & moduleName & " proc=" & procName & ")"
+                        RunMacroWithRetry = True
+                        Exit Function
+                    End If
+                    If fso.FileExists(MACRO_ERROR_FILE) Then
+                        LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
+                        RunMacroWithRetry = True
+                        Exit Function
+                    End If
+                    WaitSeconds 1
+                    If Timer < waitStart Then Exit Do
+                    If Timer - waitStart >= 8 Then Exit Do
+                Loop
+            Next
+        Next
 
         WaitSeconds 2
-
         If Timer < startTime Then Exit Do
         If Timer - startTime >= timeoutSeconds Then Exit Do
     Loop

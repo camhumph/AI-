@@ -898,12 +898,20 @@ def _collect_launch_diagnostics(status: dict) -> dict:
             low = (log_tail or "").lower()
             if "module6121.swp not found" in low:
                 diag["stuck_reason"] = "Module6121.swp missing in C:\\CMS_Local_Workspace — recompile the macro."
+            elif "runmacro attempt" in low and "ok=false" in low and "cms_macro_started" not in low:
+                diag["stuck_reason"] = (
+                    "SolidWorks RunMacro failed (ok=False). Usually: stale Module6121.swp "
+                    "(recompile .bas→.swp), or a dialog blocking SW. See CMS_Quote_Log.txt."
+                )
             elif "did not start" in low or "could not connect" in low:
                 diag["stuck_reason"] = "SolidWorks did not start or connect. Check CMS_SOLIDWORKS_EXE / SW 2023 install."
             elif "opendoc/loadfile failed" in low:
                 diag["stuck_reason"] = "SolidWorks could not open the CAD/XT. Check CadPath in cms_handoff.txt."
-            elif "no cad" in low:
-                diag["stuck_reason"] = "No CAD/XT found in job/attach folders before macro run."
+            elif "no cad" in low or "cad: (none)" in low or "cad=no" in low:
+                diag["stuck_reason"] = (
+                    "No CAD/XT found before macro run (often still inside a ZIP). "
+                    "Launcher now extracts ZIPs; pull latest CMS_Launcher.vbs and retry."
+                )
             elif last:
                 diag["stuck_reason"] = f"Waiting for macro STARTED. Last launcher step: {last[-220:]}"
             else:

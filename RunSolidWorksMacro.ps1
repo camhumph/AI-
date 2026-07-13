@@ -161,13 +161,25 @@ try {
         foreach ($procName in $procedureNames) {
             foreach ($moduleName in $moduleNames) {
                 try {
-                    try { $sw.CommandInProgress = $true } catch {}
+                    try { $sw.CommandInProgress = $false } catch {}
+                    try { $sw.UserControl = $true } catch {}
                     $macroErr = 0
                     $ok2 = $false
+                    $vbaErr = 0
+                    # Never set CommandInProgress=$true before RunMacro — SW 2023 returns False/err=0.
                     try {
                         $ok2 = $sw.RunMacro2($MacroPath, $moduleName, $procName, 0, [ref]$macroErr)
                     } catch {
                         $ok2 = $false
+                        $vbaErr = 1
+                    }
+                    if ($ok2 -ne $true) {
+                        try {
+                            $macroErr = 0
+                            $ok2 = $sw.RunMacro2($MacroPath, $moduleName, $procName, 1, [ref]$macroErr)
+                        } catch {
+                            $ok2 = $false
+                        }
                     }
                     if ($ok2 -ne $true) {
                         try {
@@ -176,10 +188,8 @@ try {
                             $ok2 = $false
                         }
                     }
-                    try { $sw.CommandInProgress = $false } catch {}
                     Write-LauncherLog "attempt=$attempt RunMacro module='$moduleName' proc='$procName' ok=$ok2 err=$macroErr"
                 } catch {
-                    try { $sw.CommandInProgress = $false } catch {}
                     Write-LauncherLog ("RunMacro failed module='$moduleName' proc='$procName': " + $_.Exception.Message)
                 }
 
