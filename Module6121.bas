@@ -10,7 +10,7 @@ Option Explicit
 '   3. Orients to CMS_TOP (gemini1 holder/pot/ins/TCP -> *Top/*Front) and saves
 '      the WHOLE BASE into the job folder:
 '        base\<job> .sldasm / .easm / .igs / .x_t
-'        <job> .stl               (gemini1 merged one-file STL, oriented)
+'        <job> .stl               (one-file STL, post-rotated to CMS_TOP like DXF/ISO)
 '        <job> .dxf               (4 views, Pyropel hidden)
 '        <job> ISO.jpg / BACK ISO.jpg  (Pyropel hidden)
 '   4. Scans CAD parts and writes XT_Export_CAD_Dimensions.csv + BOM match report.
@@ -113,7 +113,7 @@ Private Const swSaveAssemblyAsPartOptions As Long = 201
 Private Const swSaveAsmAsPart_AllComponents As Long = 1
 ' swBodyOperationType_e.SWBODYADD = Combine -> Add (union of bodies).
 Private Const SWBODYADD As Long = 15903
-' After merge-STL export, rotate mesh into corrected *Front/*Top frame (gemini1).
+' After STL export, rotate mesh into CMS_TOP frame (same as DXF / ISO / L-W-T).
 Private Const POST_ROTATE_STL_TO_CORRECTED_FRONT As Boolean = True
 Private Const swSolidBody As Long = 0
 Private Const swComponentHidden As Long = 0
@@ -167,7 +167,7 @@ Private LastJobFailReason As String
 Private DxfFreezeDoc As Object
 Private CurrentDxfForce1to1 As Boolean
 
-' Final corrected *Front orientation matrix for STL post-rotate (gemini1).
+' Final CMS_TOP orientation matrix for STL post-rotate (same frame as DXF/ISO).
 Private FinalStlCoordFrameReady As Boolean
 Private FinalStlCoordM(0 To 8) As Double
 
@@ -1447,7 +1447,7 @@ On Error GoTo ErrHandler
         LogDone "Set BMS pot-block TCP/top orientation from matched holder/pot/TCP"
     End If
 
-    ' gemini1: capture corrected *Front matrix so merged STL post-rotates correctly.
+    ' gemini1: capture CMS_TOP matrix so merged STL post-rotates to the same frame as DXF/ISO.
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
     CaptureCmsViewFrameFromModel swModel
     ApplyCmsViewDimsToAllParts
@@ -3501,7 +3501,7 @@ On Error GoTo ErrHandler
         If FinalStlCoordFrameReady Then
             For i = 0 To 8: orientM(i) = FinalStlCoordM(i): Next i
             gotOrient = True
-            LogLine "STL using FINAL corrected standard-view coordinate system: " & label
+            LogLine "STL using CMS_TOP coordinate system (same as DXF/ISO): " & label
         Else
             LogLine "WARNING: Final STL coordinate system not captured; attempting now."
             If Not swModel Is Nothing Then
@@ -3519,7 +3519,7 @@ On Error GoTo ErrHandler
 
     If gotOrient Then
         If ReorientStlFileToMatrix(stlPath, orientM) Then
-            LogLine "STL post-rotated into FINAL corrected Top/Front frame: " & stlPath
+            LogLine "STL post-rotated into CMS_TOP frame (matches DXF parent / view L-W-T): " & stlPath
         Else
             LogLine "WARNING: STL post-rotation failed: " & stlPath
         End If
@@ -3551,7 +3551,26 @@ On Error GoTo ErrHandler
     If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
     On Error GoTo ErrHandler
 
-    model.ShowNamedView2 "*Front", 1
+    ' Use CMS_TOP (fallback *Top) so the STL mesh matches DXF parent / ISO / L-W-T axes.
+    ' Previously captured *Front, which left the mesh rotated vs the rest of the package.
+    Dim usedView As String
+    usedView = ""
+    On Error Resume Next
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    If Err.Number = 0 Then
+        usedView = CMS_TOP_VIEW_NAME
+    Else
+        Err.Clear
+        model.ShowNamedView2 "*Top", 5
+        If Err.Number = 0 Then usedView = "*Top"
+        Err.Clear
+    End If
+    On Error GoTo ErrHandler
+    If usedView = "" Then
+        LogLine "STL coordinate capture failed: CMS_TOP/*Top view unavailable."
+        Exit Function
+    End If
+
     On Error Resume Next
     model.ViewZoomtofit2
     model.GraphicsRedraw2
@@ -3584,7 +3603,8 @@ On Error GoTo ErrHandler
     Next i
     FinalStlCoordFrameReady = True
     CaptureFinalStandardViewsForStlCoordinateSystem = True
-    LogLine "FINAL STL coordinate system captured from corrected SolidWorks *Front."
+    LogLine "FINAL STL coordinate system captured from " & usedView & _
+            " (TOP X=Width, TOP Y=Length — same frame as DXF/ISO)."
 
 CleanExit:
     On Error Resume Next
