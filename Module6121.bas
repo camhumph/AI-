@@ -263,9 +263,11 @@ Private Type PartInfo
 End Type
 
 ' CMS DXF view-frame axes (after CMS_TOP / *Front / *Right are locked).
-' Top view horizontal = Length, Top view vertical = Width, Top view depth = Thickness.
-' Right-side view of that top: DXF X = Thickness, DXF Y = Length.
-' Front view: DXF X = Width. Model XYZ alone is not used for L/W/T.
+' From the shop dimensioned DXF (labels on TOP / RIGHT / BOTTOM views):
+'   TOP view:    horizontal (X) = Width,  vertical (Y) = Length, into-screen = Thickness
+'   RIGHT view:  horizontal (X) = Thickness, vertical (Y) = Length
+'   FRONT/BOTTOM:horizontal (X) = Width
+' Model XYZ alone is not L/W/T — the frame rotates with the views.
 Private gCmsViewFrameReady As Boolean
 Private gCmsLenAxisX As Double, gCmsLenAxisY As Double, gCmsLenAxisZ As Double
 Private gCmsWidAxisX As Double, gCmsWidAxisY As Double, gCmsWidAxisZ As Double
@@ -280,6 +282,9 @@ Private Type BomInfo
     BomWidth As Double
     BomThickness As Double
     hasDims As Boolean
+    ' True when BomThickness/Width/Length hold Tempcraft Lth/Wth/Hgt file order
+    ' (not yet mapped to CMS T/W/L). False when already CMS-oriented or sorted.
+    BomIsTempcraftOrder As Boolean
 End Type
 
 Private Type ExportInfo
@@ -3954,10 +3959,10 @@ On Error GoTo ErrHandler
     centerY = E_SHEET_HEIGHT_IN / 2#
 
     Dim projectedXOffset As Double, projectedYOffset As Double
-    ' Parent view is CMS_TOP: sheet X ~ Length, sheet Y ~ Width.
+    ' Parent view is CMS_TOP: sheet X ~ Width, sheet Y ~ Length (shop DXF labels).
     ' Projected RIGHT sits to the side: its DXF X is Thickness, DXF Y is Length.
-    projectedXOffset = ((partL / 2#) + DXF_PROJECTED_VIEW_GAP_IN + (partT / 2#)) * scaleVal
-    projectedYOffset = ((partW / 2#) + DXF_PROJECTED_VIEW_GAP_IN + (partT / 2#)) * scaleVal
+    projectedXOffset = ((partW / 2#) + DXF_PROJECTED_VIEW_GAP_IN + (partT / 2#)) * scaleVal
+    projectedYOffset = ((partL / 2#) + DXF_PROJECTED_VIEW_GAP_IN + (partT / 2#)) * scaleVal
 
     Dim xLeft As Double, yLeft As Double, xRight As Double, yRight As Double
     Dim xTop As Double, yTop As Double, xBottom As Double, yBottom As Double
@@ -4130,8 +4135,9 @@ Private Function CalculateProjectedFourViewDxfScale(ByVal partL As Double, ByVal
     usableH = E_SHEET_HEIGHT_IN - (2# * DXF_MARGIN_IN)
     Dim layoutW As Double
     Dim layoutH As Double
-    layoutW = partL + (2# * partT) + (2# * DXF_PROJECTED_VIEW_GAP_IN)
-    layoutH = partW + (2# * partT) + (2# * DXF_PROJECTED_VIEW_GAP_IN)
+    ' TOP footprint is W (horizontal) x L (vertical); side projections add Thickness.
+    layoutW = partW + (2# * partT) + (2# * DXF_PROJECTED_VIEW_GAP_IN)
+    layoutH = partL + (2# * partT) + (2# * DXF_PROJECTED_VIEW_GAP_IN)
     If layoutW > 0 Then
         If usableW / layoutW < scaleVal Then scaleVal = usableW / layoutW
     End If
@@ -4395,8 +4401,9 @@ On Error GoTo ErrHandler
     midx = (xmin + xmax) / 2#
     midy = (ymin + ymax) / 2#
     gap = 0.6 / INCHES_PER_METER
-    PlaceDrawingNote swDraw, midx - gap, ymin - gap, "OVERALL LENGTH (L) = " & FormatDim(partL)
-    PlaceDrawingNote swDraw, xmin - (2.4 / INCHES_PER_METER), midy, "OVERALL WIDTH (W) = " & FormatDim(partW)
+    ' TOP view: horizontal = Width, vertical = Length (matches shop DXF labels).
+    PlaceDrawingNote swDraw, midx - gap, ymin - gap, "OVERALL WIDTH (W) = " & FormatDim(partW)
+    PlaceDrawingNote swDraw, xmin - (2.4 / INCHES_PER_METER), midy, "OVERALL LENGTH (L) = " & FormatDim(partL)
     PlaceDrawingNote swDraw, xmax + gap, ymax + gap, "THICKNESS (T) = " & FormatDim(partT)
     swDraw.ClearSelection2 True
     Exit Sub
@@ -4615,16 +4622,16 @@ End Sub
 ' ============================================================
 ' CMS DXF VIEW-FRAME dimensions (L/W/T follow oriented views)
 '
-' After CMS_TOP / *Front / *Right are locked:
-'   TOP view:   horizontal = Length, vertical = Width, into-screen = Thickness
-'   RIGHT view: DXF X = Thickness, DXF Y = Length
-'   FRONT view: DXF X = Width
+' Shop dimensioned DXF labels (verified):
+'   TOP:    X/horizontal = Width,  Y/vertical = Length, into-screen = Thickness
+'   RIGHT:  X/horizontal = Thickness, Y/vertical = Length
+'   FRONT/BOTTOM: X/horizontal = Width
 ' Model XYZ alone is NOT L/W/T — the frame rotates with the views.
 ' ============================================================
 Private Sub ResetCmsViewFrame()
     gCmsViewFrameReady = False
-    gCmsLenAxisX = 1#: gCmsLenAxisY = 0#: gCmsLenAxisZ = 0#
-    gCmsWidAxisX = 0#: gCmsWidAxisY = 1#: gCmsWidAxisZ = 0#
+    gCmsLenAxisX = 0#: gCmsLenAxisY = 1#: gCmsLenAxisZ = 0#
+    gCmsWidAxisX = 1#: gCmsWidAxisY = 0#: gCmsWidAxisZ = 0#
     gCmsThkAxisX = 0#: gCmsThkAxisY = 0#: gCmsThkAxisZ = 1#
 End Sub
 
@@ -4665,11 +4672,12 @@ On Error GoTo eh
     Dim fudx As Double, fudy As Double, fudz As Double
     Dim rx As Double, ry As Double, rz As Double
     Dim rudx As Double, rudy As Double, rudz As Double
-    Dim gotTop As Boolean, gotFront As Boolean
+    Dim gotTop As Boolean, gotFront As Boolean, gotRight As Boolean
     gotTop = False
     gotFront = False
+    gotRight = False
 
-    ' --- TOP / CMS_TOP: Length = view X, Width = view Y, Thickness = into screen ---
+    ' --- TOP / CMS_TOP: Width = view X, Length = view Y, Thickness = into screen ---
     On Error Resume Next
     model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     If Err.Number <> 0 Then
@@ -4683,18 +4691,18 @@ On Error GoTo eh
         m = swView.Orientation3.ArrayData
         If (Not IsEmpty(m)) And IsArray(m) Then
             If UBound(m) >= 8 Then
-                lx = CDbl(m(0)): ly = CDbl(m(3)): lz = CDbl(m(6))   ' view X -> Length
-                wx = CDbl(m(1)): wy = CDbl(m(4)): wz = CDbl(m(7))   ' view Y -> Width
+                wx = CDbl(m(0)): wy = CDbl(m(3)): wz = CDbl(m(6))   ' view X -> Width
+                lx = CDbl(m(1)): ly = CDbl(m(4)): lz = CDbl(m(7))   ' view Y -> Length
                 tx = CDbl(m(2)): ty = CDbl(m(5)): tz = CDbl(m(8))   ' into screen -> Thickness
-                NormalizeAxis3 lx, ly, lz
                 NormalizeAxis3 wx, wy, wz
+                NormalizeAxis3 lx, ly, lz
                 NormalizeAxis3 tx, ty, tz
-                gotTop = (Abs(lx) + Abs(ly) + Abs(lz) > 0.1)
+                gotTop = (Abs(wx) + Abs(wy) + Abs(wz) > 0.1)
             End If
         End If
     End If
 
-    ' --- FRONT: confirm Width = front view X (and refine if TOP failed) ---
+    ' --- FRONT / BOTTOM of TOP: Width = front view X ---
     model.ShowNamedView2 "*Front", 1
     StabilizeActiveView model, 30
     Set swView = model.ActiveView
@@ -4703,23 +4711,24 @@ On Error GoTo eh
         If (Not IsEmpty(m)) And IsArray(m) Then
             If UBound(m) >= 8 Then
                 fx = CDbl(m(0)): fy = CDbl(m(3)): fz = CDbl(m(6))     ' front X = Width
-                fudx = CDbl(m(1)): fudy = CDbl(m(4)): fudz = CDbl(m(7)) ' front Y = up
+                fudx = CDbl(m(1)): fudy = CDbl(m(4)): fudz = CDbl(m(7)) ' front Y = up (often Thickness)
                 NormalizeAxis3 fx, fy, fz
                 NormalizeAxis3 fudx, fudy, fudz
                 gotFront = (Abs(fx) + Abs(fy) + Abs(fz) > 0.1)
                 If gotFront Then
                     If gotTop Then
-                        ' Prefer TOP-derived Length/Width/Thickness; force Width toward front X.
-                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, lx, ly, lz) And _
-                           AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, tx, ty, tz) Then
+                        ' Force Width toward front X when TOP Width drifted.
+                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < 0.7 Then
                             wx = fx: wy = fy: wz = fz
                         End If
                     Else
                         wx = fx: wy = fy: wz = fz
-                        lx = fudx: ly = fudy: lz = fudz
-                        tx = ly * wz - lz * wy
-                        ty = lz * wx - lx * wz
-                        tz = lx * wy - ly * wx
+                        tx = fudx: ty = fudy: tz = fudz
+                        ' Length = Width x Thickness (placeholder until RIGHT sets Length)
+                        lx = wy * tz - wz * ty
+                        ly = wz * tx - wx * tz
+                        lz = wx * ty - wy * tx
+                        NormalizeAxis3 lx, ly, lz
                         NormalizeAxis3 tx, ty, tz
                         gotTop = True
                     End If
@@ -4728,7 +4737,7 @@ On Error GoTo eh
         End If
     End If
 
-    ' --- RIGHT: DXF X must be Thickness, DXF Y must be Length ---
+    ' --- RIGHT of TOP: DXF X = Thickness, DXF Y = Length (shop DXF labels) ---
     model.ShowNamedView2 "*Right", 4
     StabilizeActiveView model, 30
     Set swView = model.ActiveView
@@ -4742,14 +4751,24 @@ On Error GoTo eh
                 NormalizeAxis3 rudx, rudy, rudz
                 If Abs(rx) + Abs(ry) + Abs(rz) > 0.1 Then
                     tx = rx: ty = ry: tz = rz
+                    gotRight = True
                     If Abs(rudx) + Abs(rudy) + Abs(rudz) > 0.1 Then
                         lx = rudx: ly = rudy: lz = rudz
                     End If
-                    ' Rebuild Width orthogonal to Length & Thickness.
+                    ' Rebuild Width orthogonal to Length & Thickness (TOP X direction).
                     wx = ly * tz - lz * ty
                     wy = lz * tx - lx * tz
                     wz = lx * ty - ly * tx
                     NormalizeAxis3 wx, wy, wz
+                    ' Prefer front-X for Width sign/choice when available.
+                    If gotFront Then
+                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, -wx, -wy, -wz) Then
+                            wx = -wx: wy = -wy: wz = -wz
+                        End If
+                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < 0.5 Then
+                            wx = fx: wy = fy: wz = fz
+                        End If
+                    End If
                     gotTop = True
                 End If
             End If
@@ -4771,10 +4790,11 @@ On Error GoTo eh
     gCmsThkAxisX = tx: gCmsThkAxisY = ty: gCmsThkAxisZ = tz
     gCmsViewFrameReady = True
     CaptureCmsViewFrameFromModel = True
-    LogLine "CMS view frame L/W/T axes locked from TOP/RIGHT/FRONT:" & _
+    LogLine "CMS view frame L/W/T axes locked from DXF labels (TOP X=W, TOP Y=L, RIGHT X=T, RIGHT Y=L):" & _
             " L=[" & FormatNumberForCsv(lx) & "," & FormatNumberForCsv(ly) & "," & FormatNumberForCsv(lz) & "]" & _
             " W=[" & FormatNumberForCsv(wx) & "," & FormatNumberForCsv(wy) & "," & FormatNumberForCsv(wz) & "]" & _
-            " T=[" & FormatNumberForCsv(tx) & "," & FormatNumberForCsv(ty) & "," & FormatNumberForCsv(tz) & "]"
+            " T=[" & FormatNumberForCsv(tx) & "," & FormatNumberForCsv(ty) & "," & FormatNumberForCsv(tz) & "]" & _
+            " gotRight=" & CStr(gotRight)
     Exit Function
 eh:
     LogLine "CaptureCmsViewFrameFromModel error: " & Err.Description
@@ -4820,7 +4840,7 @@ Private Sub ApplyCmsViewDimsToAllParts()
             n = n + 1
         End If
     Next i
-    LogLine "CMS view dims applied to " & n & " parts (TOP W/L, RIGHT T/L, FRONT W)."
+    LogLine "CMS view dims applied to " & n & " parts (TOP: W x L, RIGHT: T x L, FRONT: W)."
 End Sub
 
 Private Function TryGetCmsOrientedAssemblyDims(ByVal model As Object, _
@@ -5415,7 +5435,9 @@ On Error GoTo ErrHandler
     cLo = LBound(data, 2): cHi = UBound(data, 2)
     Dim headerRow As Long, descCol As Long, qtyCol As Long, matCol As Long
     Dim thkCol As Long, widCol As Long, lenCol As Long
+    Dim sheetIsTempcraft As Boolean
     headerRow = 0: descCol = 0
+    sheetIsTempcraft = False
     Dim rEnd As Long
     rEnd = rLo + BOM_HEADER_SEARCH_MAX_ROWS
     If rEnd > rHi Then rEnd = rHi
@@ -5427,7 +5449,7 @@ On Error GoTo ErrHandler
     If headerRow = 0 Then Exit Sub
     qtyCol = FindBomQtyColumnInArrayRow(data, headerRow, cLo, cHi)
     matCol = FindBomMaterialColumnInArrayRow(data, headerRow, cLo, cHi)
-    FindBomDimensionColumnsInArrayRow data, headerRow, cLo, cHi, thkCol, widCol, lenCol
+    FindBomDimensionColumnsInArrayRow data, headerRow, cLo, cHi, thkCol, widCol, lenCol, sheetIsTempcraft
     ' Part number column ("Mat'l Spec or Mfg. Part No.") and manufacturer column.
     Dim partCol As Long, manufCol As Long, hc As Long, ht As String
     partCol = 0: manufCol = 0
@@ -5471,20 +5493,22 @@ On Error GoTo ErrHandler
             mat = ""
             If matCol > 0 Then mat = Trim(GetArrayValue(data, r, matCol))
             tt = 0#: ww = 0#: ll = 0#: hasD = False
+            Dim rowIsTempcraft As Boolean
+            rowIsTempcraft = sheetIsTempcraft
             If thkCol > 0 Then tt = Val(GetArrayValue(data, r, thkCol))
             If widCol > 0 Then ww = Val(GetArrayValue(data, r, widCol))
             If lenCol > 0 Then ll = Val(GetArrayValue(data, r, lenCol))
-            ' Tempcraft Lth/Wth/Hgt are finished sizes in arbitrary column order —
-            ' always sort into L>=W>=T. Never leave Stock Weight in a size slot.
+            ' Tempcraft Lth/Wth/Hgt are finished sizes in FILE order — do not
+            ' SortThreeDimensions here. MapTempcraftBomDimsToCmsSteel remaps by
+            ' plate role at steel-fill time (holders/pots are not L≥W≥T).
             If tt > 0 And ww > 0 And ll > 0 Then
                 Dim srtL As Double, srtW As Double, srtT As Double
                 SortThreeDimensions tt, ww, ll, srtL, srtW, srtT
                 ' Reject absurd "length" that is really stock weight (lbs >> plate size).
                 If BomDimsLookLikeStockWeight(srtT, srtW, srtL) Then
                     tt = 0#: ww = 0#: ll = 0#
-                Else
-                    tt = srtT: ww = srtW: ll = srtL
                 End If
+                ' else keep tt/ww/ll in column order (Tempcraft Lth/Wth/Hgt when flagged)
             End If
             If Not (tt > 0 And ww > 0 And ll > 0) Then
                 ' No clean dimension columns: look for a combined size cell
@@ -5502,7 +5526,9 @@ On Error GoTo ErrHandler
                             If PickThreeFinishedSizeDims(snums, sn, sa, sb, scc) Then
                                 SortThreeDimensions sa, sb, scc, sl, sW, sT
                                 If Not BomDimsLookLikeStockWeight(sT, sW, sl) Then
-                                    tt = sT: ww = sW: ll = sl
+                                    ' Keep Tempcraft file order (not sorted L/W/T).
+                                    tt = sa: ww = sb: ll = scc
+                                    rowIsTempcraft = True
                                     Exit For
                                 End If
                             End If
@@ -5541,7 +5567,7 @@ NextBomSizeCell:
             If detCol > 0 Then rowDet = Trim(GetArrayValue(data, r, detCol))
             If typeCol > 0 Then rowType = Trim(GetArrayValue(data, r, typeCol))
             On Error Resume Next
-            AddBomRow desc, qty, mat, tt, ww, ll, hasD, rowPart, rowManuf, rowDet, rowType
+            AddBomRow desc, qty, mat, tt, ww, ll, hasD, rowPart, rowManuf, rowDet, rowType, rowIsTempcraft
             If Err.Number <> 0 Then
                 LogLine "BOM row " & r & " skipped after parse error: " & Err.Description & " | " & desc
                 Err.Clear
@@ -5604,11 +5630,13 @@ Private Function FindBomMaterialColumnInArrayRow(ByVal data As Variant, ByVal r 
 End Function
 
 Private Sub FindBomDimensionColumnsInArrayRow(ByVal data As Variant, ByVal r As Long, ByVal cLo As Long, ByVal cHi As Long, _
-                                             ByRef thkCol As Long, ByRef widCol As Long, ByRef lenCol As Long)
-    ' Tempcraft / Howmet BOMs use Lth / Wth.O.D. / Hgt.I.D. — those are finished
-    ' size columns, NOT "thickness=Hgt". Map them as three size columns; callers
-    ' must SortThreeDimensions so Stock Weight is never treated as a size.
+                                             ByRef thkCol As Long, ByRef widCol As Long, ByRef lenCol As Long, _
+                                             ByRef usedTempcraftOrder As Boolean)
+    ' Tempcraft / Howmet BOMs use Lth / Wth.O.D. / Hgt.I.D. — finished sizes in
+    ' FILE order. Callers store them as tt=Lth, ww=Wth, ll=Hgt and remap later
+    ' via MapTempcraftBomDimsToCmsSteel (do NOT SortThreeDimensions on store).
     thkCol = 0: widCol = 0: lenCol = 0
+    usedTempcraftOrder = False
     Dim c As Long, t As String
     Dim lthCol As Long, wthCol As Long, hgtCol As Long
     lthCol = 0: wthCol = 0: hgtCol = 0
@@ -5627,12 +5655,12 @@ Private Sub FindBomDimensionColumnsInArrayRow(ByVal data As Variant, ByVal r As 
         If lenCol = 0 And (t = "LENGTH" Or t = "LONG" Or t = "LEN" Or t = "L") Then lenCol = c
 NextBomDimCol:
     Next c
-    ' Prefer explicit Tempcraft Lth/Wth/Hgt trio: store as len/wid/thk slots then
-    ' the row reader sorts them into T/W/L (smallest/middle/largest).
+    ' Prefer Tempcraft Lth/Wth/Hgt: map into tt/ww/ll slots as Lth/Wth/Hgt order.
     If lthCol > 0 And wthCol > 0 And hgtCol > 0 Then
-        lenCol = lthCol
+        thkCol = lthCol
         widCol = wthCol
-        thkCol = hgtCol
+        lenCol = hgtCol
+        usedTempcraftOrder = True
     End If
 End Sub
 
@@ -5765,10 +5793,11 @@ On Error GoTo ErrHandler
     ' Tempcraft PDF layout after description/material:
     '   Lth  Wth/O.D.  Hgt/I.D.  [Oracle]  [UOM]  StockWeight
     ' NEVER PickThreeLargest — that turns Stock Weight (117.87 lbs) into Length.
+    ' Keep file order (Lth/Wth/Hgt); MapTempcraftBomDimsToCmsSteel remaps by plate role.
     If Not PickThreeFinishedSizeDims(nums, nCount, a, b, c) Then Exit Function
     SortThreeDimensions a, b, c, l, w, t
     If BomDimsLookLikeStockWeight(t, w, l) Then Exit Function
-    AddBomRow desc, qty, mat, t, w, l, (l > 0 And w > 0 And t > 0)
+    AddBomRow desc, qty, mat, a, b, c, (a > 0 And b > 0 And c > 0), , , , , True
     TryParseTempcraftBasePdfMaterialLine = True
     Exit Function
 ErrHandler:
@@ -5937,7 +5966,8 @@ End Function
 Private Sub AddBomRow(ByVal desc As String, ByVal qty As Long, ByVal mat As String, _
                       ByVal tt As Double, ByVal ww As Double, ByVal ll As Double, ByVal hasD As Boolean, _
                       Optional ByVal partNo As String = "", Optional ByVal manuf As String = "", _
-                      Optional ByVal detNo As String = "", Optional ByVal purchType As String = "")
+                      Optional ByVal detNo As String = "", Optional ByVal purchType As String = "", _
+                      Optional ByVal isTempcraftOrder As Boolean = False)
     If desc = "" Then Exit Sub
     If FILL_PURCHASED_COMPONENTS Then CapturePurchased desc, qty, mat, tt, ww, ll, partNo, manuf, detNo, purchType
     If ShouldUseBomItem(desc, mat, tt, ww, ll, hasD) = False Then Exit Sub
@@ -5951,6 +5981,7 @@ Private Sub AddBomRow(ByVal desc As String, ByVal qty As Long, ByVal mat As Stri
     BomRows(BomCount).BomWidth = Round(ww, DIM_DECIMALS)
     BomRows(BomCount).BomLength = Round(ll, DIM_DECIMALS)
     BomRows(BomCount).hasDims = hasD
+    BomRows(BomCount).BomIsTempcraftOrder = isTempcraftOrder
 End Sub
 
 Private Function ShouldUseBomItem(ByVal desc As String, ByVal mat As String, _
@@ -6763,8 +6794,9 @@ End Function
 
 Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String, ByRef usedPart() As Boolean, _
                               ByRef t As Double, ByRef w As Double, ByRef l As Double, ByRef srcOut As String) As Boolean
-    ' Prefer CAD finished bbox (T/W/L already sorted). BOM is backup only when
-    ' CAD has no match — and BOM dims that look like Stock Weight are rejected.
+    ' Prefer CAD finished bbox after CMS view-frame L/W/T axes are applied.
+    ' BOM is backup only when CAD has no match — Tempcraft order is remapped
+    ' by plate role (never blind L≥W≥T; holders/pots can have T as largest).
     GetPlateDims = False
     Dim ci As Long
     ci = FindPartIndexByKeys(pipeKeys, usedPart)
@@ -6790,6 +6822,9 @@ Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String,
     If bi > 0 Then
         If BomRows(bi).hasDims Then
             t = BomRows(bi).BomThickness: w = BomRows(bi).BomWidth: l = BomRows(bi).BomLength
+            If BomRows(bi).BomIsTempcraftOrder Then
+                MapTempcraftBomDimsToCmsSteel stdName, t, w, l
+            End If
             If BomDimsLookLikeStockWeight(t, w, l) Then
                 LogLine "GetPlateDims: rejecting BOM dims that look like Stock Weight for " & stdName & _
                         " (T=" & t & " W=" & w & " L=" & l & ")"
@@ -6801,6 +6836,30 @@ Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String,
         End If
     End If
 End Function
+
+' Tempcraft Base BOM finished sizes are listed as Lth, Wth/O.D., Hgt/I.D. in file
+' order — NOT CMS Thickness/Width/Length. Map by plate role (from correct J000
+' steel sheets + shop dimensioned DXF):
+'   TCP/BCP:     smallest=T; of remaining, larger=L smaller=W
+'   Holders:     Lth=T, Wth=L, Hgt=W   (e.g. 6.875 x 7.000 x 13.875 → T6.875 W13.875 L7)
+'   Pot blocks:  Lth=W, Wth=L, Hgt=T   (e.g. 5.500 x 5.500 x 6.875 → T6.875 W5.5 L5.5)
+Private Sub MapTempcraftBomDimsToCmsSteel(ByVal stdName As String, _
+                                          ByRef t As Double, ByRef w As Double, ByRef l As Double)
+    Dim a As Double, b As Double, c As Double
+    a = t: b = w: c = l
+    If a <= 0 Or b <= 0 Or c <= 0 Then Exit Sub
+    Select Case NormalizeKey(stdName)
+        Case "TCP", "BCP"
+            SortThreeDimensions a, b, c, l, w, t
+        Case "IDHOLDER", "ODHOLDER"
+            t = a: l = b: w = c
+        Case "IDPOT", "IDPOTBLOCK", "ODPOT", "ODPOTBLOCK"
+            w = a: l = b: t = c
+        Case Else
+            ' Unknown extras: keep prior L≥W≥T behavior.
+            SortThreeDimensions a, b, c, l, w, t
+    End Select
+End Sub
 
 Private Function FindBomIndexByStdName(ByVal stdName As String) As Long
     Dim i As Long, k As String
@@ -6944,6 +7003,10 @@ Private Function CollectExtra4140Parts(ByRef exDesc() As String, ByRef exQty() A
                         ext(n) = BomRows(i).BomThickness
                         exW(n) = BomRows(i).BomWidth
                         exL(n) = BomRows(i).BomLength
+                        If BomRows(i).BomIsTempcraftOrder Then
+                            ' Extras are not in the six-plate map; use L≥W≥T for steel sheet.
+                            MapTempcraftBomDimsToCmsSteel "", ext(n), exW(n), exL(n)
+                        End If
                     End If
                 End If
             End If
@@ -7139,8 +7202,8 @@ On Error GoTo ErrHandler
                 If found(i) Then
                     ws.Cells(writeRow, 1).value = 1
                     ws.Cells(writeRow, 2).value = names(i)
-                    ' CMS steel sheet layout: C=Thickness/Height, E=Width, G=Length
-                    ' (from SortThreeDimensions: Largest=Length, Middle=Width, Smallest=Thickness)
+                    ' CMS steel sheet: C=Thickness, E=Width, G=Length
+                    ' from CMS view-frame axes (TOP X=W, TOP Y=L, RIGHT X=T) — not L≥W≥T sort.
                     ws.Cells(writeRow, 3).value = ft(i)   ' C = Thickness / Height
                     ws.Cells(writeRow, 5).value = fw(i)   ' E = Width
                     ws.Cells(writeRow, 7).value = fl(i)   ' G = Length
