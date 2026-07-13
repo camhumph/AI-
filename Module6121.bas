@@ -2988,11 +2988,20 @@ On Error GoTo ErrHandler
         LogLine "DXF written: " & dxfPath
     End If
 
-    ' STL last (largest mesh write). Large assemblies skip temp-part merge.
+    ' STL last — always full-assembly combined one-file (gemini1).
+    ' Show everything first: DXF keep-list may have left components hidden.
     LogStart "Export full-assembly STL"
+    On Error Resume Next
+    UnsuppressAllAssemblyComponents swModel
+    ShowAllAssemblyComponents swModel
+    On Error GoTo ErrHandler
+    ApplyCmsTopView swModel
     If swModel.GetType = swDocASSEMBLY Then
-        If FAST_QUOTE_MODE Or PartCount > STL_MERGE_MAX_PARTS Or gJobIsStandardBase Then
-            LogLine "STL: direct one-file assembly export (skip temp-part merge; PartCount=" & PartCount & ")"
+        ' Prefer temp-part merge so every body lands in one combined mesh.
+        ' Fall back to assembly STL with ComponentsIntoOneFile if merge fails.
+        If PartCount > STL_MERGE_MAX_PARTS Then
+            LogLine "STL: PartCount=" & PartCount & " > " & STL_MERGE_MAX_PARTS & _
+                    " — using direct one-file assembly export (all components visible)."
             SaveFullAssemblyStlFromAssembly swModel, stlPath
         Else
             SaveAssemblyAsMergedPartStl swModel, stlPath
@@ -3507,6 +3516,13 @@ End Sub
 
 Private Sub SaveFullAssemblyStlFromAssembly(ByVal assyModel As Object, ByVal stlPath As String)
 On Error GoTo ErrHandler
+    If Not assyModel Is Nothing Then
+        On Error Resume Next
+        assyModel.ResolveAllLightWeightComponents True
+        UnsuppressAllAssemblyComponents assyModel
+        ShowAllAssemblyComponents assyModel
+        On Error GoTo ErrHandler
+    End If
     Dim priorOneFile As Boolean
     Dim oneFileSet As Boolean
     oneFileSet = False
@@ -3514,6 +3530,7 @@ On Error GoTo ErrHandler
         priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
         swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
         oneFileSet = True
+        LogLine "STL: swSTLComponentsIntoOneFile=True (combined single-file assembly export)"
     End If
     SaveStlWithMainBaseOrientation assyModel, stlPath, "FULL ASSEMBLY"
     If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
@@ -5315,7 +5332,11 @@ On Error GoTo ErrHandler
     If swCompModel Is Nothing Then Exit Sub
     If swCompModel.GetType <> swDocPART Then Exit Sub
     Dim dx As Double, dy As Double, dz As Double
-    If GetPartBoundingBoxInches(swCompModel, dx, dy, dz) = False Then Exit Sub
+    ' MUST use assembly-space AABB (component.GetBox). Part-local bbox axes do not
+    ' match CMS Top/Right/Front when holders/pots are rotated → inconsistent W/L/T.
+    If TryGetComponentBoxDimsInches(swComp, dx, dy, dz) = False Then
+        If GetPartBoundingBoxInches(swCompModel, dx, dy, dz) = False Then Exit Sub
+    End If
     Dim massV As Double
     massV = GetModelMassOrVolumeValue(swCompModel)
     Dim cx As Double, cy As Double, cz As Double, hasC As Boolean
@@ -5444,6 +5465,26 @@ On Error GoTo ErrHandler
     Exit Function
 ErrHandler:
     TryGetComponentCenterInches = False
+End Function
+
+' Assembly-axis extents of a component (transformed into the assembly).
+Private Function TryGetComponentBoxDimsInches(ByVal swComp As Object, _
+                                              ByRef dx As Double, ByRef dy As Double, ByRef dz As Double) As Boolean
+On Error GoTo ErrHandler
+    TryGetComponentBoxDimsInches = False
+    dx = 0#: dy = 0#: dz = 0#
+    If swComp Is Nothing Then Exit Function
+    Dim vBox As Variant
+    vBox = swComp.GetBox(False, False)
+    If IsEmpty(vBox) Then Exit Function
+    If IsArray(vBox) = False Then Exit Function
+    If UBound(vBox) < 5 Then Exit Function
+    Dim cx As Double, cy As Double, cz As Double
+    BoxCornersToInches vBox, dx, dy, dz, cx, cy, cz
+    TryGetComponentBoxDimsInches = (dx > 0.001 And dy > 0.001 And dz > 0.001)
+    Exit Function
+ErrHandler:
+    TryGetComponentBoxDimsInches = False
 End Function
 
 Private Sub SortPartsByVolumeDescending()
@@ -7416,6 +7457,9 @@ On Error GoTo ErrHandler
         End If
     Next i
 
+    ' Paired plates share the same footprint (W×L); only Thickness differs.
+    HarmonizeBmsSteelPairFootprints found, ft, fw, fl
+
     Dim exDesc() As String, exQty() As Long, ext() As Double, exW() As Double, exL() As Double
     Dim nx As Long
     nx = CollectExtra4140Parts(exDesc, exQty, ext, exW, exL)
@@ -7491,6 +7535,69 @@ ErrHandler:
     On Error Resume Next
     If Not xlWb Is Nothing Then xlWb.Close False
     If Not xlApp Is Nothing Then xlApp.Quit
+End Sub
+
+' Make paired BMS plates share one footprint so TCP/BCP, holders, and pots are consistent.
+' Indexes: 1=TCP 2=IDH 3=ODH 4=IDP 5=ODP 6=BCP
+Private Sub HarmonizeBmsSteelPairFootprints(ByRef found() As Boolean, _
+                                            ByRef ft() As Double, ByRef fw() As Double, ByRef fl() As Double)
+On Error Resume Next
+    HarmonizeOneBmsFootprintPair found, ft, fw, fl, 1, 6, "TCP/BCP"
+    HarmonizeOneBmsFootprintPair found, ft, fw, fl, 2, 3, "ID/OD Holder"
+    HarmonizeOneBmsFootprintPair found, ft, fw, fl, 4, 5, "ID/OD Pot"
+End Sub
+
+Private Sub HarmonizeOneBmsFootprintPair(ByRef found() As Boolean, _
+                                         ByRef ft() As Double, ByRef fw() As Double, ByRef fl() As Double, _
+                                         ByVal a As Long, ByVal b As Long, ByVal label As String)
+    If Not found(a) Or Not found(b) Then Exit Sub
+    Dim wa As Double, la As Double, wb As Double, lb As Double
+    wa = fw(a): la = fl(a): wb = fw(b): lb = fl(b)
+
+    ' Detect W↔L swap between the pair (same sizes, axes flipped).
+    If Abs(wa - lb) < 0.2 And Abs(la - wb) < 0.2 And Abs(wa - wb) > 0.25 Then
+        LogLine "J000 " & label & ": footprint W/L swapped between pair — aligning to first plate."
+        fw(b) = wa: fl(b) = la
+        Exit Sub
+    End If
+
+    ' Thin clamp plates: Length should be the longer footprint side.
+    If a = 1 And b = 6 Then
+        If ft(a) < 3# And ft(b) < 3# Then
+            If fw(a) > fl(a) Then
+                Dim tmp As Double
+                tmp = fw(a): fw(a) = fl(a): fl(a) = tmp
+                LogLine "J000 " & label & ": TCP had W>L — swapped to L>=W for footprint."
+            End If
+            fw(b) = fw(a): fl(b) = fl(a)
+            Exit Sub
+        End If
+    End If
+
+    ' Holders/pots: share average footprint when close; if one side looks
+    ' like thickness leaked into W, prefer the other's footprint.
+    Dim avgW As Double, avgL As Double
+    avgW = (wa + wb) / 2#
+    avgL = (la + lb) / 2#
+    If Abs(wa - wb) < 0.35 And Abs(la - lb) < 0.35 Then
+        fw(a) = Round(avgW, DIM_DECIMALS): fl(a) = Round(avgL, DIM_DECIMALS)
+        fw(b) = fw(a): fl(b) = fl(a)
+        LogLine "J000 " & label & ": footprint averaged to W=" & fw(a) & " L=" & fl(a)
+        Exit Sub
+    End If
+
+    ' Prefer the footprint whose sides are both larger than either thickness
+    ' (true face dims), otherwise keep each.
+    Dim aOk As Boolean, bOk As Boolean
+    aOk = (wa > ft(a) + 0.05 And la > ft(a) + 0.05) Or (Abs(wa - la) < 0.15)
+    bOk = (wb > ft(b) + 0.05 And lb > ft(b) + 0.05) Or (Abs(wb - lb) < 0.15)
+    If aOk And Not bOk Then
+        fw(b) = wa: fl(b) = la
+        LogLine "J000 " & label & ": copied footprint from first plate onto second."
+    ElseIf bOk And Not aOk Then
+        fw(a) = wb: fl(a) = lb
+        LogLine "J000 " & label & ": copied footprint from second plate onto first."
+    End If
 End Sub
 
 Private Function CopyTemplateToJobFolder(ByVal templatePath As String) As String
@@ -13092,7 +13199,15 @@ On Error GoTo ErrHandler
     If viewH > projectedLong Then projectedLong = viewH
 
     Dim actualLong As Double
-    actualLong = parts(holderIdx).Length
+    ' Use raw bbox (not view-frame Length) — frame dims are assigned after DXF.
+    actualLong = parts(holderIdx).BoxDx
+    If parts(holderIdx).BoxDy > actualLong Then actualLong = parts(holderIdx).BoxDy
+    If parts(holderIdx).BoxDz > actualLong Then actualLong = parts(holderIdx).BoxDz
+    If actualLong <= 0# Then
+        actualLong = parts(holderIdx).Length
+        If parts(holderIdx).Width > actualLong Then actualLong = parts(holderIdx).Width
+        If parts(holderIdx).Thickness > actualLong Then actualLong = parts(holderIdx).Thickness
+    End If
 
     If actualLong <= 0# Then Exit Function
 
