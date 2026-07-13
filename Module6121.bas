@@ -2527,9 +2527,9 @@ On Error GoTo ErrHandler
     model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     StabilizeActiveView model, 100
 
-    ' Ensure we are looking at the TCP large flat face (W x L), not a chamfer/edge.
-    ' Thickness (~1") must be into the screen — gemini1 relies on holder-first stack
-    ' axis; this guards when a standard view still lands edge-on.
+    ' After gemini1 holder→pot→ins→TCP + *Front, force TCP large flat face
+    ' (W×L) toward camera with ~1" thickness into the screen — not a chamfer
+    ' or plate edge, and not looking from the BCP side.
     EnsureTcpLargeFlatFaceTowardCamera model, persistAsStandardTop
 
     Exit Sub
@@ -2539,18 +2539,24 @@ ErrHandler:
 End Sub
 
 
-' After CMS_TOP is set, verify TCP's large flat face (W x L) faces the camera —
-' not a chamfer or the ~1" thick edge. Thickness must be the into-screen size.
+' After gemini1 CMS_TOP is set: TCP large flat face (W×L) toward camera,
+' thickness (~1") into the screen, TCP closer to camera than BCP.
+' Z-spin alone cannot fix an edge-on/chamfer view — pitch about X/Y.
 Private Sub EnsureTcpLargeFlatFaceTowardCamera(ByVal model As Object, _
                                                ByVal persistAsStandardTop As Boolean)
 On Error GoTo eh
     If model Is Nothing Then Exit Sub
 
     Dim tcpIdx As Long
+    Dim bcpIdx As Long
     tcpIdx = gIdxTCP
     If tcpIdx <= 0 Then tcpIdx = FindCadIndexForOrientationQuoteOrKeys("TCP", TCP_TOP_ORIENTATION_KEYS)
     If tcpIdx <= 0 Then tcpIdx = FindCadIndexFromExportQuote("TCP")
     If tcpIdx <= 0 Or tcpIdx > PartCount Then Exit Sub
+
+    bcpIdx = gIdxBCP
+    If bcpIdx <= 0 Then bcpIdx = FindCadIndexForOrientationQuoteOrKeys("BCP", BCP_BOTTOM_ORIENTATION_KEYS)
+    If bcpIdx <= 0 Then bcpIdx = FindCadIndexFromExportQuote("BCP")
 
     Dim swComp As Object
     Set swComp = FindAssemblyComponentByName(model, parts(tcpIdx).componentName)
@@ -2564,45 +2570,155 @@ On Error GoTo eh
     If thick <= 0# Then thick = 1#
 
     Dim attempt As Long
-    For attempt = 1 To 4
-        Dim viewW As Double, viewH As Double
-        If TryGetComponentViewWidthHeightInches(model, swComp, viewW, viewH) = False Then Exit Sub
+    Dim viewW As Double, viewH As Double, viewD As Double
+    Dim faceMin As Double, faceMax As Double
+    Dim faceOk As Boolean, depthOk As Boolean
 
-        Dim faceMin As Double, faceMax As Double
+    For attempt = 1 To 8
+        If TryGetComponentViewWidthHeightDepthInches(model, swComp, viewW, viewH, viewD) = False Then
+            If TryGetComponentViewWidthHeightInches(model, swComp, viewW, viewH) = False Then Exit Sub
+            viewD = thick
+        End If
+
         faceMin = viewW
         If viewH < faceMin Then faceMin = viewH
         faceMax = viewW
         If viewH > faceMax Then faceMax = viewH
 
+        ' Flat face toward camera: both screen axes >> thickness.
+        ' Into-screen extent must be the thin direction (~1"), not W or L.
+        faceOk = (faceMin > (thick * 1.75) And faceMax > (thick * 3#))
+        depthOk = (viewD <= (thick * 2.25))
+
         LogLine "TCP large-face check attempt " & attempt & ": projected=" & _
                 FormatNumberForCsv(viewW) & "x" & FormatNumberForCsv(viewH) & _
+                " depth=" & FormatNumberForCsv(viewD) & _
                 " thick~" & FormatNumberForCsv(thick)
 
-        ' Good: both on-screen sides clearly larger than plate thickness (flat face,
-        ' not edge/chamfer). Chamfer/edge views show one side ≈ thickness.
-        If faceMin > (thick * 1.75) And faceMax > (thick * 3#) Then
-            LogLine "TCP large flat face OK (not edge/chamfer)."
+        If faceOk And depthOk Then
+            LogLine "TCP large flat face OK (thickness into screen, not edge/chamfer)."
+            EnsureTcpCloserToCameraThanBcp model, tcpIdx, bcpIdx, persistAsStandardTop
+            PersistCmsTopFromCurrentView model, persistAsStandardTop
             Exit Sub
         End If
 
-        ' Edge-on or chamfer-dominant: rotate 90° about view Z and re-persist *Top.
-        LogLine "TCP view looks edge/chamfer — rotating +Z and redefining *Top."
-        RotateViewZSteps model, 1
+        ' Edge-on: one screen axis ≈ thickness. Pitch about the OTHER screen axis
+        ' so the thin direction goes into the screen (Z-spin cannot fix this).
+        If Abs(viewW - thick) <= (thick * 0.85) Or viewW < (thick * 1.6) Then
+            LogLine "TCP edge/chamfer on view-X — rotating +Y 90° to bring flat face forward."
+            RotateViewYSteps model, 1
+        ElseIf Abs(viewH - thick) <= (thick * 0.85) Or viewH < (thick * 1.6) Then
+            LogLine "TCP edge/chamfer on view-Y — rotating +X 90° to bring flat face forward."
+            RotateViewXSteps model, 1
+        ElseIf viewD > (thick * 2.25) Then
+            LogLine "TCP into-screen too deep (looking along W/L) — rotating +X 90°."
+            RotateViewXSteps model, 1
+        Else
+            LogLine "TCP face ambiguous — rotating +X 90°."
+            RotateViewXSteps model, 1
+        End If
+
         StabilizeActiveView model, 80
-        If persistAsStandardTop Then PersistCurrentViewAsStandardTop model
-        On Error Resume Next
-        model.DeleteNamedView CMS_TOP_VIEW_NAME
-        Err.Clear
-        model.NameView CMS_TOP_VIEW_NAME
-        On Error GoTo eh
-        model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
-        StabilizeActiveView model, 50
+        PersistCmsTopFromCurrentView model, persistAsStandardTop
+        Set swComp = FindAssemblyComponentByName(model, parts(tcpIdx).componentName)
+        If swComp Is Nothing Then Exit Sub
     Next attempt
 
     LogLine "WARNING: TCP large-face check could not confirm flat face after rotations."
+    EnsureTcpCloserToCameraThanBcp model, tcpIdx, bcpIdx, persistAsStandardTop
     Exit Sub
 eh:
     LogLine "EnsureTcpLargeFlatFaceTowardCamera error: " & Err.Description
+End Sub
+
+' Flip 180° about view X if BCP is closer to the camera than TCP (wrong side).
+Private Sub EnsureTcpCloserToCameraThanBcp(ByVal model As Object, _
+                                           ByVal tcpIdx As Long, _
+                                           ByVal bcpIdx As Long, _
+                                           ByVal persistAsStandardTop As Boolean)
+On Error GoTo eh
+    If model Is Nothing Then Exit Sub
+    If tcpIdx <= 0 Or tcpIdx > PartCount Then Exit Sub
+    If bcpIdx <= 0 Or bcpIdx > PartCount Then Exit Sub
+    If parts(tcpIdx).hasAsmCenter = False Or parts(bcpIdx).hasAsmCenter = False Then Exit Sub
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+    If swView Is Nothing Then Exit Sub
+
+    Dim mView As Variant
+    mView = swView.Orientation3.ArrayData
+    If IsEmpty(mView) Or IsArray(mView) = False Then Exit Sub
+    If UBound(mView) < 8 Then Exit Sub
+
+    ' View Z (into screen) = third column of orientation matrix.
+    Dim zx As Double, zy As Double, zz As Double
+    zx = CDbl(mView(2)): zy = CDbl(mView(5)): zz = CDbl(mView(8))
+
+    Dim tcpDepth As Double, bcpDepth As Double
+    tcpDepth = parts(tcpIdx).AsmCenterX * zx + parts(tcpIdx).AsmCenterY * zy + parts(tcpIdx).AsmCenterZ * zz
+    bcpDepth = parts(bcpIdx).AsmCenterX * zx + parts(bcpIdx).AsmCenterY * zy + parts(bcpIdx).AsmCenterZ * zz
+
+    ' Larger depth along view-Z means farther into the scene / closer to camera
+    ' depending on SW convention; gemini1 pot-front uses "closer" as larger view-Z
+    ' projection in EnsurePotBlocksCloserThanHoldersInActiveView — match that:
+    ' component with GREATER projected Z is closer to the viewer.
+    LogLine "TCP/BCP camera depth: TCP=" & FormatNumberForCsv(tcpDepth) & _
+            " BCP=" & FormatNumberForCsv(bcpDepth)
+
+    If tcpDepth + 0.05 < bcpDepth Then
+        LogLine "TCP is on the wrong side (behind BCP) — flipping view 180° about X."
+        If Not swView Is Nothing Then swView.RotateAboutCenter 0#, PI_VALUE
+        StabilizeActiveView model, 80
+        PersistCmsTopFromCurrentView model, persistAsStandardTop
+    Else
+        LogLine "TCP is on the camera side of BCP (correct side)."
+    End If
+    Exit Sub
+eh:
+    LogLine "EnsureTcpCloserToCameraThanBcp error: " & Err.Description
+End Sub
+
+Private Sub PersistCmsTopFromCurrentView(ByVal model As Object, _
+                                         ByVal persistAsStandardTop As Boolean)
+On Error Resume Next
+    If model Is Nothing Then Exit Sub
+    If persistAsStandardTop Then PersistCurrentViewAsStandardTop model
+    model.DeleteNamedView CMS_TOP_VIEW_NAME
+    Err.Clear
+    model.NameView CMS_TOP_VIEW_NAME
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    StabilizeActiveView model, 50
+End Sub
+
+Private Sub RotateViewXSteps(ByVal model As Object, ByVal steps As Long)
+On Error Resume Next
+    Dim i As Long
+    If model Is Nothing Then Exit Sub
+    If steps < 0 Then
+        For i = 1 To Abs(steps)
+            model.ViewRotateminusx
+        Next i
+    Else
+        For i = 1 To steps
+            model.ViewRotateplusx
+        Next i
+    End If
+End Sub
+
+Private Sub RotateViewYSteps(ByVal model As Object, ByVal steps As Long)
+On Error Resume Next
+    Dim i As Long
+    If model Is Nothing Then Exit Sub
+    If steps < 0 Then
+        For i = 1 To Abs(steps)
+            model.ViewRotateminusy
+        Next i
+    Else
+        For i = 1 To steps
+            model.ViewRotateplusy
+        Next i
+    End If
 End Sub
 
 Private Sub SetStandardBaseOrientation(ByVal model As Object)
@@ -3440,9 +3556,11 @@ On Error GoTo ErrHandler
     If stlPath = "" Then Exit Sub
 
     On Error Resume Next
+    assyModel.ClearSelection2 True
     assyModel.ResolveAllLightWeightComponents True
     UnsuppressAllAssemblyComponents assyModel
     ShowAllAssemblyComponents assyModel
+    assyModel.EditRebuild3
     On Error GoTo ErrHandler
 
     Dim fso As Object
@@ -3461,6 +3579,7 @@ On Error GoTo ErrHandler
     asmAsPartSet = False
     If Not swApp Is Nothing Then
         priorAsmAsPart = swApp.GetUserPreferenceIntegerValue(swSaveAssemblyAsPartOptions)
+        ' All components (not exterior-faces-only / not selected-only).
         swApp.SetUserPreferenceIntegerValue swSaveAssemblyAsPartOptions, swSaveAsmAsPart_AllComponents
         asmAsPartSet = True
     End If
@@ -3468,7 +3587,9 @@ On Error GoTo ErrHandler
     Dim errs As Long, warns As Long
     LogLine "FULL ASSEMBLY: saving assembly as temp multibody part (all components visible):"
     LogLine "  " & partPath
+    LogLine "  CAD PartCount=" & CStr(PartCount)
 
+    assyModel.ClearSelection2 True
     assyModel.Extension.SaveAs3 partPath, swSaveAsCurrentVersion, _
                                 swSaveAsOptions_Silent + swSaveAsOptions_Copy, _
                                 Nothing, Nothing, errs, warns
@@ -3495,6 +3616,35 @@ On Error GoTo ErrHandler
 
     swApp.ActivateDoc3 partModel.GetTitle, False, 0, errs
     EnsureSwHidden
+
+    ' Reject a merge that only captured one (or very few) bodies — that is the
+    ' "STL picking up one singular part" failure mode. Fall back to assembly STL.
+    Dim bodyCount As Long
+    bodyCount = CountSolidBodiesInPart(partModel)
+    LogLine "FULL ASSEMBLY: temp part solid body count=" & CStr(bodyCount) & _
+            " (assembly PartCount=" & CStr(PartCount) & ")"
+
+    Dim minBodies As Long
+    minBodies = 2
+    If PartCount >= 6 Then
+        minBodies = PartCount \ 4
+        If minBodies < 2 Then minBodies = 2
+        If minBodies > 12 Then minBodies = 12
+    End If
+
+    If PartCount >= 3 And bodyCount < minBodies Then
+        LogLine "FULL ASSEMBLY: merge captured too few bodies (" & CStr(bodyCount) & _
+                " < " & CStr(minBodies) & "). Rejecting merge; exporting full assembly STL."
+        On Error Resume Next
+        swApp.CloseDoc partModel.GetTitle
+        Set partModel = Nothing
+        If fso.FileExists(partPath) Then fso.DeleteFile partPath, True
+        swApp.ActivateDoc3 assyModel.GetTitle, False, 0, errs
+        On Error GoTo ErrHandler
+        SaveFullAssemblyStlFromAssembly assyModel, stlPath
+        Exit Sub
+    End If
+
     MergeAllPartBodies partModel
     SaveStlWithMainBaseOrientation partModel, stlPath, "FULL ASSEMBLY"
 
@@ -3521,13 +3671,29 @@ ErrHandler:
     SaveFullAssemblyStlFromAssembly assyModel, stlPath
 End Sub
 
+Private Function CountSolidBodiesInPart(ByVal partModel As Object) As Long
+On Error GoTo eh
+    CountSolidBodiesInPart = 0
+    If partModel Is Nothing Then Exit Function
+    Dim vBodies As Variant
+    vBodies = partModel.GetBodies2(swSolidBody, False)
+    If IsEmpty(vBodies) Then Exit Function
+    If IsArray(vBodies) = False Then Exit Function
+    CountSolidBodiesInPart = UBound(vBodies) - LBound(vBodies) + 1
+    Exit Function
+eh:
+    CountSolidBodiesInPart = 0
+End Function
+
 Private Sub SaveFullAssemblyStlFromAssembly(ByVal assyModel As Object, ByVal stlPath As String)
 On Error GoTo ErrHandler
     If Not assyModel Is Nothing Then
         On Error Resume Next
+        assyModel.ClearSelection2 True
         assyModel.ResolveAllLightWeightComponents True
         UnsuppressAllAssemblyComponents assyModel
         ShowAllAssemblyComponents assyModel
+        assyModel.EditRebuild3
         On Error GoTo ErrHandler
     End If
     Dim priorOneFile As Boolean
@@ -3537,7 +3703,7 @@ On Error GoTo ErrHandler
         priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
         swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
         oneFileSet = True
-        LogLine "STL: swSTLComponentsIntoOneFile=True (combined single-file assembly export)"
+        LogLine "STL: swSTLComponentsIntoOneFile=True (combined single-file assembly export, all components)"
     End If
     SaveStlWithMainBaseOrientation assyModel, stlPath, "FULL ASSEMBLY"
     If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
@@ -7756,9 +7922,9 @@ Private Function CountFullFootprintPlates() As Long
 End Function
 
 ' Detect whether this job is a standard base (vs pot/holder block).
-' Shop rule: most BMS jobs have "BMS" (or Tempcraft/Howmet/pot-block) in the
-' folder or CAD file name — trust that first. Without a BMS name signal,
-' prefer STANDARD when geometry/BOM look like a multi-plate mold stack.
+' Prefer clear PCS/DME plate names (A/B/EJ/clamp) so steel uses those labels
+' instead of BMS ID/OD Pot. True BMS jobs (BMS/Tempcraft in the name, and no
+' PCS plate stack) still take the pot-block path.
 Private Function DetectBaseTypeIsStandard() As Boolean
     If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
     If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
@@ -7766,57 +7932,58 @@ Private Function DetectBaseTypeIsStandard() As Boolean
     Dim nFull As Long
     nFull = CountFullFootprintPlates()
 
-    ' 0) Strong PCS / DME plate tokens in CAD names beat BMS BOM leftovers.
-    Dim nPcs As Long
+    ' 1) Strong PCS / DME structural plate tokens in CAD names.
+    Dim nPcs As Long, nStrongPcs As Long
     nPcs = CountPcsStandardPlateNameHits()
-    If nPcs >= 3 Then
+    nStrongPcs = CountPcsStrongPlateNameHits()
+    If nStrongPcs >= 2 Or (nPcs >= 3 And nStrongPcs >= 1) Then
         DetectBaseTypeIsStandard = True
-        LogLine "Base type STANDARD from PCS/DME plate tokens in CAD names (nPcs=" & nPcs & ", nFull=" & nFull & ")"
+        LogLine "Base type STANDARD from PCS/DME plate tokens in CAD names (nStrong=" & nStrongPcs & ", nPcs=" & nPcs & ", nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 1) BMS / Tempcraft / pot-block in folder or CAD file name — strongest BMS signal.
+    ' 2) BOM that names several standard structural plates -> standard base
+    '    (before BMS name/BOM tokens so Dynacast/PCS BOMs with stray "TCP" win).
+    Dim i As Long, nStd As Long
+    nStd = 0
+    For i = 1 To BomCount
+        If StandardPlateNameStd(BomRows(i).Description) <> "" Then nStd = nStd + 1
+    Next i
+    If nStd >= 2 Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type STANDARD from BOM plate names (nStd=" & nStd & ", nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' 3) BMS / Tempcraft / pot-block in folder or CAD file name.
     If LooksLikeBmsJobFromName() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from job/folder/CAD file name (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 2) BOM that names several standard structural plates -> standard base
-    '    (checked BEFORE BMS BOM tokens so Dynacast/PCS BOMs with stray "TCP" win).
-    Dim i As Long, nStd As Long
-    nStd = 0
-    For i = 1 To BomCount
-        If StandardPlateNameStd(BomRows(i).Description) <> "" Then nStd = nStd + 1
-    Next i
-    If nStd >= 3 Then
-        DetectBaseTypeIsStandard = True
-        LogLine "Base type STANDARD from BOM plate names (nStd=" & nStd & ", nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 3) Geometry: 3+ full-footprint plates = standard mold stack.
+    ' 4) Geometry: 3+ full-footprint plates = standard mold stack.
     If nFull >= 3 Then
         DetectBaseTypeIsStandard = True
         LogLine "Base type STANDARD from geometry (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 4) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
+    ' 5) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
     If LooksLikeBmsJobFromBom() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 5) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
+    ' 6) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
     If LooksLikeBmsJobFromGeometry() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 6) No BMS name and no pot-block geometry -> default STANDARD (Dynacast/DME/PCS).
+    ' 7) No BMS name and no pot-block geometry -> default STANDARD (Dynacast/DME/PCS).
     DetectBaseTypeIsStandard = True
     LogLine "Base type default STANDARD (no BMS name / pot-block signal; nFull=" & nFull & ")"
 End Function
@@ -7828,18 +7995,46 @@ Private Function CountPcsStandardPlateNameHits() As Long
     For i = 1 To PartCount
         s = " " & NormalizeText(parts(i).componentName) & " "
         u = UCase$(parts(i).componentName)
-        If InStr(u, "A-PLATE") > 0 Or InStr(u, "A_PLATE") > 0 Or InStr(s, " A PLATE ") > 0 Then n = n + 1: GoTo NextPcsHit
-        If InStr(u, "B-PLATE") > 0 Or InStr(u, "B_PLATE") > 0 Or InStr(s, " B PLATE ") > 0 Then n = n + 1: GoTo NextPcsHit
-        If InStr(u, "EJ-RET") > 0 Or InStr(u, "EJ_RET") > 0 Or InStr(u, "EJECTOR") > 0 Then n = n + 1: GoTo NextPcsHit
-        If InStr(u, "EJ-BACKUP") > 0 Or InStr(u, "EJ_BACKUP") > 0 Then n = n + 1: GoTo NextPcsHit
-        If InStr(u, "SC-RETAINER") > 0 Or InStr(u, "SC-BACKUP") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "A-PLATE") > 0 Or InStr(u, "A_PLATE") > 0 Or InStr(s, " A PLATE ") > 0 Or InStr(s, " A PLT ") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "B-PLATE") > 0 Or InStr(u, "B_PLATE") > 0 Or InStr(s, " B PLATE ") > 0 Or InStr(s, " B PLT ") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "EJ-RET") > 0 Or InStr(u, "EJ_RET") > 0 Or InStr(u, "EJ RET") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "EJ-BACKUP") > 0 Or InStr(u, "EJ_BACKUP") > 0 Or InStr(u, "EJ BACKUP") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "EJECTOR") > 0 And (InStr(u, "PLATE") > 0 Or InStr(u, "RET") > 0 Or InStr(u, "BACKUP") > 0) Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "SC-RETAINER") > 0 Or InStr(u, "SC-BACKUP") > 0 Or InStr(u, "SC RETAINER") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "TOP CLAMP") > 0 Or InStr(u, "BOTTOM CLAMP") > 0 Or InStr(u, "TOPCLAMP") > 0 Or InStr(u, "BOTCLAMP") > 0 Then n = n + 1: GoTo NextPcsHit
         If InStr(u, "CLAMP") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
         If InStr(u, "SUPPORT") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "STRIPPER") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
         If InStr(u, "RAIL") > 0 Then n = n + 1: GoTo NextPcsHit
         If StandardPlateNameStd(parts(i).componentName) <> "" Then n = n + 1
 NextPcsHit:
     Next i
     CountPcsStandardPlateNameHits = n
+End Function
+
+' Strong PCS tokens only (A/B plates, clamp plates, EJ plates) — not rails alone.
+Private Function CountPcsStrongPlateNameHits() As Long
+    Dim i As Long, n As Long, s As String, u As String, nm As String
+    n = 0
+    For i = 1 To PartCount
+        s = " " & NormalizeText(parts(i).componentName) & " "
+        u = UCase$(parts(i).componentName)
+        If InStr(u, "A-PLATE") > 0 Or InStr(u, "A_PLATE") > 0 Or InStr(s, " A PLATE ") > 0 Or InStr(s, " A PLT ") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "B-PLATE") > 0 Or InStr(u, "B_PLATE") > 0 Or InStr(s, " B PLATE ") > 0 Or InStr(s, " B PLT ") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "EJ-RET") > 0 Or InStr(u, "EJ_RET") > 0 Or InStr(u, "EJ RET") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "EJ-BACKUP") > 0 Or InStr(u, "EJ_BACKUP") > 0 Or InStr(u, "EJ BACKUP") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "EJECTOR") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "TOP CLAMP") > 0 Or InStr(u, "BOTTOM CLAMP") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "CLAMP") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "SUPPORT") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextStrong
+        If InStr(u, "STRIPPER") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextStrong
+        nm = StandardPlateNameStd(parts(i).componentName)
+        If nm <> "" Then
+            If InStr(UCase$(nm), "PLATE") > 0 Or InStr(UCase$(nm), "CLAMP") > 0 Then n = n + 1
+        End If
+NextStrong:
+    Next i
+    CountPcsStrongPlateNameHits = n
 End Function
 
 ' Folder / customer / CAD-file BMS markers. Most BMS jobs have "BMS" in the name.
@@ -13358,6 +13553,84 @@ On Error GoTo ErrHandler
 
 ErrHandler:
     TryGetComponentViewWidthHeightInches = False
+End Function
+
+' Same as width/height, plus into-screen depth of the component AABB (inches).
+Private Function TryGetComponentViewWidthHeightDepthInches(ByVal model As Object, _
+                                                           ByVal swComp As Object, _
+                                                           ByRef viewWIn As Double, _
+                                                           ByRef viewHIn As Double, _
+                                                           ByRef viewDIn As Double) As Boolean
+On Error GoTo ErrHandler
+
+    TryGetComponentViewWidthHeightDepthInches = False
+    viewWIn = 0#: viewHIn = 0#: viewDIn = 0#
+
+    If model Is Nothing Then Exit Function
+    If swComp Is Nothing Then Exit Function
+
+    Dim vBox As Variant
+    On Error Resume Next
+    vBox = swComp.GetBox(False, False)
+    On Error GoTo ErrHandler
+
+    If IsEmpty(vBox) Then Exit Function
+    If IsArray(vBox) = False Then Exit Function
+    If UBound(vBox) < 5 Then Exit Function
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+    If swView Is Nothing Then Exit Function
+
+    Dim mView As Variant
+    mView = swView.Orientation3.ArrayData
+    If IsEmpty(mView) Then Exit Function
+    If IsArray(mView) = False Then Exit Function
+    If UBound(mView) < 8 Then Exit Function
+
+    Dim xs(0 To 7) As Double, ys(0 To 7) As Double, zs(0 To 7) As Double
+    xs(0) = CDbl(vBox(0)): ys(0) = CDbl(vBox(1)): zs(0) = CDbl(vBox(2))
+    xs(1) = CDbl(vBox(3)): ys(1) = CDbl(vBox(1)): zs(1) = CDbl(vBox(2))
+    xs(2) = CDbl(vBox(0)): ys(2) = CDbl(vBox(4)): zs(2) = CDbl(vBox(2))
+    xs(3) = CDbl(vBox(3)): ys(3) = CDbl(vBox(4)): zs(3) = CDbl(vBox(2))
+    xs(4) = CDbl(vBox(0)): ys(4) = CDbl(vBox(1)): zs(4) = CDbl(vBox(5))
+    xs(5) = CDbl(vBox(3)): ys(5) = CDbl(vBox(1)): zs(5) = CDbl(vBox(5))
+    xs(6) = CDbl(vBox(0)): ys(6) = CDbl(vBox(4)): zs(6) = CDbl(vBox(5))
+    xs(7) = CDbl(vBox(3)): ys(7) = CDbl(vBox(4)): zs(7) = CDbl(vBox(5))
+
+    Dim firstPoint As Boolean
+    firstPoint = True
+    Dim minX As Double, maxX As Double, minY As Double, maxY As Double
+    Dim minZ As Double, maxZ As Double
+    Dim i As Long, vX As Double, vY As Double, vZ As Double
+
+    For i = 0 To 7
+        vX = (xs(i) * CDbl(mView(0))) + (ys(i) * CDbl(mView(3))) + (zs(i) * CDbl(mView(6)))
+        vY = (xs(i) * CDbl(mView(1))) + (ys(i) * CDbl(mView(4))) + (zs(i) * CDbl(mView(7)))
+        vZ = (xs(i) * CDbl(mView(2))) + (ys(i) * CDbl(mView(5))) + (zs(i) * CDbl(mView(8)))
+
+        If firstPoint Then
+            minX = vX: maxX = vX: minY = vY: maxY = vY: minZ = vZ: maxZ = vZ
+            firstPoint = False
+        Else
+            If vX < minX Then minX = vX
+            If vX > maxX Then maxX = vX
+            If vY < minY Then minY = vY
+            If vY > maxY Then maxY = vY
+            If vZ < minZ Then minZ = vZ
+            If vZ > maxZ Then maxZ = vZ
+        End If
+    Next i
+
+    viewWIn = Abs(maxX - minX) * INCHES_PER_METER
+    viewHIn = Abs(maxY - minY) * INCHES_PER_METER
+    viewDIn = Abs(maxZ - minZ) * INCHES_PER_METER
+
+    TryGetComponentViewWidthHeightDepthInches = (viewWIn > 0# And viewHIn > 0# And viewDIn > 0#)
+    Exit Function
+
+ErrHandler:
+    TryGetComponentViewWidthHeightDepthInches = False
 End Function
 
 Private Function EnsurePotBlocksCloserThanHoldersInActiveView( _
