@@ -60,15 +60,22 @@ Private Const EXPORT_PER_PLATE_STLS As Boolean = False
 ' Heavy neutrals are slow on 200+ part STEP imports; off in fast mode.
 Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
-' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow);
-' still forces ComponentsIntoOneFile after showing all components.
-' Prefer Gemini1 temp-part merge for reliable single-file STL + post-rotation.
-' Use 0 only when debugging speed; 9999 = always use SaveAssemblyAsMergedPartStl.
-Private Const STL_MERGE_MAX_PARTS As Long = 9999
+' Above this count, do NOT assembly->temp-part->Combine.
+' Export assembly STL directly as one file instead. Much faster for BMS/PCS jobs.
+Private Const STL_MERGE_MAX_PARTS As Long = 50
 Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
 
 ' --- Deliverable safety ---
 Private Const CREATE_FULL_ASSEMBLY_STL As Boolean = True
+
+' For BMS / holder-pot jobs, STL should contain ONLY the quoted base components:
+' TCP, BCP, ID Holder, OD Holder, ID Pot, OD Pot.
+' It excludes purchased hardware, pins, bushings, straps, insulation, etc.
+Private Const BMS_STL_EXPORT_QUOTED_BASE_ONLY As Boolean = True
+
+' If the six quoted BMS components cannot be identified, do NOT silently export
+' the full assembly STL. This prevents accidentally sending a 100+ part STL.
+Private Const BMS_STL_SKIP_IF_KEEP_LIST_INCOMPLETE As Boolean = True
 
 ' If True, BMS ISO/DXF hides everything except TCP/BCP/holders/pots.
 ' If the keep-list is incomplete, macro falls back to full visible assembly
@@ -373,6 +380,7 @@ Private Const FILL_PURCHASED_COMPONENTS As Boolean = True
 ' DME page and writes prices into the CSV. The macro just reads the CSV, so its
 ' own web lookup is OFF. (Flip to True only if you want the VBA fallback back.)
 Private Const ENABLE_ONLINE_PRICE_LOOKUP As Boolean = False
+Private Const ENABLE_PYTHON_PRICE_LOOKUP As Boolean = False
 Private Const ENABLE_ASSISTED_PRICE_PROMPT As Boolean = False
 Private Const PYTHON_EXE As String = "python"
 Private Const PURCHASED_PRICE_FILE As String = "Purchased Components Prices.csv"
@@ -841,14 +849,19 @@ On Error GoTo ErrHandler
     End If
     ' STL matrix only here — L/W/T wait until after DXF locks the same views.
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
-    If (Not FAST_QUOTE_MODE) Or (Not gJobIsStandardBase) Then
+    If FAST_QUOTE_MODE Then
+
+        LogLine "FAST QUOTE: skipped ResolveAllLightWeight / Unsuppress-all heavy prep (active CAD, all base types)."
+
+        On Error Resume Next
+        PrepareAssemblyVisibilityFast swModel
+        On Error GoTo ErrHandler
+
+    Else
+
         UnsuppressAllAssemblyComponents swModel
         ShowAllAssemblyComponents swModel
-    Else
-        LogLine "FAST QUOTE: skipped Unsuppress-all (active CAD, standard)"
-        On Error Resume Next
-        ShowAllAssemblyComponents swModel
-        On Error GoTo ErrHandler
+
     End If
     ApplyCmsTopView swModel
     StabilizeActiveView swModel, 50
@@ -858,6 +871,12 @@ On Error GoTo ErrHandler
         ClassifyStandardBasePlates
         CaptureStandardPurchasedFromCadIfNeeded
         LogDone "Classify STANDARD mold base from active CAD"
+
+        LogStart "Set STANDARD top from classified A/B stack"
+        If SetStandardBaseTopFromClassifiedStack(swModel) Then
+            CaptureFinalStandardViewsForStlCoordinateSystem swModel
+        End If
+        LogDone "Set STANDARD top from classified A/B stack"
     End If
 
     BuildPullcoreList
@@ -896,6 +915,11 @@ On Error GoTo ErrHandler
     CaptureCmsViewFrameFromModel swModel
     ApplyCmsViewDimsToAllParts
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+
+    If isStd Then
+        RefreshStandardPlateDimsFromCurrentPartRoles
+    End If
+
     LogDone "Assign CMS view-frame dims after DXF"
 
     If FILL_QUOTE_WORKBOOK Then
@@ -1526,6 +1550,12 @@ On Error GoTo ErrHandler
         ClassifyStandardBasePlates
         CaptureStandardPurchasedFromCadIfNeeded
         LogDone "Classify STANDARD mold base plates"
+
+        LogStart "Set STANDARD top from classified A/B stack"
+        If SetStandardBaseTopFromClassifiedStack(swModel) Then
+            CaptureFinalStandardViewsForStlCoordinateSystem swModel
+        End If
+        LogDone "Set STANDARD top from classified A/B stack"
     End If
 
     BuildPullcoreList
@@ -1554,19 +1584,26 @@ On Error GoTo ErrHandler
     ComputePullcoreQuote
     ComputePurchasedQuote
 
-    ' Heavy SolidWorks prep only when needed (BMS hide-list / non-fast).
-    If (Not FAST_QUOTE_MODE) Or (Not gJobIsStandardBase) Then
+    ' Fast mode must skip heavy SolidWorks prep for BOTH standard and BMS jobs.
+    If FAST_QUOTE_MODE Then
+
+        LogLine "FAST QUOTE: skipped ResolveAllLightWeight / Unsuppress-all heavy prep (all base types)."
+
+        On Error Resume Next
+        PrepareAssemblyVisibilityFast swModel
+        On Error GoTo ErrHandler
+
+    Else
+
         On Error Resume Next
         swModel.ResolveAllLightWeightComponents True
         On Error GoTo ErrHandler
+
         UnsuppressAllAssemblyComponents swModel
         ShowAllAssemblyComponents swModel
-    Else
-        LogLine "FAST QUOTE: skipped ResolveAllLightWeight / Unsuppress-all (standard)"
-        On Error Resume Next
-        ShowAllAssemblyComponents swModel
-        On Error GoTo ErrHandler
+
     End If
+
     ApplyCmsTopView swModel
     StabilizeActiveView swModel, 50
 
@@ -1581,6 +1618,11 @@ On Error GoTo ErrHandler
     CaptureCmsViewFrameFromModel swModel
     ApplyCmsViewDimsToAllParts
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+
+    If isStd Then
+        RefreshStandardPlateDimsFromCurrentPartRoles
+    End If
+
     LogDone "Assign CMS view-frame dims after DXF"
 
     If FILL_QUOTE_WORKBOOK Then
@@ -2679,6 +2721,212 @@ ErrHandler:
     LogLine "SetStandardBaseOrientation error: " & Err.Description
 End Sub
 
+Private Function IsStandardStructuralRoleKey(ByVal roleKey As String) As Boolean
+    Select Case NormalizeKey(roleKey)
+        Case "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
+             "APLATE", "BPLATE", "CAVITYPLATE", "COREPLATE", _
+             "SUPPORTPLATE", "STRIPPERPLATE", "MANIFOLDPLATE", _
+             "SCRETAINERPLATE", "SCBACKUPPLATE", _
+             "DIEPLATE", "DIEBACKUPPLATE"
+            IsStandardStructuralRoleKey = True
+    End Select
+End Function
+
+Private Function FindStandardStackExtremeIndex(ByVal wantTop As Boolean) As Long
+On Error GoTo ErrHandler
+
+    FindStandardStackExtremeIndex = 0
+
+    If PartCount < 1 Then Exit Function
+    If gStdStackAxis < 1 Or gStdStackAxis > 3 Then Exit Function
+    If Not StdRoleArrayReady() Then Exit Function
+
+    Dim i As Long
+    Dim roleKey As String
+    Dim v As Double
+    Dim bestVal As Double
+    Dim haveBest As Boolean
+    Dim takeHigh As Boolean
+
+    If wantTop Then
+        takeHigh = gStdTopIsFirst
+    Else
+        takeHigh = Not gStdTopIsFirst
+    End If
+
+    For i = 1 To PartCount
+        roleKey = NormalizeKey(StdCadRole(i))
+
+        If IsStandardStructuralRoleKey(roleKey) Then
+            v = PartAxisCenter(i, gStdStackAxis)
+
+            If Not haveBest Then
+                bestVal = v
+                FindStandardStackExtremeIndex = i
+                haveBest = True
+            Else
+                If takeHigh Then
+                    If v > bestVal Then
+                        bestVal = v
+                        FindStandardStackExtremeIndex = i
+                    End If
+                Else
+                    If v < bestVal Then
+                        bestVal = v
+                        FindStandardStackExtremeIndex = i
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    Exit Function
+
+ErrHandler:
+    FindStandardStackExtremeIndex = 0
+End Function
+
+Private Function SetStandardBaseTopFromClassifiedStack(ByVal model As Object) As Boolean
+On Error GoTo ErrHandler
+
+    SetStandardBaseTopFromClassifiedStack = False
+
+    If model Is Nothing Then Exit Function
+    If PartCount < 2 Then Exit Function
+
+    If gStdStackAxis < 1 Or gStdStackAxis > 3 Then
+        LogLine "STANDARD stack top orientation skipped: gStdStackAxis not ready."
+        Exit Function
+    End If
+
+    Dim topIdx As Long
+    Dim botIdx As Long
+
+    topIdx = FindStandardStackExtremeIndex(True)
+    botIdx = FindStandardStackExtremeIndex(False)
+
+    If topIdx <= 0 Or botIdx <= 0 Or topIdx = botIdx Then
+        LogLine "STANDARD stack top orientation skipped: could not find top/bottom structural plate pair."
+        Exit Function
+    End If
+
+    LogLine "STANDARD stack top orientation source:"
+    LogLine "  TOP idx=" & topIdx & " role=" & StdCadRole(topIdx) & _
+            " comp='" & parts(topIdx).componentName & "'" & _
+            " center X/Y/Z=" & FormatNumberForCsv(parts(topIdx).AsmCenterX) & "/" & _
+                              FormatNumberForCsv(parts(topIdx).AsmCenterY) & "/" & _
+                              FormatNumberForCsv(parts(topIdx).AsmCenterZ)
+
+    LogLine "  BOTTOM idx=" & botIdx & " role=" & StdCadRole(botIdx) & _
+            " comp='" & parts(botIdx).componentName & "'" & _
+            " center X/Y/Z=" & FormatNumberForCsv(parts(botIdx).AsmCenterX) & "/" & _
+                              FormatNumberForCsv(parts(botIdx).AsmCenterY) & "/" & _
+                              FormatNumberForCsv(parts(botIdx).AsmCenterZ)
+
+    If OrientFromPairIndices(model, topIdx, botIdx, "STANDARD classified stack") = False Then
+        LogLine "STANDARD stack top orientation failed."
+        Exit Function
+    End If
+
+    If PersistCurrentViewAsStandardTop(model) Then
+        model.ShowNamedView2 "*Top", 5
+        StabilizeActiveView model, 50
+
+        On Error Resume Next
+        model.DeleteNamedView CMS_TOP_VIEW_NAME
+        Err.Clear
+        model.NameView CMS_TOP_VIEW_NAME
+        On Error GoTo ErrHandler
+
+        model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+        StabilizeActiveView model, 50
+
+        LogLine "STANDARD stack top orientation persisted as SolidWorks *Top and CMS_TOP."
+        SetStandardBaseTopFromClassifiedStack = True
+    Else
+        LogLine "STANDARD stack top orientation: could not persist *Top."
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "SetStandardBaseTopFromClassifiedStack error: " & Err.Description
+    SetStandardBaseTopFromClassifiedStack = False
+End Function
+
+Private Sub RefreshStandardPlateDimsFromCurrentPartRoles()
+On Error GoTo ErrHandler
+
+    If StdCount < 1 Then Exit Sub
+    If PartCount < 1 Then Exit Sub
+    If Not StdRoleArrayReady() Then Exit Sub
+
+    Dim i As Long
+    Dim p As Long
+    Dim wantedKey As String
+    Dim roleKey As String
+    Dim foundIdx As Long
+    Dim railCount As Long
+    Dim railIdx As Long
+
+    railCount = 0
+    railIdx = 0
+
+    For p = 1 To PartCount
+        roleKey = NormalizeKey(StdCadRole(p))
+        If roleKey = "RAILS" Then
+            railCount = railCount + 1
+            If railIdx = 0 Then railIdx = p
+        End If
+    Next p
+
+    For i = 1 To StdCount
+
+        wantedKey = NormalizeKey(stdName(i))
+        foundIdx = 0
+
+        If wantedKey = "RAILS" Then
+
+            If railIdx > 0 Then
+                StdQty(i) = railCount
+                StdT(i) = parts(railIdx).Thickness
+                StdW(i) = parts(railIdx).Width
+                StdL(i) = parts(railIdx).Length
+
+                LogLine "STANDARD dims refreshed after CMS view frame: Rails qty=" & railCount & _
+                        " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i)
+            End If
+
+        Else
+
+            For p = 1 To PartCount
+                roleKey = NormalizeKey(StdCadRole(p))
+                If roleKey = wantedKey Then
+                    foundIdx = p
+                    Exit For
+                End If
+            Next p
+
+            If foundIdx > 0 Then
+                StdT(i) = parts(foundIdx).Thickness
+                StdW(i) = parts(foundIdx).Width
+                StdL(i) = parts(foundIdx).Length
+
+                LogLine "STANDARD dims refreshed after CMS view frame: " & stdName(i) & _
+                        " <- idx " & foundIdx & _
+                        " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i)
+            End If
+
+        End If
+
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "RefreshStandardPlateDimsFromCurrentPartRoles error: " & Err.Description
+End Sub
+
 ' Standard-base front (non-BMS): shop molds face the operator with the long
 ' side of the base across the view and rails running left-right. Latch-lock /
 ' safety-strap hardware, when present, sits on the operator (front) face.
@@ -2971,22 +3219,39 @@ On Error Resume Next
 
     If model Is Nothing Then Exit Sub
 
+    Dim errs As Long
+    swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+    Set model = swApp.ActiveDoc
+
+    If model Is Nothing Then Exit Sub
+
     model.ClearSelection2 True
 
     If model.GetType = swDocASSEMBLY Then
-        If Not FAST_QUOTE_MODE Then
-            model.ResolveAllLightWeightComponents True
+
+        If FAST_QUOTE_MODE Then
+            LogLine "FAST STL: skipped ResolveAllLightWeight / Unsuppress-all / heavy rebuild before full STL."
+            ShowAllAssemblyComponents model
         Else
-            LogLine "FAST STL: skipped ResolveAllLightWeight before full STL."
+            model.ResolveAllLightWeightComponents True
+            UnsuppressAllAssemblyComponents model
+            ShowAllAssemblyComponents model
+            model.EditRebuild3
         End If
 
-        UnsuppressAllAssemblyComponents model
-        ShowAllAssemblyComponents model
+    ElseIf model.GetType = swDocPART Then
+
+        ShowAllPartBodies model
+        If Not FAST_QUOTE_MODE Then model.EditRebuild3
+
     End If
 
     ApplyCmsTopView model
-    model.EditRebuild3
-    model.GraphicsRedraw2
+
+    If Not FAST_QUOTE_MODE Then
+        model.GraphicsRedraw2
+    End If
+
     DoEvents
 End Sub
 
@@ -3270,50 +3535,85 @@ On Error GoTo ErrHandler
 
     ' ============================================================
     ' STL FIRST:
-    ' Must happen BEFORE ISO/DXF hide-lists.
-    ' This guarantees the STL contains the full visible assembly, not only
-    ' the isolated BMS keep-list.
+    ' For STANDARD bases: export normal full/base STL.
+    ' For BMS holder-pot bases: export ONLY the quoted base components:
+    '   TCP, BCP, ID Holder, OD Holder, ID Pot, OD Pot.
+    ' This excludes hardware/pins/bushings/straps/insulation and avoids slow
+    ' 100+ part STL merges.
     ' ============================================================
     If CREATE_FULL_ASSEMBLY_STL Then
 
-        LogStart "Export full-assembly STL"
+        Dim stlCreated As Boolean
+        stlCreated = False
 
-        PrepareAssemblyForFullStlExport swModel
+        If swModel.GetType = swDocASSEMBLY And _
+           (Not gJobIsStandardBase) And _
+           BMS_STL_EXPORT_QUOTED_BASE_ONLY Then
 
-        If swModel.GetType = swDocASSEMBLY Then
+            LogStart "Export BMS quoted-base STL only"
 
-            If PartCount > STL_MERGE_MAX_PARTS Then
-                LogLine "FAST STL: PartCount=" & PartCount & _
-                        " > STL_MERGE_MAX_PARTS=" & STL_MERGE_MAX_PARTS & _
-                        ". Skipping temp-part merge; exporting assembly STL as one file."
-                SaveFullAssemblyStlFromAssembly swModel, stlPath
+            stlCreated = ExportBmsQuotedBaseStlOnly(swModel, stlPath)
+
+            If stlCreated Then
+                LogLine "BMS quoted-base STL written: " & stlPath
+                LogFileExistsAndSize "BMS QUOTED BASE STL", stlPath
             Else
-                SaveAssemblyAsMergedPartStl swModel, stlPath
+                LogLine "WARNING: BMS quoted-base STL was not created."
             End If
 
+            LogDone "Export BMS quoted-base STL only"
+
         Else
-            SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
+
+            LogStart "Export base STL"
+
+            PrepareAssemblyForFullStlExport swModel
+
+            If swModel.GetType = swDocASSEMBLY Then
+
+                If PartCount > STL_MERGE_MAX_PARTS Then
+                    LogLine "FAST STL: PartCount=" & PartCount & _
+                            " > STL_MERGE_MAX_PARTS=" & STL_MERGE_MAX_PARTS & _
+                            ". Skipping temp-part merge; exporting assembly STL as one file."
+                    SaveFullAssemblyStlFromAssembly swModel, stlPath
+                Else
+                    SaveAssemblyAsMergedPartStl swModel, stlPath
+                End If
+
+            Else
+                SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
+            End If
+
+            stlCreated = (Dir(stlPath) <> "")
+
+            If stlCreated Then
+                LogLine "Base STL written: " & stlPath
+                LogFileExistsAndSize "BASE STL", stlPath
+            Else
+                LogLine "WARNING: Base STL was not created: " & stlPath
+            End If
+
+            LogDone "Export base STL"
+
         End If
 
-        LogLine "Whole-assembly STL written: " & stlPath
-        LogFileExistsAndSize "FULL ASSEMBLY STL", stlPath
-
-        On Error Resume Next
-        If LCase(stlPath) <> LCase(stlBasePath) Then
-            Dim fsoStl As Object
-            Set fsoStl = CreateObject("Scripting.FileSystemObject")
-            If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
+        ' Copy STL into base\ too, but only if it was actually created.
+        If stlCreated Then
+            On Error Resume Next
+            If LCase(stlPath) <> LCase(stlBasePath) Then
+                Dim fsoStl As Object
+                Set fsoStl = CreateObject("Scripting.FileSystemObject")
+                If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
+            End If
+            On Error GoTo ErrHandler
         End If
-        On Error GoTo ErrHandler
 
-        LogDone "Export full-assembly STL"
-
-        ' Light restore before ISO/DXF (do not re-run heavy STL prep).
+        ' Light restore before ISO/DXF.
         PrepareAssemblyVisibilityFast swModel
 
     Else
 
-        LogLine "FAST QUOTE: skipped full-assembly STL."
+        LogLine "FAST QUOTE: skipped STL."
 
     End If
 
@@ -3836,12 +4136,27 @@ On Error GoTo ErrHandler
     If assyModel Is Nothing Then Exit Sub
     If stlPath = "" Then Exit Sub
 
+    If FAST_QUOTE_MODE And PartCount > STL_MERGE_MAX_PARTS Then
+        LogLine "FAST STL: PartCount=" & PartCount & _
+                " > STL_MERGE_MAX_PARTS=" & STL_MERGE_MAX_PARTS & _
+                ". Skipping temp-part merge inside SaveAssemblyAsMergedPartStl."
+        SaveFullAssemblyStlFromAssembly assyModel, stlPath
+        Exit Sub
+    End If
+
     On Error Resume Next
     assyModel.ClearSelection2 True
-    assyModel.ResolveAllLightWeightComponents True
-    UnsuppressAllAssemblyComponents assyModel
-    ShowAllAssemblyComponents assyModel
-    assyModel.EditRebuild3
+
+    If FAST_QUOTE_MODE Then
+        LogLine "FAST STL merge prep: skipped ResolveAllLightWeight / Unsuppress-all."
+        ShowAllAssemblyComponents assyModel
+    Else
+        assyModel.ResolveAllLightWeightComponents True
+        UnsuppressAllAssemblyComponents assyModel
+        ShowAllAssemblyComponents assyModel
+        assyModel.EditRebuild3
+    End If
+
     On Error GoTo ErrHandler
 
     Dim fso As Object
@@ -3964,6 +4279,101 @@ On Error GoTo eh
     Exit Function
 eh:
     CountSolidBodiesInPart = 0
+End Function
+
+Private Function ExportBmsQuotedBaseStlOnly(ByVal assyModel As Object, ByVal stlPath As String) As Boolean
+On Error GoTo ErrHandler
+
+    ExportBmsQuotedBaseStlOnly = False
+
+    If assyModel Is Nothing Then Exit Function
+    If stlPath = "" Then Exit Function
+
+    If assyModel.GetType <> swDocASSEMBLY Then
+        LogLine "BMS quoted-base STL: source is not an assembly; exporting current model STL."
+        SaveStlWithMainBaseOrientation assyModel, stlPath, "BMS QUOTED BASE PART"
+        ExportBmsQuotedBaseStlOnly = (Dir(stlPath) <> "")
+        Exit Function
+    End If
+
+    Dim keepNames As Collection
+    Set keepNames = BuildBaseDxfKeepComponentNames()
+
+    If keepNames Is Nothing Or keepNames.Count < BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF Then
+
+        LogLine "BMS quoted-base STL skipped: keep-list incomplete. Found " & _
+                IIf(keepNames Is Nothing, 0, keepNames.Count) & _
+                " of " & BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF & " required quoted base components."
+
+        If BMS_STL_SKIP_IF_KEEP_LIST_INCOMPLETE Then
+            LogLine "BMS quoted-base STL: NOT falling back to full assembly because BMS_STL_SKIP_IF_KEEP_LIST_INCOMPLETE=True."
+            Exit Function
+        Else
+            LogLine "BMS quoted-base STL: falling back to full assembly STL."
+            SaveFullAssemblyStlFromAssembly assyModel, stlPath
+            ExportBmsQuotedBaseStlOnly = (Dir(stlPath) <> "")
+            Exit Function
+        End If
+
+    End If
+
+    Dim hiddenNames As Collection
+    Set hiddenNames = New Collection
+
+    LogLine "BMS quoted-base STL: isolating quoted components only. keep=" & keepNames.Count
+
+    ' Start visible, then hide everything except TCP/BCP/holders/pots.
+    PrepareAssemblyVisibilityFast assyModel
+
+    If HideAllExceptComponentNamesOnce(assyModel, keepNames, hiddenNames) = False Then
+
+        LogLine "BMS quoted-base STL failed: could not isolate quoted base components."
+
+        If BMS_STL_SKIP_IF_KEEP_LIST_INCOMPLETE Then
+            LogLine "BMS quoted-base STL: NOT falling back to full assembly."
+            GoTo CleanExit
+        Else
+            LogLine "BMS quoted-base STL: falling back to full assembly STL."
+            SaveFullAssemblyStlFromAssembly assyModel, stlPath
+            ExportBmsQuotedBaseStlOnly = (Dir(stlPath) <> "")
+            GoTo CleanExit
+        End If
+
+    End If
+
+    ApplyCmsTopView assyModel
+    StabilizeActiveView assyModel, 50
+
+    ' Export visible quoted components as ONE STL file.
+    ' This does NOT boolean-combine them; it writes one multi-shell STL file.
+    SaveAssemblyStlSingleFileBinary assyModel, stlPath
+
+    If Dir(stlPath) <> "" Then
+        ExportBmsQuotedBaseStlOnly = True
+        LogLine "BMS quoted-base STL written: " & stlPath
+    Else
+        LogLine "WARNING: BMS quoted-base STL was not created: " & stlPath
+    End If
+
+CleanExit:
+    On Error Resume Next
+
+    If Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then
+            ShowNamedComponentsOnce assyModel, hiddenNames
+        Else
+            ShowAllAssemblyComponents assyModel
+        End If
+    Else
+        ShowAllAssemblyComponents assyModel
+    End If
+
+    ApplyCmsTopView assyModel
+    Exit Function
+
+ErrHandler:
+    LogLine "ExportBmsQuotedBaseStlOnly error: " & Err.Description
+    Resume CleanExit
 End Function
 
 Private Sub SaveFullAssemblyStlFromAssembly(ByVal assyModel As Object, ByVal stlPath As String)
@@ -8815,66 +9225,412 @@ End Function
 ' BMS/pot-block signals must win before BOM standard-plate detection so BMS
 ' jobs use EnsureCmsTopOrientationFromMatchedTcpBcp (gemini1), not SetStandardBaseOrientation.
 Private Function DetectBaseTypeIsStandard() As Boolean
-    If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
-    If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
+On Error GoTo ErrHandler
 
+    If UCase(BASE_TYPE_MODE) = "STANDARD" Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type forced by BASE_TYPE_MODE=STANDARD"
+        Exit Function
+    End If
+
+    If UCase(BASE_TYPE_MODE) = "POT" Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced by BASE_TYPE_MODE=POT"
+        Exit Function
+    End If
+
+    Dim hardBmsName As Boolean
+    Dim bmsBomRoles As Long
+    Dim stdBomRoles As Long
+    Dim stdStrongCad As Long
+    Dim stdCadHits As Long
     Dim nFull As Long
+
+    Dim nFullThin As Long
+    Dim nThickInner As Long
+    Dim nPotLike As Long
+    Dim nThinSheet As Long
+
+    Dim bmsGeo As Boolean
+    Dim stdGeo As Boolean
+
+    Dim bmsScore As Long
+    Dim stdScore As Long
+
+    hardBmsName = HasHardBmsNameSignal()
+    bmsBomRoles = CountDistinctBmsBomRoles()
+    stdBomRoles = CountDistinctStandardBomRoles()
+    stdStrongCad = CountPcsStrongPlateNameHits()
+    stdCadHits = CountPcsStandardPlateNameHits()
     nFull = CountFullFootprintPlates()
 
-    ' 1) BMS / Tempcraft / pot-block in folder or CAD file name.
-    If LooksLikeBmsJobFromName() Then
+    GetBaseTypeGeometryStats nFullThin, nThickInner, nPotLike, nThinSheet
+
+    ' BMS holder/pot geometry:
+    ' Usually only 1-2 broad thin clamp/smed plates, plus thick inner holders/pots.
+    bmsGeo = False
+    If nFull < 5 Then
+        If nFullThin <= 3 And nThickInner >= 2 Then
+            If nPotLike >= 2 Or (nPotLike >= 1 And nThinSheet >= 1) Then
+                bmsGeo = True
+            End If
+        End If
+    End If
+
+    ' Standard geometry:
+    ' 3+ full-footprint plates is a normal PCS/standard mold-base signal.
+    stdGeo = False
+    If nFull >= 3 Then stdGeo = True
+    If stdStrongCad >= 2 Then stdGeo = True
+
+    ' ------------------------------
+    ' Score BMS
+    ' ------------------------------
+    If hardBmsName Then bmsScore = bmsScore + 80
+
+    If bmsBomRoles >= 2 Then
+        bmsScore = bmsScore + 80
+    ElseIf bmsBomRoles = 1 Then
+        bmsScore = bmsScore + 25
+    End If
+
+    If bmsGeo Then bmsScore = bmsScore + 70
+
+    ' ------------------------------
+    ' Score STANDARD / PCS
+    ' ------------------------------
+    If stdStrongCad >= 2 Then
+        stdScore = stdScore + 90
+    ElseIf stdStrongCad = 1 Then
+        stdScore = stdScore + 35
+    End If
+
+    If stdCadHits >= 3 Then stdScore = stdScore + 35
+    If stdBomRoles >= 2 Then stdScore = stdScore + 60
+
+    If nFull >= 3 Then stdScore = stdScore + 45
+    If nFull >= 5 Then stdScore = stdScore + 35
+
+    If stdGeo Then stdScore = stdScore + 25
+
+    ' Big standard stacks argue against BMS.
+    If nFull >= 5 Then bmsScore = bmsScore - 30
+
+    LogLine "Base type decision signals:"
+    LogLine "  hardBmsName=" & CStr(hardBmsName)
+    LogLine "  bmsBomRoles=" & CStr(bmsBomRoles)
+    LogLine "  stdBomRoles=" & CStr(stdBomRoles)
+    LogLine "  stdStrongCad=" & CStr(stdStrongCad)
+    LogLine "  stdCadHits=" & CStr(stdCadHits)
+    LogLine "  nFull=" & CStr(nFull)
+    LogLine "  geometry nFullThin=" & CStr(nFullThin) & _
+            " nThickInner=" & CStr(nThickInner) & _
+            " nPotLike=" & CStr(nPotLike) & _
+            " nThinSheet=" & CStr(nThinSheet)
+    LogLine "  bmsGeo=" & CStr(bmsGeo) & " stdGeo=" & CStr(stdGeo)
+    LogLine "  BMS score=" & CStr(bmsScore) & " STANDARD score=" & CStr(stdScore)
+
+    ' ============================================================
+    ' Final decision rules
+    ' ============================================================
+
+    ' Strong BMS BOM wins unless strong PCS tokens exist.
+    If bmsBomRoles >= 2 And stdStrongCad < 2 Then
         DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from job/folder/CAD file name (nFull=" & nFull & ")"
+        LogLine "Base type selected: BMS/POT — BOM has multiple BMS holder/pot roles."
         Exit Function
     End If
 
-    ' 2) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
-    If LooksLikeBmsJobFromBom() Then
+    ' Strong BMS geometry wins unless strong PCS tokens/full standard stack exists.
+    If bmsGeo And stdStrongCad < 2 And nFull < 4 Then
         DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
+        LogLine "Base type selected: BMS/POT — geometry matches holder/pot base."
         Exit Function
     End If
 
-    ' 3) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
-    If LooksLikeBmsJobFromGeometry() Then
+    ' Strong PCS names win when there is no real BMS evidence.
+    If stdStrongCad >= 2 And bmsBomRoles = 0 And Not bmsGeo Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type selected: STANDARD — strong PCS A/B/ejector/SC/rail CAD names."
+        Exit Function
+    End If
+
+    ' Hard BMS name wins when BMS score is close enough.
+    If hardBmsName Then
+        If bmsScore >= stdScore - 20 Then
+            DetectBaseTypeIsStandard = False
+            LogLine "Base type selected: BMS/POT — hard BMS name signal."
+            Exit Function
+        Else
+            LogLine "WARNING: hard BMS name signal exists, but standard evidence is stronger. Selecting STANDARD."
+        End If
+    End If
+
+    ' Standard full-stack geometry.
+    If nFull >= 3 And Not bmsGeo Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type selected: STANDARD — 3+ full-footprint plates and no BMS geometry."
+        Exit Function
+    End If
+
+    ' Score comparison.
+    If stdScore > bmsScore Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type selected: STANDARD — score comparison."
+        Exit Function
+    End If
+
+    If bmsScore > stdScore Then
         DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
+        LogLine "Base type selected: BMS/POT — score comparison."
         Exit Function
     End If
 
-    ' 4) Strong PCS / DME structural plate tokens in CAD names.
-    Dim nPcs As Long, nStrongPcs As Long
-    nPcs = CountPcsStandardPlateNameHits()
-    nStrongPcs = CountPcsStrongPlateNameHits()
-    If nStrongPcs >= 2 Or (nPcs >= 3 And nStrongPcs >= 1) Then
-        DetectBaseTypeIsStandard = True
-        LogLine "Base type STANDARD from PCS/DME plate tokens in CAD names (nStrong=" & nStrongPcs & ", nPcs=" & nPcs & ", nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 5) BOM that names several standard structural plates -> standard base.
-    Dim i As Long, nStd As Long
-    nStd = 0
-    For i = 1 To BomCount
-        If StandardPlateNameStd(BomRows(i).Description) <> "" Then nStd = nStd + 1
-    Next i
-    If nStd >= 2 Then
-        DetectBaseTypeIsStandard = True
-        LogLine "Base type STANDARD from BOM plate names (nStd=" & nStd & ", nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 6) Geometry: 3+ full-footprint plates = standard mold stack.
-    If nFull >= 3 Then
-        DetectBaseTypeIsStandard = True
-        LogLine "Base type STANDARD from geometry (nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 7) No BMS name and no pot-block geometry -> default STANDARD (Dynacast/DME/PCS).
+    ' Tie/no evidence: default standard.
     DetectBaseTypeIsStandard = True
-    LogLine "Base type default STANDARD (no BMS name / pot-block signal; nFull=" & nFull & ")"
+    LogLine "Base type selected: STANDARD — default tie/no strong BMS evidence."
+
+    Exit Function
+
+ErrHandler:
+    LogLine "DetectBaseTypeIsStandard error: " & Err.Description
+    DetectBaseTypeIsStandard = True
 End Function
+
+Private Function BuildBaseTypeBlob() As String
+On Error Resume Next
+
+    Dim blob As String
+
+    blob = UCase$(CurrentJobNumber & "|" & _
+                  CustomerJobNumber & "|" & _
+                  CustomerPrefix & "|" & _
+                  CustomerDisplayName & "|" & _
+                  gExactJobFolderName & "|" & _
+                  NetworkJobFolder & "|" & _
+                  CurrentJobFolder & "|" & _
+                  gHandoffAttachDir & "|" & _
+                  JobBaseName)
+
+    If Not swModel Is Nothing Then
+        blob = blob & "|" & UCase$(swModel.GetTitle)
+        blob = blob & "|" & UCase$(swModel.GetPathName)
+    End If
+
+    BuildBaseTypeBlob = blob
+End Function
+
+Private Function HasHardBmsNameSignal() As Boolean
+On Error GoTo ErrHandler
+
+    HasHardBmsNameSignal = False
+
+    Dim blob As String
+    blob = BuildBaseTypeBlob()
+
+    If blob = "" Then Exit Function
+
+    If InStr(blob, "BMS") > 0 Then HasHardBmsNameSignal = True: Exit Function
+    If InStr(blob, "POTBLOCK") > 0 Then HasHardBmsNameSignal = True: Exit Function
+    If InStr(blob, "POT-BLOCK") > 0 Then HasHardBmsNameSignal = True: Exit Function
+    If InStr(blob, "POT_BLOCK") > 0 Then HasHardBmsNameSignal = True: Exit Function
+    If InStr(blob, "RFQ_MB_ASM") > 0 Then HasHardBmsNameSignal = True: Exit Function
+    If InStr(blob, "MB_ASM") > 0 Then HasHardBmsNameSignal = True: Exit Function
+
+    ' SMED is normally BMS/pot-block style.
+    If InStr(blob, "SMED") > 0 Then HasHardBmsNameSignal = True: Exit Function
+
+    Exit Function
+
+ErrHandler:
+    HasHardBmsNameSignal = False
+End Function
+
+Private Function CountDistinctBmsBomRoles() As Long
+On Error GoTo ErrHandler
+
+    CountDistinctBmsBomRoles = 0
+
+    If BomCount < 1 Then Exit Function
+
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim i As Long
+    Dim q As String
+    Dim d As String
+
+    For i = 1 To BomCount
+
+        q = NormalizeKey(BomRows(i).quoteName)
+        d = NormalizeText(BomRows(i).Description)
+
+        Select Case q
+            Case "IDHOLDER"
+                If Not dict.Exists("IDHOLDER") Then dict.Add "IDHOLDER", True
+
+            Case "ODHOLDER"
+                If Not dict.Exists("ODHOLDER") Then dict.Add "ODHOLDER", True
+
+            Case "IDPOT", "IDPOTBLOCK"
+                If Not dict.Exists("IDPOT") Then dict.Add "IDPOT", True
+
+            Case "ODPOT", "ODPOTBLOCK"
+                If Not dict.Exists("ODPOT") Then dict.Add "ODPOT", True
+        End Select
+
+        If InStr(d, "ID HOLDER") > 0 Or InStr(d, "TOP HOLDER") > 0 Or InStr(d, "ID MOLD BASE") > 0 Then
+            If Not dict.Exists("IDHOLDER") Then dict.Add "IDHOLDER", True
+        End If
+
+        If InStr(d, "OD HOLDER") > 0 Or InStr(d, "BOTTOM HOLDER") > 0 Or InStr(d, "BOT HOLDER") > 0 Or InStr(d, "OD MOLD BASE") > 0 Then
+            If Not dict.Exists("ODHOLDER") Then dict.Add "ODHOLDER", True
+        End If
+
+        If InStr(d, "ID POT") > 0 Or InStr(d, "TOP POT") > 0 Or InStr(d, "TCP POT") > 0 Then
+            If Not dict.Exists("IDPOT") Then dict.Add "IDPOT", True
+        End If
+
+        If InStr(d, "OD POT") > 0 Or InStr(d, "BOTTOM POT") > 0 Or InStr(d, "BOT POT") > 0 Or InStr(d, "BCP POT") > 0 Then
+            If Not dict.Exists("ODPOT") Then dict.Add "ODPOT", True
+        End If
+
+        If InStr(d, "SMED") > 0 Then
+            If IsLikelyIdSideName(d) Then
+                If Not dict.Exists("TCP_SMED") Then dict.Add "TCP_SMED", True
+            ElseIf IsLikelyOdSideName(d) Then
+                If Not dict.Exists("BCP_SMED") Then dict.Add "BCP_SMED", True
+            Else
+                If Not dict.Exists("SMED") Then dict.Add "SMED", True
+            End If
+        End If
+
+        If InStr(d, "POT BLOCK") > 0 Then
+            If Not dict.Exists("POTBLOCK") Then dict.Add "POTBLOCK", True
+        End If
+
+        If InStr(d, "HOLDER BLOCK") > 0 Then
+            If Not dict.Exists("HOLDERBLOCK") Then dict.Add "HOLDERBLOCK", True
+        End If
+
+    Next i
+
+    CountDistinctBmsBomRoles = dict.Count
+    Exit Function
+
+ErrHandler:
+    CountDistinctBmsBomRoles = 0
+End Function
+
+Private Function CountDistinctStandardBomRoles() As Long
+On Error GoTo ErrHandler
+
+    CountDistinctStandardBomRoles = 0
+
+    If BomCount < 1 Then Exit Function
+
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim i As Long
+    Dim nm As String
+    Dim k As String
+
+    For i = 1 To BomCount
+
+        If Not IsHardwareName(BomRows(i).Description) Then
+
+            nm = StandardPlateNameStd(BomRows(i).Description)
+
+            If nm <> "" Then
+                k = NormalizeKey(nm)
+
+                Select Case k
+                    Case "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
+                         "APLATE", "BPLATE", _
+                         "STRIPPERPLATE", "SUPPORTPLATE", _
+                         "MANIFOLDPLATE", "EJECTORPLATE", "BOTTOMEJECTORPLATE", _
+                         "SCRETAINERPLATE", "SCBACKUPPLATE", _
+                         "DIEPLATE", "DIEBACKUPPLATE", _
+                         "XPLATE", "YPLATE"
+
+                        If Not dict.Exists(k) Then dict.Add k, True
+                End Select
+            End If
+
+        End If
+
+    Next i
+
+    CountDistinctStandardBomRoles = dict.Count
+    Exit Function
+
+ErrHandler:
+    CountDistinctStandardBomRoles = 0
+End Function
+
+Private Sub GetBaseTypeGeometryStats(ByRef nFullThin As Long, _
+                                     ByRef nThickInner As Long, _
+                                     ByRef nPotLike As Long, _
+                                     ByRef nThinSheet As Long)
+On Error GoTo ErrHandler
+
+    nFullThin = 0
+    nThickInner = 0
+    nPotLike = 0
+    nThinSheet = 0
+
+    If PartCount < 1 Then Exit Sub
+
+    Dim maxFp As Double
+    Dim i As Long
+    Dim fp As Double
+
+    maxFp = 0#
+
+    For i = 1 To PartCount
+        If Not IsPyropelPartIndex(i) Then
+            fp = parts(i).Width * parts(i).Length
+            If fp > maxFp Then maxFp = fp
+        End If
+    Next i
+
+    If maxFp <= 0# Then Exit Sub
+
+    For i = 1 To PartCount
+
+        If IsPyropelPartIndex(i) Then GoTo NextPart
+
+        fp = parts(i).Width * parts(i).Length
+
+        If fp >= 0.8 * maxFp Then
+            If parts(i).Thickness >= 0.5 And parts(i).Thickness <= 2.75 Then
+                nFullThin = nFullThin + 1
+            End If
+        End If
+
+        If parts(i).Thickness >= 3# Then
+            If fp >= 0.15 * maxFp And fp < 0.85 * maxFp Then
+                nThickInner = nThickInner + 1
+            End If
+        End If
+
+        If IsPotBlockGeometry(parts(i).Thickness, parts(i).Width, parts(i).Length, maxFp) Then
+            nPotLike = nPotLike + 1
+        End If
+
+        If Abs(parts(i).Thickness - 0.25) <= 0.06 Then
+            nThinSheet = nThinSheet + 1
+        End If
+
+NextPart:
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "GetBaseTypeGeometryStats error: " & Err.Description
+End Sub
 
 ' Count CAD components whose names look like PCS/DME structural plates.
 Private Function CountPcsStandardPlateNameHits() As Long
@@ -10383,16 +11139,37 @@ Private Function StdSlotForName(ByVal nm As String) As String
 End Function
 
 ' Decide the steel block for a plate from its material hint (and slot if unknown).
+Private Function DefaultStandardGradeForSlot(ByVal slot As String) As String
+    Select Case UCase(Trim(slot))
+        Case "A", "B"
+            DefaultStandardGradeForSlot = STD_A_B_GRADE   ' normally P20
+
+        Case "X", "Y", "MANIFOLD", "STRIPPER"
+            DefaultStandardGradeForSlot = STD_A_B_GRADE
+
+        Case Else
+            DefaultStandardGradeForSlot = "A36"
+    End Select
+End Function
+
 Private Function ResolveStdGrade(ByVal gradeHint As String, ByVal slot As String) As String
     Dim g As String
     g = NormalizeSteelType(gradeHint)
-    If g = "" Then
-        ResolveStdGrade = DEFAULT_STEEL_TYPE
+
+    If g = "" Or g = "STEEL" Or g = "MATERIAL" Or g = "OUTSOURCE" Then
+        ResolveStdGrade = DefaultStandardGradeForSlot(slot)
         Exit Function
     End If
+
     Select Case g
-        Case "P20", "420SS", "6061", "4140", "A2", "O1": ResolveStdGrade = g
-        Case Else: ResolveStdGrade = "A36"   ' A36 / 1045 / H13 / unknown
+        Case "P20", "420SS", "6061", "4140", "A2", "O1"
+            ResolveStdGrade = g
+
+        Case "A36"
+            ResolveStdGrade = "A36"
+
+        Case Else
+            ResolveStdGrade = DefaultStandardGradeForSlot(slot)
     End Select
 End Function
 
@@ -13089,7 +13866,7 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
         End If
 
     End If
-    If p <= 0 And InStr(UCase(PpVendor(PpCount)), "DME") > 0 Then
+    If p <= 0 And ENABLE_PYTHON_PRICE_LOOKUP And InStr(UCase(PpVendor(PpCount)), "DME") > 0 Then
         p = LookupDmePriceWithPython(PpPartNo(PpCount))
         If p > 0 Then SavePriceToList PpVendor(PpCount), PpPartNo(PpCount), p
     End If
@@ -13891,6 +14668,15 @@ On Error GoTo ErrHandler
     Set holderIndexes = New Collection
     Set potIndexes = New Collection
 
+    ' First use geometry classification.
+    ' This is essential for generic imported XT files where components are named
+    ' Part-1, Part-2, etc. and BOM matching cannot find ID HOLDER / OD HOLDER.
+    AddUniqueCadIndexToCollection holderIndexes, gIdxIDH
+    AddUniqueCadIndexToCollection holderIndexes, gIdxODH
+    AddUniqueCadIndexToCollection potIndexes, gIdxIDP
+    AddUniqueCadIndexToCollection potIndexes, gIdxODP
+
+    ' Then add BOM/name-based matches if available.
     AddUniqueCadIndexToCollection holderIndexes, _
         FindCadIndexForOrientationQuoteOrKeys("ID HOLDER", ID_HOLDER_KEYS)
 
@@ -13904,6 +14690,9 @@ On Error GoTo ErrHandler
     AddUniqueCadIndexToCollection potIndexes, _
         FindCadIndexForOrientationQuoteOrKeys("OD POT BLOCK", _
             "OD POT BLOCK|OD POT|BOTTOM POT BLOCK|BOT POT BLOCK|BOTTOM POT|BOT POT|BCP POT BLOCK|BCP POT")
+
+    LogLine "Front orientation index collections: holders=" & holderIndexes.Count & _
+            " pots=" & potIndexes.Count
 
     Exit Sub
 
