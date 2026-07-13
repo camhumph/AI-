@@ -969,16 +969,22 @@ def _collect_launch_diagnostics(status: dict) -> dict:
             low = (log_tail or "").lower()
             if "module6121.swp not found" in low:
                 diag["stuck_reason"] = "Module6121.swp missing in C:\\CMS_Local_Workspace — recompile the macro."
-            elif "getmacromethods returned no entry" in low:
+            elif "macro-runner:" in low and "macro-runner-v3" not in low and "ok=false" in low:
+                diag["stuck_reason"] = (
+                    "Old macro-runner still running. Pull latest code, restart the webapp, "
+                    "and confirm the log shows 'macro-runner-v3'. Also recompile Module6121.swp."
+                )
+            elif "getmacromethods returned no entry" in low or "getmacromethods returned no entry points" in low:
                 diag["stuck_reason"] = (
                     "Module6121.swp has no runnable entry points — recompile "
                     "Module6121.bas→.swp (see webapp\\COMPILE_MODULE6121.bat)."
                 )
-            elif "runmacro attempt" in low and "ok=false" in low and "cms_macro_started" not in low:
+            elif "runmacro" in low and "ok=false" in low and "cms_macro_started" not in low:
                 diag["stuck_reason"] = (
                     "SolidWorks RunMacro failed (ok=False). Recompile Module6121.swp "
-                    "(COMPILE_MODULE6121.bat), enable macros in SW options, then retry. "
-                    "See CMS_Quote_Log.txt."
+                    "with VBA module name Module61211 (COMPILE_MODULE6121.bat), "
+                    "enable macros in SW options, then retry. "
+                    "Log should show Module61211.main / macro-runner-v3."
                 )
             elif "did not start" in low or "could not connect" in low:
                 diag["stuck_reason"] = "SolidWorks did not start or connect. Check CMS_SOLIDWORKS_EXE / SW 2023 install."
