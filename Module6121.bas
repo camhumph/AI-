@@ -450,6 +450,7 @@ Private ShipDateText As String
 Private gRootJobPath As String          ' resolved month folder (from handoff or computed)
 Private gExactJobFolderName As String    ' exact folder name from launcher handoff (avoids fuzzy match)
 Private gHandoffAttachDir As String      ' email attachment folder when network job folder is missing
+Private gHandoffCadPath As String        ' preferred CAD path from batch/single handoff
 Private gDiagBomPath As String           ' BOM file the macro used (for the end-of-run popup)
 Private gEmailStatus As String           ' result of the proposal email step
 Private gLastJobDiag As String           ' summary of BOM/components/email for the popup
@@ -531,6 +532,11 @@ End Type
 Private Const HANDOFF_FILE As String = "C:\CMS_Local_Workspace\cms_handoff.txt"
 Private Const TRAINING_XT_HANDOFF As String = "C:\CMS_Local_Workspace\cms_training_xt.txt"
 
+Private Const MACRO_STATUS_FILE As String = "C:\CMS_Local_Workspace\cms_macro_status.txt"
+Private Const MACRO_STARTED_FILE As String = "C:\CMS_Local_Workspace\cms_macro_started.txt"
+Private Const MACRO_DONE_FILE As String = "C:\CMS_Local_Workspace\cms_macro_done.txt"
+Private Const MACRO_ERROR_FILE As String = "C:\CMS_Local_Workspace\cms_macro_error.txt"
+
 Private Type TrainingXtHandoff
     JobFolder As String
     JobId As String
@@ -549,12 +555,19 @@ On Error GoTo ErrHandler
     ' without showing an InputBox.
     Dim fsoLaunch As Object
     Set fsoLaunch = CreateObject("Scripting.FileSystemObject")
-    If fsoLaunch.FileExists(TRAINING_XT_HANDOFF) Then
-        RunTrainingXtExport
+
+    ' Live quote handoff must win over stale training handoff.
+    If fsoLaunch.FileExists(HANDOFF_FILE) Then
+        On Error Resume Next
+        If fsoLaunch.FileExists(TRAINING_XT_HANDOFF) Then fsoLaunch.DeleteFile TRAINING_XT_HANDOFF, True
+        On Error GoTo ErrHandler
+
+        RunFromLauncher
         Exit Sub
     End If
-    If fsoLaunch.FileExists(HANDOFF_FILE) Then
-        RunFromLauncher
+
+    If fsoLaunch.FileExists(TRAINING_XT_HANDOFF) Then
+        RunTrainingXtExport
         Exit Sub
     End If
 
@@ -671,6 +684,7 @@ End Sub
 Sub RunActiveAssembly()
 On Error GoTo ErrHandler
     Set swApp = Application.SldWorks
+    WriteMacroLaunchStatus "STARTED", "RunActiveAssembly entered"
     On Error Resume Next
     swApp.Visible = True
     On Error GoTo ErrHandler
@@ -973,7 +987,8 @@ On Error GoTo ErrHandler
 
     AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
 
-    LogLine "DONE ACTIVE CAD QUOTE. Output folder: " & CurrentJobFolder
+    LogLine "DONE ACTIVE CAD QUOTE. Output folder: "
+    WriteMacroLaunchStatus "DONE", "RunActiveAssembly completed" & CurrentJobFolder
     LogLine "TOTAL ACTIVE RUN TIME: " & DateDiff("s", JobStartTime, Now) & "s   (log: " & RunLogPath & ")"
     If Not SUPPRESS_USER_PROMPTS Then
         MsgBox "Active CAD quote finished." & vbCrLf & _
@@ -990,6 +1005,7 @@ CleanExit:
 
 ErrHandler:
     LogLine "RunActiveAssembly error. Step: " & CurrentStepName & "  Err " & Err.Number & ": " & Err.Description
+    WriteMacroLaunchStatus "ERROR", "RunActiveAssembly error: " & Err.Description
     On Error Resume Next
     RestoreMainViewportGraphics
     MsgBox "Active assembly run failed at step: " & CurrentStepName & vbCrLf & Err.Description & vbCrLf & RunLogPath, vbCritical, "CMS Base Export"
@@ -1183,90 +1199,182 @@ End Sub
 ' ============================================================
 Sub RunFromLauncher()
 On Error GoTo ErrHandler
-    ' Training scan writes cms_training_xt.txt — same entry style as live quotes.
+
+    Set swApp = Application.SldWorks
+    WriteMacroLaunchStatus "STARTED", "RunFromLauncher entered"
+
+    ' Live quote handoff must win over stale training handoff.
     Dim fsoTrain As Object
     Set fsoTrain = CreateObject("Scripting.FileSystemObject")
-    If fsoTrain.FileExists(TRAINING_XT_HANDOFF) Then
+
+    If fsoTrain.FileExists(HANDOFF_FILE) Then
+        On Error Resume Next
+        If fsoTrain.FileExists(TRAINING_XT_HANDOFF) Then fsoTrain.DeleteFile TRAINING_XT_HANDOFF, True
+        On Error GoTo ErrHandler
+    ElseIf fsoTrain.FileExists(TRAINING_XT_HANDOFF) Then
         RunTrainingXtExport
         Exit Sub
     End If
 
-    Set swApp = Application.SldWorks
-
-    ' Keep SolidWorks visible when CAD was opened by the launcher first.
     On Error Resume Next
     swApp.Visible = True
+    swApp.UserControl = True
     On Error GoTo ErrHandler
 
     MacroStartTime = Now
     StartupLogPath = DOWNLOADS_FOLDER & "\CMS_Base_Export_Log.txt"
     RunLogPath = StartupLogPath
 
-    ' Read handoff file from the launcher (gives us the month folder + job info)
-    Dim jobText As String, handoff As HandoffInfo
-    handoff = ReadHandoffFile()
-    If handoff.RootPath <> "" Then gRootJobPath = handoff.RootPath Else gRootJobPath = CurrentMonthJobFolder()
+    Dim batch() As HandoffInfo
+    Dim batchCount As Long
+    Dim firstHandoff As HandoffInfo
+
+    batchCount = ReadHandoffBatchFile(batch)
+
+    If batchCount < 1 Then
+        LogLine "Handoff file missing or empty - launcher automation requires at least one C-number."
+        WriteMacroLaunchStatus "ERROR", "Handoff file missing CNum / BatchCount jobs"
+        GoTo NormalEnd
+    End If
+
+    firstHandoff = batch(1)
+
+    If firstHandoff.RootPath <> "" Then
+        gRootJobPath = firstHandoff.RootPath
+    Else
+        gRootJobPath = CurrentMonthJobFolder()
+    End If
 
     LogLine "========================================"
     LogLine "BASE EXPORT MACRO STARTED (from Launcher)"
     LogLine "Root path: " & gRootJobPath
+    LogLine "Batch count: " & batchCount
     LogLine "========================================"
 
-    jobText = UCase(Trim(handoff.CNum))
+    Dim bi As Long
+    For bi = 1 To batchCount
+        LogLine "Batch handoff " & bi & "/" & batchCount & _
+                ": CNum=" & batch(bi).CNum & _
+                " QuoteNum=" & batch(bi).QuoteNum & _
+                " CustJob=" & batch(bi).CustJob & _
+                " JobFolder=" & batch(bi).JobFolder
+    Next bi
 
-    If jobText = "" Then
-        LogLine "Handoff file missing or empty - launcher automation requires a C-number."
-        GoTo NormalEnd
-    End If
+    WriteMacroLaunchStatus "STARTED", "RunFromLauncher batch count=" & batchCount
 
-    LogLine "Job from launcher: " & jobText
-    If handoff.QuoteNum <> "" Then LogLine "Assigned quote #:  " & handoff.QuoteNum
-    If handoff.CustJob  <> "" Then LogLine "Customer job #:    " & handoff.CustJob
-    If handoff.SimilarTo <> "" Then LogLine "Similar to:        " & handoff.SimilarTo
-    If handoff.ShipDate <> "" Then LogLine "Ship date:         " & handoff.ShipDate
-    If handoff.CadPath <> "" Then LogLine "CadPath from handoff: " & handoff.CadPath
+    If batchCount = 1 Then
 
-    ' If the launcher already opened the CAD, quote from the active document
-    ' (same path as RunActiveAssembly) instead of searching/re-opening.
-    If ActiveCadIsOpen() Then
-        LogLine "CAD already open in SolidWorks — quoting from active document"
-        RunActiveAssemblyWithHandoff handoff
-        GoTo NormalEnd
-    End If
+        Dim handoff As HandoffInfo
+        handoff = batch(1)
 
-    ' If CadPath was provided but not open yet, open it now then quote active.
-    If handoff.CadPath <> "" Then
-        If fsoTrain.FileExists(handoff.CadPath) Then
-            LogLine "Opening CadPath from handoff before ProcessOneJob: " & handoff.CadPath
-            Set swModel = OpenCadFile(handoff.CadPath)
-            If Not swModel Is Nothing Then
-                MainCadOpenedByMacro = True
-                MainCadTitleForClose = swModel.GetTitle
-                Dim errsOpen As Long
-                swApp.ActivateDoc3 swModel.GetTitle, False, 0, errsOpen
-                LogLine "CAD opened from handoff — quoting from active document"
-                RunActiveAssemblyWithHandoff handoff
-                GoTo NormalEnd
-            End If
-            LogLine "OpenCadFile failed for handoff CadPath — falling back to ProcessOneJob"
+        LogLine "Job from launcher: " & UCase$(Trim$(handoff.CNum))
+        If handoff.QuoteNum <> "" Then LogLine "Assigned quote #:  " & handoff.QuoteNum
+        If handoff.CustJob <> "" Then LogLine "Customer job #:    " & handoff.CustJob
+        If handoff.SimilarTo <> "" Then LogLine "Similar to:        " & handoff.SimilarTo
+        If handoff.ShipDate <> "" Then LogLine "Ship date:         " & handoff.ShipDate
+        If handoff.CadPath <> "" Then LogLine "CadPath from handoff: " & handoff.CadPath
+
+        If ActiveCadIsOpen() Then
+            LogLine "CAD already open in SolidWorks — quoting from active document"
+            RunActiveAssemblyWithHandoff handoff
+            GoTo NormalEnd
         End If
+
+        If handoff.CadPath <> "" Then
+            If fsoTrain.FileExists(handoff.CadPath) Then
+                LogLine "Opening CadPath from handoff before ProcessOneJob: " & handoff.CadPath
+
+                Set swModel = OpenCadFile(handoff.CadPath)
+
+                If Not swModel Is Nothing Then
+                    MainCadOpenedByMacro = True
+                    MainCadTitleForClose = swModel.GetTitle
+
+                    Dim errsOpen As Long
+                    swApp.ActivateDoc3 swModel.GetTitle, False, 0, errsOpen
+
+                    LogLine "CAD opened from handoff — quoting from active document"
+                    RunActiveAssemblyWithHandoff handoff
+                    GoTo NormalEnd
+                End If
+
+                LogLine "OpenCadFile failed for handoff CadPath — falling back to ProcessOneJob"
+            End If
+        End If
+
+    Else
+
+        If ActiveCadIsOpen() Then
+            LogLine "Batch has multiple jobs; closing active CAD so each job opens its own source."
+            CloseAllDocumentsSafely
+        End If
+
     End If
 
-    Dim completed As Collection, failed As Collection
-    Set completed = New Collection: Set failed = New Collection
+    Dim completed As Collection
+    Dim failed As Collection
+
+    Set completed = New Collection
+    Set failed = New Collection
 
     Dim ok As Boolean
-    ok = ProcessOneJobWithHandoff(jobText, handoff)
-    If ok Then completed.Add jobText Else failed.Add jobText
+    Dim jobText As String
+
+    For bi = 1 To batchCount
+
+        jobText = UCase$(Trim$(batch(bi).CNum))
+
+        If jobText <> "" Then
+
+            WriteMacroLaunchStatus "STARTED", "Batch item " & bi & "/" & batchCount & " started: " & jobText
+
+            LogLine "========================================"
+            LogLine "BATCH QUOTE " & bi & "/" & batchCount & ": " & jobText
+            LogLine "========================================"
+
+            If batch(bi).RootPath <> "" Then
+                gRootJobPath = batch(bi).RootPath
+            ElseIf gRootJobPath = "" Then
+                gRootJobPath = CurrentMonthJobFolder()
+            End If
+
+            ok = ProcessOneJobWithHandoff(jobText, batch(bi))
+
+            If ok Then
+                completed.Add jobText
+                WriteMacroLaunchStatus "STARTED", "Batch item completed: " & jobText
+            Else
+                failed.Add jobText & IIf(LastJobFailReason <> "", "  ->  " & LastJobFailReason, "")
+                WriteMacroLaunchStatus "ERROR", "Batch item failed: " & jobText & " " & LastJobFailReason
+            End If
+
+            CloseAllDocumentsSafely
+            DoEvents
+
+        End If
+
+    Next bi
 
     CloseAllDocumentsSafely
+
     On Error Resume Next
     swApp.Visible = True
     On Error GoTo ErrHandler
 
-    LogLine BuildBatchSummary(completed, failed)
-    If Not SUPPRESS_USER_PROMPTS Then _
-        MsgBox BuildBatchSummary(completed, failed), IIf(failed.Count > 0, vbExclamation, vbInformation)
+    Dim summary As String
+    summary = BuildBatchSummary(completed, failed)
+
+    LogLine summary
+
+    If failed.Count > 0 Then
+        WriteMacroLaunchStatus "ERROR", "Batch completed with " & failed.Count & " failure(s)"
+    Else
+        WriteMacroLaunchStatus "DONE", "Batch completed successfully: " & completed.Count & " job(s)"
+    End If
+
+    If Not SUPPRESS_USER_PROMPTS Then
+        MsgBox summary, IIf(failed.Count > 0, vbExclamation, vbInformation)
+    End If
 
 NormalEnd:
     On Error Resume Next
@@ -1274,15 +1382,20 @@ NormalEnd:
     CloseAllDocumentsSafely
     If Not swApp Is Nothing Then swApp.Visible = True
     Exit Sub
+
 ErrHandler:
     LogLine "RunFromLauncher error: " & Err.Description
+    WriteMacroLaunchStatus "ERROR", "RunFromLauncher error: " & Err.Description
+
     On Error Resume Next
     RestoreMainViewportGraphics
     CloseAllDocumentsSafely
-    If Not SUPPRESS_USER_PROMPTS Then MsgBox "Macro error: " & Err.Description & vbCrLf & RunLogPath, vbCritical
+
+    If Not SUPPRESS_USER_PROMPTS Then
+        MsgBox "Macro error: " & Err.Description & vbCrLf & RunLogPath, vbCritical
+    End If
 End Sub
 
-' Quote from the already-open CAD, but keep launcher C-number / customer info.
 Private Sub RunActiveAssemblyWithHandoff(ByRef h As HandoffInfo)
 On Error GoTo ErrHandler
     AssignedQuoteNumber = h.QuoteNum
@@ -1360,6 +1473,234 @@ eh:
     On Error Resume Next: Close #f
 End Function
 
+Private Function DictGetText(ByVal dict As Object, ByVal keyName As String) As String
+On Error Resume Next
+    DictGetText = ""
+    If dict Is Nothing Then Exit Function
+    If dict.Exists(UCase$(Trim$(keyName))) Then
+        DictGetText = Trim$(CStr(dict(UCase$(Trim$(keyName)))))
+    End If
+End Function
+
+Private Function BatchField(ByVal dict As Object, ByVal idx As Long, ByVal fieldName As String) As String
+    Dim k1 As String
+    Dim k2 As String
+    Dim k3 As String
+
+    k1 = "JOB" & CStr(idx) & "." & UCase$(fieldName)
+    k2 = "JOB" & CStr(idx) & "_" & UCase$(fieldName)
+    k3 = CStr(idx) & "." & UCase$(fieldName)
+
+    BatchField = DictGetText(dict, k1)
+    If BatchField <> "" Then Exit Function
+
+    BatchField = DictGetText(dict, k2)
+    If BatchField <> "" Then Exit Function
+
+    BatchField = DictGetText(dict, k3)
+End Function
+
+Private Sub ApplyHandoffField(ByRef h As HandoffInfo, ByVal keyName As String, ByVal valueText As String)
+    keyName = UCase$(Trim$(keyName))
+    valueText = Trim$(valueText)
+
+    Select Case keyName
+        Case "CNUM": h.CNum = valueText
+        Case "QUOTENUM": h.QuoteNum = valueText
+        Case "CUSTJOB": h.CustJob = valueText
+        Case "SIMILARTO": h.SimilarTo = valueText
+        Case "SHIPDATE": h.ShipDate = valueText
+        Case "ROOTPATH": h.RootPath = valueText
+        Case "JOBFOLDER": h.JobFolder = valueText
+        Case "CUSTOMERPREFIX": h.CustomerPrefix = valueText
+        Case "CUSTOMERNAME": h.CustomerName = valueText
+        Case "ATTACHDIR": h.AttachDir = valueText
+        Case "CADPATH": h.CadPath = valueText
+    End Select
+End Sub
+
+Private Function HandoffFromDictUnprefixed(ByVal dict As Object) As HandoffInfo
+    ApplyHandoffField HandoffFromDictUnprefixed, "CNUM", DictGetText(dict, "CNUM")
+    ApplyHandoffField HandoffFromDictUnprefixed, "QUOTENUM", DictGetText(dict, "QUOTENUM")
+    ApplyHandoffField HandoffFromDictUnprefixed, "CUSTJOB", DictGetText(dict, "CUSTJOB")
+    ApplyHandoffField HandoffFromDictUnprefixed, "SIMILARTO", DictGetText(dict, "SIMILARTO")
+    ApplyHandoffField HandoffFromDictUnprefixed, "SHIPDATE", DictGetText(dict, "SHIPDATE")
+    ApplyHandoffField HandoffFromDictUnprefixed, "ROOTPATH", DictGetText(dict, "ROOTPATH")
+    ApplyHandoffField HandoffFromDictUnprefixed, "JOBFOLDER", DictGetText(dict, "JOBFOLDER")
+    ApplyHandoffField HandoffFromDictUnprefixed, "CUSTOMERPREFIX", DictGetText(dict, "CUSTOMERPREFIX")
+    ApplyHandoffField HandoffFromDictUnprefixed, "CUSTOMERNAME", DictGetText(dict, "CUSTOMERNAME")
+    ApplyHandoffField HandoffFromDictUnprefixed, "ATTACHDIR", DictGetText(dict, "ATTACHDIR")
+    ApplyHandoffField HandoffFromDictUnprefixed, "CADPATH", DictGetText(dict, "CADPATH")
+End Function
+
+Private Function HandoffFromDictIndexed(ByVal dict As Object, ByVal idx As Long, ByRef defaults As HandoffInfo) As HandoffInfo
+    HandoffFromDictIndexed = defaults
+
+    Dim v As String
+
+    v = BatchField(dict, idx, "CNUM")
+    If v <> "" Then HandoffFromDictIndexed.CNum = v
+
+    v = BatchField(dict, idx, "QUOTENUM")
+    If v <> "" Then HandoffFromDictIndexed.QuoteNum = v
+
+    v = BatchField(dict, idx, "CUSTJOB")
+    If v <> "" Then HandoffFromDictIndexed.CustJob = v
+
+    v = BatchField(dict, idx, "SIMILARTO")
+    If v <> "" Then HandoffFromDictIndexed.SimilarTo = v
+
+    v = BatchField(dict, idx, "SHIPDATE")
+    If v <> "" Then HandoffFromDictIndexed.ShipDate = v
+
+    v = BatchField(dict, idx, "ROOTPATH")
+    If v <> "" Then HandoffFromDictIndexed.RootPath = v
+
+    v = BatchField(dict, idx, "JOBFOLDER")
+    If v <> "" Then HandoffFromDictIndexed.JobFolder = v
+
+    v = BatchField(dict, idx, "CUSTOMERPREFIX")
+    If v <> "" Then HandoffFromDictIndexed.CustomerPrefix = v
+
+    v = BatchField(dict, idx, "CUSTOMERNAME")
+    If v <> "" Then HandoffFromDictIndexed.CustomerName = v
+
+    v = BatchField(dict, idx, "ATTACHDIR")
+    If v <> "" Then HandoffFromDictIndexed.AttachDir = v
+
+    v = BatchField(dict, idx, "CADPATH")
+    If v <> "" Then HandoffFromDictIndexed.CadPath = v
+End Function
+
+Private Sub AddHandoffToArray(ByRef arr() As HandoffInfo, ByRef n As Long, ByRef h As HandoffInfo)
+    If Trim$(h.CNum) = "" Then Exit Sub
+
+    n = n + 1
+
+    If n = 1 Then
+        ReDim arr(1 To 1)
+    Else
+        ReDim Preserve arr(1 To n)
+    End If
+
+    arr(n) = h
+End Sub
+
+Private Function ReadHandoffBatchFile(ByRef jobs() As HandoffInfo) As Long
+On Error GoTo ErrHandler
+
+    ReadHandoffBatchFile = 0
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FileExists(HANDOFF_FILE) Then Exit Function
+
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim f As Integer
+    Dim line As String
+    Dim p As Long
+    Dim k As String
+    Dim v As String
+
+    f = FreeFile
+    Open HANDOFF_FILE For Input As #f
+
+    Do While Not EOF(f)
+        Line Input #f, line
+
+        line = Trim$(line)
+
+        If line <> "" Then
+            If Left$(line, 1) <> "#" Then
+                p = InStr(line, "=")
+
+                If p > 0 Then
+                    k = UCase$(Trim$(Left$(line, p - 1)))
+                    v = Trim$(Mid$(line, p + 1))
+                    dict(k) = v
+                End If
+            End If
+        End If
+    Loop
+
+    Close #f
+
+    Dim defaults As HandoffInfo
+    defaults = HandoffFromDictUnprefixed(dict)
+
+    Dim batchCount As Long
+    batchCount = CLng(Val(DictGetText(dict, "BATCHCOUNT")))
+
+    If batchCount <= 0 Then batchCount = CLng(Val(DictGetText(dict, "JOBCOUNT")))
+
+    Dim n As Long
+    n = 0
+
+    Dim i As Long
+    Dim h As HandoffInfo
+
+    If batchCount > 0 Then
+
+        For i = 1 To batchCount
+            h = HandoffFromDictIndexed(dict, i, defaults)
+
+            If Trim$(h.CNum) <> "" Then
+                If Trim$(h.QuoteNum) = "" Then h.QuoteNum = h.CNum
+                AddHandoffToArray jobs, n, h
+            End If
+        Next i
+
+        ReadHandoffBatchFile = n
+        Exit Function
+
+    End If
+
+    Dim cList As Collection
+    Set cList = ParseJobInputList(defaults.CNum)
+
+    If cList Is Nothing Or cList.Count = 0 Then
+        ReadHandoffBatchFile = 0
+        Exit Function
+    End If
+
+    If cList.Count = 1 Then
+
+        h = defaults
+        h.CNum = CStr(cList(1))
+        If Trim$(h.QuoteNum) = "" Then h.QuoteNum = h.CNum
+        AddHandoffToArray jobs, n, h
+
+    Else
+
+        For i = 1 To cList.Count
+            h = defaults
+            h.CNum = CStr(cList(i))
+            h.QuoteNum = h.CNum
+
+            h.CustJob = ""
+            h.JobFolder = ""
+            h.CadPath = ""
+            h.AttachDir = ""
+
+            AddHandoffToArray jobs, n, h
+        Next i
+
+    End If
+
+    ReadHandoffBatchFile = n
+    Exit Function
+
+ErrHandler:
+    LogLine "ReadHandoffBatchFile error: " & Err.Description
+    On Error Resume Next
+    Close #f
+    ReadHandoffBatchFile = 0
+End Function
+
+
 ' Current month job folder, e.g. \\Mycloudex2ultra\mexico\Cameron's stuff\RON'S QUOTES\000000006.June 2026
 Private Function CurrentMonthJobFolder() As String
     CurrentMonthJobFolder = JOB_ROOT_BASE & "\" & MonthFolderName(Now)
@@ -1381,10 +1722,12 @@ Private Function ProcessOneJobWithHandoff(ByVal jobText As String, ByRef h As Ha
     ShipDateText        = h.ShipDate
     gExactJobFolderName = h.JobFolder
     gHandoffAttachDir = h.AttachDir
+    gHandoffCadPath = h.CadPath
     gProcessingHandoff = True
     ProcessOneJobWithHandoff = ProcessOneJob(jobText)
     gProcessingHandoff = False
     gHandoffAttachDir = ""
+    gHandoffCadPath = ""
 End Function
 
 Private Function ProcessOneJob(ByVal jobSearchText As String) As Boolean
@@ -1398,6 +1741,7 @@ On Error GoTo ErrHandler
     Set swModel = Nothing
 
     CurrentJobNumber = UCase(Trim(jobSearchText))
+    WriteMacroLaunchStatus "STARTED", "ProcessOneJob started for " & CurrentJobNumber
     JobStartTime = Now
     FinalStlCoordFrameReady = False
     ResetCmsViewFrame
@@ -1414,6 +1758,7 @@ On Error GoTo ErrHandler
         ShipDateText = ""
         gExactJobFolderName = ""
         gHandoffAttachDir = ""
+        gHandoffCadPath = ""
     End If
     CurrentJobFolder = ""
     NetworkJobFolder = ""
@@ -1477,7 +1822,18 @@ On Error GoTo ErrHandler
 
     LogStart "Find CAD file"
     Dim cadCandidates As Collection
-    Set cadCandidates = FindAllCadModelsRanked(CurrentJobFolder)
+    Set cadCandidates = New Collection
+
+    If gHandoffCadPath <> "" Then
+        Dim fsoCad As Object
+        Set fsoCad = CreateObject("Scripting.FileSystemObject")
+        If fsoCad.FileExists(gHandoffCadPath) Then
+            cadCandidates.Add gHandoffCadPath
+            LogLine "Using CadPath from handoff first: " & gHandoffCadPath
+        End If
+    End If
+
+    AppendCadCandidates cadCandidates, FindAllCadModelsRanked(CurrentJobFolder)
     AppendCadCandidates cadCandidates, FindAllCadModelsRanked(extractFolder)
     If cadCandidates.Count = 0 Then
         LogErrorText "No CAD file found."
@@ -1712,6 +2068,7 @@ On Error GoTo ErrHandler
     LogLine "DONE JOB " & CurrentJobNumber & ". Output folder: " & CurrentJobFolder
     LogLine "TOTAL JOB TIME: " & DateDiff("s", JobStartTime, Now) & "s   (log: " & RunLogPath & ")"
     ProcessOneJob = True
+    WriteMacroLaunchStatus "DONE", "ProcessOneJob completed for " & CurrentJobNumber
 
 CleanExit:
     On Error Resume Next
@@ -1727,6 +2084,7 @@ CleanExit:
 ErrHandler:
     LogLine "FATAL JOB ERROR. Job: " & CurrentJobNumber & "  Step: " & CurrentStepName & "  Err " & Err.Number & ": " & Err.Description
     LastJobFailReason = "Step '" & CurrentStepName & "' - Err " & Err.Number & ": " & Err.Description
+    WriteMacroLaunchStatus "ERROR", LastJobFailReason
     ProcessOneJob = False
     Resume CleanExit
 End Function
@@ -7073,6 +7431,49 @@ End Function
 ' ============================================================
 ' LOGGING
 ' ============================================================
+Private Sub WriteMacroLaunchStatus(ByVal statusText As String, Optional ByVal messageText As String = "")
+On Error Resume Next
+
+    EnsureFolderDeep LOCAL_WORKSPACE_ROOT
+
+    Dim f As Integer
+
+    f = FreeFile
+    Open MACRO_STATUS_FILE For Output As #f
+    Print #f, "Status=" & statusText
+    Print #f, "Message=" & messageText
+    Print #f, "Time=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Print #f, "CurrentJobNumber=" & CurrentJobNumber
+    Print #f, "CurrentJobFolder=" & CurrentJobFolder
+    Print #f, "RunLogPath=" & RunLogPath
+    Close #f
+
+    Select Case UCase$(statusText)
+        Case "STARTED"
+            f = FreeFile
+            Open MACRO_STARTED_FILE For Output As #f
+            Print #f, "Started=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+            Print #f, "Message=" & messageText
+            Close #f
+
+        Case "DONE", "COMPLETED"
+            f = FreeFile
+            Open MACRO_DONE_FILE For Output As #f
+            Print #f, "Done=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+            Print #f, "Message=" & messageText
+            Close #f
+
+        Case "ERROR", "FAILED"
+            f = FreeFile
+            Open MACRO_ERROR_FILE For Output As #f
+            Print #f, "Error=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+            Print #f, "Message=" & messageText
+            Print #f, "Step=" & CurrentStepName
+            Print #f, "RunLogPath=" & RunLogPath
+            Close #f
+    End Select
+End Sub
+
 Private Sub LogLine(ByVal msg As String)
 On Error Resume Next
     Dim f As Integer

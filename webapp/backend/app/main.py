@@ -304,6 +304,11 @@ class QuoteEmailBody(BaseModel):
     launch_macro: bool = True
 
 
+class QuoteEmailBatchBody(BaseModel):
+    message_ids: list[str]
+    launch_macro: bool = True
+
+
 @app.get("/api/settings/email")
 def api_get_email_settings():
     return credentials.public_view()
@@ -528,6 +533,19 @@ def api_quote_email(message_id: str, body: QuoteEmailBody = QuoteEmailBody()):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Could not start quote: {e}")
+
+
+@app.post("/api/email/quote-batch")
+def api_quote_email_batch(body: QuoteEmailBatchBody):
+    """Quote multiple inbox messages as one sequential SolidWorks batch."""
+    try:
+        return email_service.quote_from_messages(body.message_ids, launch_macro=body.launch_macro)
+    except email_service.EmailNotConfigured as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not start batch quote: {e}")
 
 
 @app.get("/api/training/status")

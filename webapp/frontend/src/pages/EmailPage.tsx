@@ -42,6 +42,7 @@ export default function EmailPage() {
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState("");
   const [busyAction, setBusyAction] = useState("");
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const navigate = useNavigate();
   const { startQuote } = useQuoteJobs();
 
@@ -96,6 +97,54 @@ export default function EmailPage() {
       });
     } catch (e) {
       setQuoteError(e instanceof Error ? e.message : "Could not start quote");
+    } finally {
+      setQuoting(false);
+    }
+  };
+
+  const toggleChecked = (id: string) => {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const quoteSelected = async () => {
+    const ids = Array.from(checkedIds);
+    if (ids.length === 0) return;
+    setQuoting(true);
+    setQuoteError("");
+    try {
+      if (ids.length === 1) {
+        const result = await api.quoteEmail(ids[0], true);
+        const qid = result.quote_id || result.job_id;
+        const subj = messages?.find((m) => m.id === ids[0])?.subject || "Email quote";
+        startQuote(qid, subj, {
+          phase: "running",
+          message: "Running in background — DME → SolidWorks → Module6121",
+          job_id: result.job_id,
+        });
+      } else {
+        const result = await api.quoteEmailBatch(ids, true);
+        if (result.error && !result.launched) {
+          throw new Error(result.error);
+        }
+        const qids = result.quote_ids || [];
+        qids.forEach((qid, i) => {
+          const mid = ids[i];
+          const subj = messages?.find((m) => m.id === mid)?.subject || qid;
+          startQuote(qid, subj, {
+            phase: "running",
+            message: `Batch ${i + 1}/${qids.length} — sequential SolidWorks quotes`,
+            job_id: result.c_numbers?.[i] || qid,
+          });
+        });
+        setCheckedIds(new Set());
+      }
+    } catch (e) {
+      setQuoteError(e instanceof Error ? e.message : "Could not start batch quote");
     } finally {
       setQuoting(false);
     }
@@ -237,6 +286,16 @@ export default function EmailPage() {
             <div className="flex items-center gap-2 border-b border-ink-700/20 px-4 py-2 text-[10px] font-bold uppercase tracking-wider text-ink-500">
               <Inbox className="h-3.5 w-3.5" /> Inbox
               {messages && <span className="text-ink-600">({messages.length})</span>}
+              {checkedIds.size > 0 && (
+                <button
+                  type="button"
+                  disabled={quoting}
+                  onClick={quoteSelected}
+                  className="ml-auto rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-white hover:bg-sky-600 disabled:opacity-50"
+                >
+                  {quoting ? "Starting…" : `Quote selected (${checkedIds.size})`}
+                </button>
+              )}
             </div>
             <div className="scrollbar-thin flex-1 overflow-y-auto">
               {messages === null ? (
@@ -256,6 +315,14 @@ export default function EmailPage() {
                     } ${!m.seen ? "inbox-unread" : ""}`}
                     onClick={() => setSelectedId(m.id)}
                   >
+                    <input
+                      type="checkbox"
+                      className="mt-1 shrink-0"
+                      checked={checkedIds.has(m.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => toggleChecked(m.id)}
+                      title="Select for batch quote"
+                    />
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

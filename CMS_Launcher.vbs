@@ -43,6 +43,10 @@ Const SW_MACRO = "C:\CMS_Local_Workspace\Module6121.swp"   ' compiled macro — 
 ' Handoff file written for Module6121 to read
 Const HANDOFF_FILE = "C:\CMS_Local_Workspace\cms_handoff.txt"
 Const TRAINING_TRIGGER = "C:\CMS_Local_Workspace\cms_training_xt.txt"
+Const MACRO_STATUS_FILE = "C:\CMS_Local_Workspace\cms_macro_status.txt"
+Const MACRO_STARTED_FILE = "C:\CMS_Local_Workspace\cms_macro_started.txt"
+Const MACRO_DONE_FILE = "C:\CMS_Local_Workspace\cms_macro_done.txt"
+Const MACRO_ERROR_FILE = "C:\CMS_Local_Workspace\cms_macro_error.txt"
 
 ' Gmail search (Python) settings
 Const USE_GMAIL_SEARCH  = True
@@ -68,6 +72,11 @@ If fso.FileExists(TRAINING_TRIGGER) Then
     fso.DeleteFile TRAINING_TRIGGER, True
     LogStep "cleared stale cms_training_xt.txt (live quote, not training)"
 End If
+' Clear stale macro launch acknowledgements from a previous cancelled/failed run.
+DeleteIfExists MACRO_STATUS_FILE
+DeleteIfExists MACRO_STARTED_FILE
+DeleteIfExists MACRO_DONE_FILE
+DeleteIfExists MACRO_ERROR_FILE
 LogStep "===== launcher started ====="
 
 ' 1. Prefer an existing C-number (e.g. BMS-851100029-C18603 → C18603).
@@ -328,21 +337,64 @@ End Function
 ' ============================================================
 ' HANDOFF FILE  (Module6121 reads this at startup)
 ' ============================================================
+Sub DeleteIfExists(ByVal p)
+    On Error Resume Next
+    If fso.FileExists(p) Then fso.DeleteFile p, True
+    On Error GoTo 0
+End Sub
+
+Sub WriteHandoffAtomic(ByVal handoffPath, ByVal text)
+    Dim tmpPath
+    tmpPath = handoffPath & ".tmp"
+
+    DeleteIfExists tmpPath
+
+    Dim ts
+    Set ts = fso.CreateTextFile(tmpPath, True)
+    ts.Write text
+    ts.Close
+
+    DeleteIfExists handoffPath
+    fso.MoveFile tmpPath, handoffPath
+End Sub
+
 Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobFolder, customerPrefix, customerName, attachDir, cadPath)
-    Dim f
-    Set f = fso.CreateTextFile(HANDOFF_FILE, True)
-    f.WriteLine "CNum="      & cNum
-    f.WriteLine "QuoteNum="  & quoteNum
-    f.WriteLine "CustJob="   & custJobNum
-    f.WriteLine "SimilarTo=" & similarTo
-    f.WriteLine "ShipDate="  & shipDate
-    f.WriteLine "RootPath="  & rootPath
-    f.WriteLine "JobFolder=" & jobFolder
-    f.WriteLine "CustomerPrefix=" & customerPrefix
-    f.WriteLine "CustomerName=" & customerName
-    If attachDir <> "" Then f.WriteLine "AttachDir=" & attachDir
-    If cadPath <> "" Then f.WriteLine "CadPath=" & cadPath
-    f.Close
+    Dim body
+    body = "CNum=" & cNum & vbCrLf & _
+           "QuoteNum=" & quoteNum & vbCrLf & _
+           "CustJob=" & custJobNum & vbCrLf & _
+           "SimilarTo=" & similarTo & vbCrLf & _
+           "ShipDate=" & shipDate & vbCrLf & _
+           "RootPath=" & rootPath & vbCrLf & _
+           "JobFolder=" & jobFolder & vbCrLf & _
+           "CustomerPrefix=" & customerPrefix & vbCrLf & _
+           "CustomerName=" & customerName & vbCrLf
+    If attachDir <> "" Then body = body & "AttachDir=" & attachDir & vbCrLf
+    If cadPath <> "" Then body = body & "CadPath=" & cadPath & vbCrLf
+    WriteHandoffAtomic HANDOFF_FILE, body
+End Sub
+
+' Write BatchCount=N + Job1.* / Job2.* ... for sequential multi-quote runs.
+Sub WriteBatchHandoff(ByVal jobs)
+    ' jobs is a 1-based array of dictionaries OR a Collection of Scripting.Dictionary
+    Dim i, n, body, d
+    n = UBound(jobs)
+    body = "BatchCount=" & n & vbCrLf & vbCrLf
+    For i = 1 To n
+        Set d = jobs(i)
+        body = body & "Job" & i & ".CNum=" & d("CNum") & vbCrLf
+        body = body & "Job" & i & ".QuoteNum=" & d("QuoteNum") & vbCrLf
+        body = body & "Job" & i & ".CustJob=" & d("CustJob") & vbCrLf
+        body = body & "Job" & i & ".SimilarTo=" & d("SimilarTo") & vbCrLf
+        body = body & "Job" & i & ".ShipDate=" & d("ShipDate") & vbCrLf
+        body = body & "Job" & i & ".RootPath=" & d("RootPath") & vbCrLf
+        body = body & "Job" & i & ".JobFolder=" & d("JobFolder") & vbCrLf
+        body = body & "Job" & i & ".CustomerPrefix=" & d("CustomerPrefix") & vbCrLf
+        body = body & "Job" & i & ".CustomerName=" & d("CustomerName") & vbCrLf
+        body = body & "Job" & i & ".AttachDir=" & d("AttachDir") & vbCrLf
+        body = body & "Job" & i & ".CadPath=" & d("CadPath") & vbCrLf & vbCrLf
+    Next
+    WriteHandoffAtomic HANDOFF_FILE, body
 End Sub
 
 ' Prefer C##### already present on the job (folder name, subject, attach path).
@@ -634,47 +686,98 @@ Function LaunchSolidWorksOpenCadThenMacro()
         LogStep "WARNING: no CAD path to open first — macro will search job folder"
     End If
 
-    ' ---- THEN RUN THE .SWP MACRO ----
-    ' Always start RunFromLauncher (reads handoff C-number). That entry point
-    ' detects an already-open CAD and quotes from it via RunActiveAssemblyWithHandoff.
-    modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
-    procNames = Array("RunFromLauncher", "main", "RunActiveAssembly")
-    ran = False
+    ' ---- THEN RUN THE .SWP MACRO WITH STARTED ACKNOWLEDGEMENT ----
+    ' Prefer main() — it routes to RunFromLauncher when cms_handoff.txt exists.
+    ' Wait for cms_macro_started.txt so we do not assume a failed launch succeeded.
+    If Not fso.FileExists(HANDOFF_FILE) Then
+        LogStep "ERROR: Quote cancelled before launch: handoff file was not created: " & HANDOFF_FILE
+        Exit Function
+    End If
 
+    WaitSeconds 3
+
+    ran = False
     For mpIdx = 0 To pathCount - 1
         macroPath = macroPaths(mpIdx)
-        LogStep "running macro: " & macroPath
-        For pi = 0 To UBound(procNames)
-            For mi = 0 To UBound(modNames)
-                okRun = False
-                macroErr = 0
-                On Error Resume Next
-                sw.CommandInProgress = True
-                okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
-                If Err.Number = 0 And okRun <> True Then
-                    okRun = sw.RunMacro2(macroPath, modNames(mi), procNames(pi), 1, macroErr)
-                End If
-                sw.CommandInProgress = False
-                If Err.Number = 0 And okRun = True Then
-                    On Error GoTo 0
-                    ran = True
-                    LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi)
-                    Exit For
-                End If
-                LogStep "RunMacro(2) failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number & " macroErr=" & macroErr
-                Err.Clear
-                On Error GoTo 0
-            Next
-            If ran Then Exit For
-        Next
-        If ran Then Exit For
+        LogStep "running macro with retry: " & macroPath
+        If RunMacroWithRetry(sw, macroPath, "Module6121", "main", 90) Then
+            ran = True
+            Exit For
+        End If
+        ' Fallback: call RunFromLauncher directly if main routing fails.
+        If RunMacroWithRetry(sw, macroPath, "Module6121", "RunFromLauncher", 60) Then
+            ran = True
+            Exit For
+        End If
     Next
 
     If Not ran Then
-        LogStep "ERROR: could not start Module6121.swp after opening CAD"
+        LogStep "ERROR: SolidWorks opened, but Module6121 did not acknowledge launch (no cms_macro_started.txt)."
     End If
     LaunchSolidWorksOpenCadThenMacro = ran
 End Function
+
+Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal moduleName, ByVal procName, ByVal timeoutSeconds)
+    RunMacroWithRetry = False
+
+    Dim startTime, attempt, runOk, runErr, waitStart
+    startTime = Timer
+    attempt = 0
+
+    Do
+        attempt = attempt + 1
+        DeleteIfExists MACRO_STARTED_FILE
+        DeleteIfExists MACRO_ERROR_FILE
+
+        runOk = False
+        runErr = 0
+
+        On Error Resume Next
+        Err.Clear
+        swApp.CommandInProgress = True
+        runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
+        If Err.Number <> 0 Or runOk = False Then
+            Err.Clear
+            runOk = swApp.RunMacro(macroPath, moduleName, procName)
+        End If
+        swApp.CommandInProgress = False
+        On Error GoTo 0
+
+        LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & " ok=" & CStr(runOk) & " macroErr=" & runErr
+
+        waitStart = Timer
+        Do
+            If fso.FileExists(MACRO_STARTED_FILE) Then
+                LogStep "macro acknowledged STARTED via " & MACRO_STARTED_FILE
+                RunMacroWithRetry = True
+                Exit Function
+            End If
+            If fso.FileExists(MACRO_ERROR_FILE) Then
+                LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
+                RunMacroWithRetry = True
+                Exit Function
+            End If
+            WaitSeconds 1
+            If Timer < waitStart Then Exit Do
+            If Timer - waitStart >= 10 Then Exit Do
+        Loop
+
+        WaitSeconds 2
+
+        If Timer < startTime Then Exit Do
+        If Timer - startTime >= timeoutSeconds Then Exit Do
+    Loop
+End Function
+
+Sub WaitSeconds(ByVal sec)
+    Dim t
+    t = Timer
+    Do
+        WScript.Sleep 250
+        If Timer < t Then Exit Do
+        If Timer - t >= sec Then Exit Do
+    Loop
+End Sub
 
 ' Legacy name kept for any external callers — routes to open-CAD-first path.
 Function LaunchSolidWorksAndMacro()

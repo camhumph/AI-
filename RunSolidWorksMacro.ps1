@@ -3,10 +3,18 @@
     [Parameter(Mandatory=$true)][string]$SwExe,
     [Parameter(Mandatory=$true)][string]$ProgId,
     [string]$LogFile = "C:\Users\lenovo\Downloads\CMS_Quote_Log.txt",
-    [string]$Procedure = "RunFromLauncher"
+    [string]$Procedure = "main",
+    [int]$TimeoutSeconds = 90
 )
 
 $ErrorActionPreference = "Continue"
+
+$MacroStatusFile = "C:\CMS_Local_Workspace\cms_macro_status.txt"
+$MacroStartedFile = "C:\CMS_Local_Workspace\cms_macro_started.txt"
+$MacroDoneFile = "C:\CMS_Local_Workspace\cms_macro_done.txt"
+$MacroErrorFile = "C:\CMS_Local_Workspace\cms_macro_error.txt"
+$TrainingTrigger = "C:\CMS_Local_Workspace\cms_training_xt.txt"
+$HandoffFile = "C:\CMS_Local_Workspace\cms_handoff.txt"
 
 function Write-LauncherLog {
     param([string]$Message)
@@ -16,6 +24,16 @@ function Write-LauncherLog {
             New-Item -ItemType Directory -Force -Path $folder | Out-Null
         }
         Add-Content -LiteralPath $LogFile -Value ("[{0}] macro-runner: {1}" -f (Get-Date), $Message)
+    } catch {
+    }
+}
+
+function Remove-IfExists {
+    param([string]$Path)
+    try {
+        if ($Path -and (Test-Path -LiteralPath $Path)) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
     } catch {
     }
 }
@@ -65,12 +83,21 @@ public class OleMessageFilter : IOleMessageFilter {
 
 try {
     [OleMessageFilter]::Register()
-    Write-LauncherLog "starting; macro=$MacroPath"
+    Write-LauncherLog "starting; macro=$MacroPath procedure=$Procedure"
 
     if (-not (Test-Path -LiteralPath $MacroPath)) {
         Write-LauncherLog "macro file not found: $MacroPath"
         exit 2
     }
+
+    # Live quote handoff must win; clear stale launch status files.
+    if (Test-Path -LiteralPath $HandoffFile) {
+        Remove-IfExists $TrainingTrigger
+    }
+    Remove-IfExists $MacroStatusFile
+    Remove-IfExists $MacroStartedFile
+    Remove-IfExists $MacroDoneFile
+    Remove-IfExists $MacroErrorFile
 
     $sw = $null
     try {
@@ -105,59 +132,73 @@ try {
     }
 
     try { $sw.Visible = $true } catch {}
-    Start-Sleep -Milliseconds 750
+    try { $sw.UserControl = $true } catch {}
+    Start-Sleep -Seconds 3
 
     $moduleNames = @("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
-    $ext = [System.IO.Path]::GetExtension($MacroPath).ToLowerInvariant()
-    # Same procedure order as RunTrainingXtLauncher / CMS_Launcher:
-    # requested procedure first, then main (which routes via handoff files).
-    $procedureNames = @($Procedure, "main", "RunFromLauncher")
-    if ($ext -eq ".swp" -and $Procedure -eq "RunFromLauncher") {
-        $procedureNames = @("RunFromLauncher", "main")
-    }
+    # Prefer main() so handoff routing (quote vs training) stays in VBA.
+    $procedureNames = @($Procedure, "main", "RunFromLauncher") | Select-Object -Unique
 
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $ran = $false
-    foreach ($procName in $procedureNames) {
-        foreach ($moduleName in $moduleNames) {
-            try {
-                try { $sw.CommandInProgress = $true } catch {}
-                $ok = $sw.RunMacro($MacroPath, $moduleName, $procName)
-                try { $sw.CommandInProgress = $false } catch {}
-                if ($ok -eq $true) {
-                    Write-LauncherLog "macro started via RunMacro module '$moduleName' procedure '$procName'"
-                    $ran = $true
-                    break
-                }
-            } catch {
-                try { $sw.CommandInProgress = $false } catch {}
-                Write-LauncherLog ("RunMacro module '$moduleName' procedure '$procName' failed: " + $_.Exception.Message)
-            }
+    $attempt = 0
 
-            if (-not $ran) {
+    while ((Get-Date) -lt $deadline -and -not $ran) {
+        $attempt++
+        Remove-IfExists $MacroStartedFile
+        Remove-IfExists $MacroErrorFile
+
+        foreach ($procName in $procedureNames) {
+            foreach ($moduleName in $moduleNames) {
                 try {
                     try { $sw.CommandInProgress = $true } catch {}
                     $macroErr = 0
-                    $ok2 = $sw.RunMacro2($MacroPath, $moduleName, $procName, 1, [ref]$macroErr)
-                    try { $sw.CommandInProgress = $false } catch {}
-                    if ($ok2 -eq $true) {
-                        Write-LauncherLog "macro started via RunMacro2 module '$moduleName' procedure '$procName' err=$macroErr"
-                        $ran = $true
-                        break
-                    } else {
-                        Write-LauncherLog "RunMacro2 returned false for module '$moduleName' procedure '$procName' err=$macroErr"
+                    $ok2 = $false
+                    try {
+                        $ok2 = $sw.RunMacro2($MacroPath, $moduleName, $procName, 0, [ref]$macroErr)
+                    } catch {
+                        $ok2 = $false
                     }
+                    if ($ok2 -ne $true) {
+                        try {
+                            $ok2 = $sw.RunMacro($MacroPath, $moduleName, $procName)
+                        } catch {
+                            $ok2 = $false
+                        }
+                    }
+                    try { $sw.CommandInProgress = $false } catch {}
+                    Write-LauncherLog "attempt=$attempt RunMacro module='$moduleName' proc='$procName' ok=$ok2 err=$macroErr"
                 } catch {
                     try { $sw.CommandInProgress = $false } catch {}
-                    Write-LauncherLog ("RunMacro2 module '$moduleName' procedure '$procName' failed: " + $_.Exception.Message)
+                    Write-LauncherLog ("RunMacro failed module='$moduleName' proc='$procName': " + $_.Exception.Message)
                 }
+
+                $waitUntil = (Get-Date).AddSeconds(10)
+                while ((Get-Date) -lt $waitUntil) {
+                    if (Test-Path -LiteralPath $MacroStartedFile) {
+                        Write-LauncherLog "macro acknowledged STARTED via $MacroStartedFile"
+                        $ran = $true
+                        break
+                    }
+                    if (Test-Path -LiteralPath $MacroErrorFile) {
+                        Write-LauncherLog "macro wrote ERROR file: $MacroErrorFile"
+                        $ran = $true
+                        break
+                    }
+                    Start-Sleep -Seconds 1
+                }
+                if ($ran) { break }
             }
-            Start-Sleep -Milliseconds 300
+            if ($ran) { break }
         }
-        if ($ran) { break }
+
+        if (-not $ran) {
+            Start-Sleep -Seconds 2
+        }
     }
 
     if (-not $ran) {
-        Write-LauncherLog "RunMacro/RunMacro2 could not start allowed procedure(s) for any known module name"
+        Write-LauncherLog "SolidWorks opened, but Module6121 did not acknowledge launch within ${TimeoutSeconds}s"
         exit 4
     }
 } finally {

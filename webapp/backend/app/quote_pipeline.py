@@ -25,11 +25,58 @@ HANDOFF_FILE = LOCAL_WORKSPACE / "cms_handoff.txt"
 EMAIL_OUTPUT_FILE = LOCAL_WORKSPACE / "cms_email.txt"
 CANCEL_FILE = LOCAL_WORKSPACE / "cms_quote_cancel.txt"
 TRAINING_TRIGGER = LOCAL_WORKSPACE / "cms_training_xt.txt"
+MACRO_STATUS_FILE = LOCAL_WORKSPACE / "cms_macro_status.txt"
+MACRO_STARTED_FILE = LOCAL_WORKSPACE / "cms_macro_started.txt"
+MACRO_DONE_FILE = LOCAL_WORKSPACE / "cms_macro_done.txt"
+MACRO_ERROR_FILE = LOCAL_WORKSPACE / "cms_macro_error.txt"
 STATUS_DIR = config.DATA_DIR / "quote_status"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 _active_launcher_procs: dict[str, subprocess.Popen] = {}
 _cancelled_quotes: set[str] = set()
+
+
+def _delete_if_exists(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _clear_macro_launch_status_files() -> None:
+    for p in (MACRO_STATUS_FILE, MACRO_STARTED_FILE, MACRO_DONE_FILE, MACRO_ERROR_FILE):
+        _delete_if_exists(p)
+
+
+def _write_handoff_atomic(text: str) -> None:
+    LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    tmp = HANDOFF_FILE.with_suffix(HANDOFF_FILE.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    _delete_if_exists(HANDOFF_FILE)
+    tmp.replace(HANDOFF_FILE)
+
+
+def _write_batch_handoff(jobs: list[dict[str, str]]) -> None:
+    """Write BatchCount + JobN.* handoff for sequential multi-quote runs."""
+    lines = [f"BatchCount={len(jobs)}", ""]
+    for i, job in enumerate(jobs, start=1):
+        for key in (
+            "CNum",
+            "QuoteNum",
+            "CustJob",
+            "SimilarTo",
+            "ShipDate",
+            "RootPath",
+            "JobFolder",
+            "CustomerPrefix",
+            "CustomerName",
+            "AttachDir",
+            "CadPath",
+        ):
+            lines.append(f"Job{i}.{key}={job.get(key, '')}")
+        lines.append("")
+    _write_handoff_atomic("\n".join(lines) + "\n")
 
 
 def _ensure_status_dir() -> None:
@@ -144,11 +191,8 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     """Write handoff files, run DME lookup, start CMS_Launcher /usemail."""
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     _deploy_launcher_assets()
-    if TRAINING_TRIGGER.exists():
-        try:
-            TRAINING_TRIGGER.unlink()
-        except Exception:
-            pass
+    _delete_if_exists(TRAINING_TRIGGER)
+    _clear_macro_launch_status_files()
 
     info = email_info or {}
     c_number = (info.get("c_number") or "").strip().upper()
@@ -208,25 +252,38 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             set_status(quote_id, phase="error", message=str(e))
             return {"launched": False, "error": str(e)}
 
-    # Give launcher a moment to write cms_handoff.txt with assigned C-number.
+    # Give launcher a moment to write cms_handoff.txt with assigned C-number,
+    # and preferably wait until VBA acknowledges STARTED.
     c_num = c_number
     handoff: dict = {}
-    for _ in range(30):
+    for _ in range(60):
         time.sleep(0.5)
+        if quote_id in _cancelled_quotes:
+            set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
+            return {"launched": False, "cancelled": True, "quote_id": quote_id}
         handoff = _read_handoff()
         c_num = handoff.get("CNum", "") or handoff.get("QuoteNum", "").replace("-", "") or c_num
-        if c_num and handoff.get("JobFolder"):
+        if MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
             break
+        if c_num and handoff.get("JobFolder"):
+            # Handoff ready; keep waiting briefly for STARTED acknowledgment.
+            continue
 
     if c_num:
         jobs.create_job(c_num, display_name=info.get("subject", c_num)[:80], customer=info.get("cust_job", ""))
+        started = MACRO_STARTED_FILE.exists()
         set_status(
             quote_id,
             phase="running",
-            message=f"SolidWorks opened CAD — Module6121 quoting {c_num}...",
+            message=(
+                f"Module6121 acknowledged start for {c_num}..."
+                if started
+                else f"SolidWorks opening CAD — Module6121 quoting {c_num}..."
+            ),
             c_number=c_num,
             job_id=c_num,
             handoff=handoff if c_num else {},
+            macro_started=started,
         )
     else:
         set_status(
@@ -242,6 +299,183 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         "job_id": c_num or quote_id,
         "c_number": c_num,
         "handoff_file": str(HANDOFF_FILE),
+        "macro_started": MACRO_STARTED_FILE.exists(),
+    }
+
+
+def launch_batch_quotes(items: list[dict]) -> dict:
+    """Launch multiple quotes as one sequential SolidWorks batch.
+
+    Each item: quote_id, attach_dir, and optional email fields
+    (subject, cust_job, c_number, similar_to, ship_date, root_path, job_folder, cad_path).
+    """
+    if not items:
+        return {"launched": False, "error": "No quotes in batch"}
+
+    LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    _deploy_launcher_assets()
+    _delete_if_exists(TRAINING_TRIGGER)
+    _clear_macro_launch_status_files()
+
+    batch_jobs: list[dict[str, str]] = []
+    quote_ids: list[str] = []
+
+    for item in items:
+        quote_id = str(item.get("quote_id") or item.get("c_number") or "").strip()
+        attach_dir = str(item.get("attach_dir") or "").strip()
+        info = item.get("email_info") or item
+        c_number = (info.get("c_number") or item.get("c_number") or quote_id or "").strip().upper()
+        if not c_number:
+            blob = " ".join(
+                [
+                    str(info.get("subject", "")),
+                    str(info.get("cust_job", "")),
+                    attach_dir,
+                    quote_id,
+                ]
+            )
+            m = re.search(r"[-_]C(\d{4,6})\b", blob, re.I) or re.search(r"\bC[- ]?(\d{4,6})\b", blob, re.I)
+            if m:
+                c_number = "C" + m.group(1)
+        if not c_number:
+            continue
+
+        if quote_id in _cancelled_quotes:
+            set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
+            continue
+
+        job = {
+            "CNum": c_number,
+            "QuoteNum": str(info.get("quote_num") or c_number),
+            "CustJob": str(info.get("cust_job") or ""),
+            "SimilarTo": str(info.get("similar_to") or ""),
+            "ShipDate": str(info.get("ship_date") or ""),
+            "RootPath": str(info.get("root_path") or item.get("root_path") or ""),
+            "JobFolder": str(info.get("job_folder") or item.get("job_folder") or ""),
+            "CustomerPrefix": str(info.get("customer_prefix") or ""),
+            "CustomerName": str(info.get("customer_name") or ""),
+            "AttachDir": attach_dir,
+            "CadPath": str(info.get("cad_path") or item.get("cad_path") or ""),
+        }
+        batch_jobs.append(job)
+        qid = quote_id or c_number
+        quote_ids.append(qid)
+        set_status(
+            qid,
+            phase="queued",
+            message=f"Queued in batch ({len(batch_jobs)} jobs)...",
+            c_number=c_number,
+            attach_dir=attach_dir,
+            batch=True,
+        )
+        jobs.create_job(c_number, display_name=str(info.get("subject", c_number))[:80], customer=str(info.get("cust_job", "")))
+
+    if not batch_jobs:
+        return {"launched": False, "error": "No valid C-numbers in batch"}
+
+    _write_batch_handoff(batch_jobs)
+    EMAIL_OUTPUT_FILE.write_text(
+        "\n".join(
+            [
+                f"Found={len(batch_jobs)}",
+                f"BatchCount={len(batch_jobs)}",
+                f"CNum={','.join(j['CNum'] for j in batch_jobs)}",
+                f"AttachDir={batch_jobs[0].get('AttachDir', '')}",
+                "Error=",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    run_dme_price_lookup(wait=False)
+
+    for qid in quote_ids:
+        set_status(qid, phase="launching", message=f"Launching batch of {len(batch_jobs)} quotes...")
+
+    # Prefer PowerShell runner (retry + STARTED ack). Fall back to VBS /usemail for single.
+    ps1 = LOCAL_WORKSPACE / "RunSolidWorksMacro.ps1"
+    if not ps1.exists():
+        ps1 = REPO_ROOT / "RunSolidWorksMacro.ps1"
+    swp = LOCAL_WORKSPACE / "Module6121.swp"
+    launched = False
+    batch_id = f"BATCH-{quote_ids[0]}" if quote_ids else "BATCH"
+
+    try:
+        if ps1.exists() and swp.exists():
+            sw_exe = r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
+            progid = "SldWorks.Application.31"
+            proc = subprocess.Popen(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ps1),
+                    "-MacroPath",
+                    str(swp),
+                    "-SwExe",
+                    sw_exe,
+                    "-ProgId",
+                    progid,
+                    "-Procedure",
+                    "main",
+                    "-TimeoutSeconds",
+                    "90",
+                ],
+                close_fds=True,
+            )
+            _active_launcher_procs[batch_id] = proc
+            launched = True
+        else:
+            launcher = _find_launcher()
+            if launcher and len(batch_jobs) == 1:
+                proc = subprocess.Popen(["wscript", str(launcher), "/usemail"], close_fds=True)
+                _active_launcher_procs[batch_id] = proc
+                launched = True
+            elif not swp.exists():
+                return {"launched": False, "error": f"Missing compiled macro: {swp}"}
+            else:
+                return {"launched": False, "error": f"Missing macro runner: {ps1}"}
+    except Exception as e:
+        for qid in quote_ids:
+            set_status(qid, phase="error", message=str(e))
+        return {"launched": False, "error": str(e)}
+
+    # Wait briefly for STARTED acknowledgment.
+    for _ in range(60):
+        time.sleep(0.5)
+        if MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
+            break
+
+    started = MACRO_STARTED_FILE.exists()
+    for i, qid in enumerate(quote_ids):
+        c_num = batch_jobs[i]["CNum"]
+        set_status(
+            qid,
+            phase="running",
+            message=(
+                f"Batch {i + 1}/{len(batch_jobs)}: Module6121 started ({c_num})"
+                if started
+                else f"Batch {i + 1}/{len(batch_jobs)}: waiting for Module6121 ({c_num})"
+            ),
+            c_number=c_num,
+            job_id=c_num,
+            batch=True,
+            batch_count=len(batch_jobs),
+            batch_index=i + 1,
+            macro_started=started,
+        )
+
+    return {
+        "launched": launched,
+        "batch": True,
+        "batch_count": len(batch_jobs),
+        "quote_ids": quote_ids,
+        "c_numbers": [j["CNum"] for j in batch_jobs],
+        "handoff_file": str(HANDOFF_FILE),
+        "macro_started": started,
     }
 
 

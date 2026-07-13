@@ -356,6 +356,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ launch_macro: launchMacro }),
     }),
+  quoteEmailBatch: (messageIds: string[], launchMacro = true) =>
+    req<{
+      launched?: boolean;
+      batch?: boolean;
+      batch_count?: number;
+      quote_ids?: string[];
+      c_numbers?: string[];
+      error?: string;
+      results?: QuoteEmailResult[];
+      macro_started?: boolean;
+    }>("/email/quote-batch", {
+      method: "POST",
+      body: JSON.stringify({ message_ids: messageIds, launch_macro: launchMacro }),
+    }),
   replyEmail: (id: string, to: string, subject: string, body: string, in_reply_to = "") =>
     req(`/email/messages/${encodeURIComponent(id)}/reply`, {
       method: "POST",
