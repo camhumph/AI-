@@ -61,8 +61,10 @@ Private Const EXPORT_PER_PLATE_STLS As Boolean = False
 Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
 ' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow);
-' still forces ComponentsIntoOneFile after showing all components. 0 = always fast path.
-Private Const STL_MERGE_MAX_PARTS As Long = 0
+' still forces ComponentsIntoOneFile after showing all components.
+' Prefer Gemini1 temp-part merge for reliable single-file STL + post-rotation.
+' Use 0 only when debugging speed; 9999 = always use SaveAssemblyAsMergedPartStl.
+Private Const STL_MERGE_MAX_PARTS As Long = 9999
 Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
 
 ' --- Deliverable safety ---
@@ -2565,7 +2567,34 @@ On Error GoTo ErrHandler
     End If
 
     If oriented = False Then
-        LogLine "Matched top-side orientation failed from holder/pot/ins/TCP pairs."
+
+        LogLine "Gemini1 matched-pair orientation failed. Trying geometry fallback before *Bottom fallback."
+
+        If oriented = False Then
+            oriented = OrientFromPairIndices(model, _
+                        gIdxTCP, _
+                        gIdxBCP, _
+                        "Geometry fallback TCP/BCP")
+        End If
+
+        If oriented = False Then
+            oriented = OrientFromPairIndices(model, _
+                        gIdxIDH, _
+                        gIdxODH, _
+                        "Geometry fallback TOP/BOTTOM HOLDER")
+        End If
+
+        If oriented = False Then
+            oriented = OrientFromPairIndices(model, _
+                        gIdxIDP, _
+                        gIdxODP, _
+                        "Geometry fallback TOP/BOTTOM POT")
+        End If
+
+    End If
+
+    If oriented = False Then
+        LogLine "Matched and geometry orientation both failed."
         LogLine "Falling back to SetCmsTopOrientation."
         SetCmsTopOrientation model, persistAsStandardTop
         Exit Sub
@@ -3043,8 +3072,17 @@ On Error Resume Next
         Exit Sub
     End If
 
+    Dim i As Long
+
+    For i = 1 To 20
+        If fso.FileExists(filePath) Then Exit For
+        WaitMilliseconds 250
+        DoEvents
+    Next i
+
     If fso.FileExists(filePath) Then
-        LogLine label & " OK: " & filePath & " size=" & CStr(fso.GetFile(filePath).Size) & " bytes"
+        LogLine label & " OK: " & filePath & _
+                " size=" & CStr(fso.GetFile(filePath).Size) & " bytes"
     Else
         LogLine "WARNING: " & label & " was not created: " & filePath
     End If
@@ -7453,19 +7491,46 @@ End Function
 '   - holders = thick elongated plates (not skinny rails/straps)
 ' Within each pair the dominant-axis separation picks ID/top vs OD/bottom.
 Private Sub ClassifyPotBlockPlatesFromCad()
-    gIdxTCP = 0: gIdxBCP = 0: gIdxIDH = 0: gIdxODH = 0: gIdxIDP = 0: gIdxODP = 0
-    If PartCount < 1 Then Exit Sub
-    Dim cl() As Long, ho() As Long, po() As Long
-    Dim ncl As Long, nho As Long, npo As Long
-    ReDim cl(1 To PartCount): ReDim ho(1 To PartCount): ReDim po(1 To PartCount)
-    ncl = 0: nho = 0: npo = 0
+On Error GoTo ErrHandler
 
-    Dim maxFp As Double, i As Long, t As Double, w As Double, l As Double, fp As Double
+    gIdxTCP = 0
+    gIdxBCP = 0
+    gIdxIDH = 0
+    gIdxODH = 0
+    gIdxIDP = 0
+    gIdxODP = 0
+
+    If PartCount < 1 Then Exit Sub
+
+    Dim maxFp As Double
+    Dim i As Long
+    Dim fp As Double
+
     maxFp = 0#
+
     For i = 1 To PartCount
-        fp = parts(i).Width * parts(i).Length
-        If fp > maxFp Then maxFp = fp
+        If Not IsPyropelPartIndex(i) Then
+            fp = parts(i).Width * parts(i).Length
+            If fp > maxFp Then maxFp = fp
+        End If
     Next i
+
+    If maxFp <= 0# Then Exit Sub
+
+    Dim potList() As Long
+    Dim otherList() As Long
+    Dim nPot As Long
+    Dim nOther As Long
+
+    ReDim potList(1 To PartCount)
+    ReDim otherList(1 To PartCount)
+
+    Dim t As Double
+    Dim w As Double
+    Dim l As Double
+
+    nPot = 0
+    nOther = 0
 
     For i = 1 To PartCount
 
@@ -7476,54 +7541,172 @@ Private Sub ClassifyPotBlockPlatesFromCad()
         l = parts(i).Length
         fp = w * l
 
-        If t >= PLATE_MIN_THICKNESS And fp >= PLATE_MIN_FOOTPRINT Then
+        If t < PLATE_MIN_THICKNESS Then GoTo NextPart
+        If fp < PLATE_MIN_FOOTPRINT Then GoTo NextPart
 
-            ' Clamp/TCP/BCP plates must be broad, flat, near-full-footprint plates.
-            ' Do NOT classify skinny rails/straps/insulation as clamps just because
-            ' they are thin relative to length.
-            If IsClampPlateGeometry(t, w, l, maxFp) Then
+        ' First separate true pot blocks.
+        If IsPotBlockGeometry(t, w, l, maxFp) Then
 
-                ncl = ncl + 1
-                cl(ncl) = i
+            nPot = nPot + 1
+            potList(nPot) = i
 
-            ElseIf IsPotBlockGeometry(t, w, l, maxFp) Then
+        Else
 
-                npo = npo + 1
-                po(npo) = i
-
-            ElseIf IsHolderBlockGeometry(t, w, l, maxFp) Then
-
-                nho = nho + 1
-                ho(nho) = i
-
+            ' Remaining large/thick plate-like candidates.
+            ' In generic imported XT assemblies, raw pre-orientation boxes can
+            ' look too thick, so do not reject by apparent thickness here.
+            If IsBmsMajorPlateCandidate(i, maxFp) Then
+                nOther = nOther + 1
+                otherList(nOther) = i
             Else
-
-                ' Unknown plate-like component; do not use it for BMS orientation.
                 LogLine "BMS geometry classifier ignored: idx=" & i & _
                         " comp='" & parts(i).componentName & "'" & _
                         " T/W/L=" & FormatNumberForCsv(t) & "/" & _
                                   FormatNumberForCsv(w) & "/" & _
                                   FormatNumberForCsv(l) & _
                         " fp=" & FormatNumberForCsv(fp)
-
             End If
 
         End If
 
 NextPart:
     Next i
-    AssignPairTopBottom cl, ncl, gIdxTCP, gIdxBCP
-    AssignPairTopBottom ho, nho, gIdxIDH, gIdxODH
-    AssignPairTopBottom po, npo, gIdxIDP, gIdxODP
+
+    ' Sort remaining major candidates by footprint descending.
+    SortIndexArrayByFootprintDesc otherList, nOther
+
+    ' Largest footprint pair = TCP/BCP.
+    If nOther >= 2 Then
+        Dim clampPair(1 To 2) As Long
+        clampPair(1) = otherList(1)
+        clampPair(2) = otherList(2)
+        AssignPairTopBottom clampPair, 2, gIdxTCP, gIdxBCP
+    End If
+
+    ' Next footprint pair = ID/OD holders.
+    If nOther >= 4 Then
+        Dim holderPair(1 To 2) As Long
+        holderPair(1) = otherList(3)
+        holderPair(2) = otherList(4)
+        AssignPairTopBottom holderPair, 2, gIdxIDH, gIdxODH
+    End If
+
+    ' Pots use their own pair.
+    If nPot >= 2 Then
+        SortIndexArrayByVolumeDesc potList, nPot
+        AssignPairTopBottom potList, nPot, gIdxIDP, gIdxODP
+    End If
+
     LogLine "Geometry plates: TCP=" & gIdxTCP & " BCP=" & gIdxBCP & _
             " IDholder=" & gIdxIDH & " ODholder=" & gIdxODH & _
             " IDpot=" & gIdxIDP & " ODpot=" & gIdxODP
+
     LogPlateIndexDetails "TCP", gIdxTCP
     LogPlateIndexDetails "BCP", gIdxBCP
     LogPlateIndexDetails "ID HOLDER", gIdxIDH
     LogPlateIndexDetails "OD HOLDER", gIdxODH
     LogPlateIndexDetails "ID POT", gIdxIDP
     LogPlateIndexDetails "OD POT", gIdxODP
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ClassifyPotBlockPlatesFromCad error: " & Err.Description
+End Sub
+
+Private Function IsBmsMajorPlateCandidate(ByVal idx As Long, ByVal maxFp As Double) As Boolean
+On Error GoTo ErrHandler
+
+    IsBmsMajorPlateCandidate = False
+
+    If idx <= 0 Or idx > PartCount Then Exit Function
+    If IsPyropelPartIndex(idx) Then Exit Function
+
+    Dim t As Double
+    Dim w As Double
+    Dim l As Double
+    Dim fp As Double
+
+    t = parts(idx).Thickness
+    w = parts(idx).Width
+    l = parts(idx).Length
+    fp = w * l
+
+    If t < PLATE_MIN_THICKNESS Then Exit Function
+    If fp < PLATE_MIN_FOOTPRINT Then Exit Function
+
+    ' Ignore small skinny rails/straps/hardware.
+    If fp < 0.15 * maxFp Then Exit Function
+
+    ' Ignore very skinny pieces.
+    If w <= 0# Or l <= 0# Then Exit Function
+    If l / w > 8# Then Exit Function
+
+    ' Do not include pots here.
+    If IsPotBlockGeometry(t, w, l, maxFp) Then Exit Function
+
+    IsBmsMajorPlateCandidate = True
+    Exit Function
+
+ErrHandler:
+    IsBmsMajorPlateCandidate = False
+End Function
+
+Private Sub SortIndexArrayByFootprintDesc(ByRef idx() As Long, ByVal n As Long)
+On Error GoTo ErrHandler
+
+    If n < 2 Then Exit Sub
+
+    Dim i As Long
+    Dim j As Long
+    Dim tmp As Long
+    Dim fpI As Double
+    Dim fpJ As Double
+
+    For i = 1 To n - 1
+        For j = i + 1 To n
+
+            fpI = parts(idx(i)).Width * parts(idx(i)).Length
+            fpJ = parts(idx(j)).Width * parts(idx(j)).Length
+
+            If fpJ > fpI Then
+                tmp = idx(i)
+                idx(i) = idx(j)
+                idx(j) = tmp
+            End If
+
+        Next j
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "SortIndexArrayByFootprintDesc error: " & Err.Description
+End Sub
+
+Private Sub SortIndexArrayByVolumeDesc(ByRef idx() As Long, ByVal n As Long)
+On Error GoTo ErrHandler
+
+    If n < 2 Then Exit Sub
+
+    Dim i As Long
+    Dim j As Long
+    Dim tmp As Long
+
+    For i = 1 To n - 1
+        For j = i + 1 To n
+            If parts(idx(j)).BBoxVolume > parts(idx(i)).BBoxVolume Then
+                tmp = idx(i)
+                idx(i) = idx(j)
+                idx(j) = tmp
+            End If
+        Next j
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "SortIndexArrayByVolumeDesc error: " & Err.Description
 End Sub
 
 Private Sub LogPlateIndexDetails(ByVal label As String, ByVal idx As Long)
@@ -12667,12 +12850,24 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     p = GetOnlineUnitPrice(PpVendor(PpCount), PpPartNo(PpCount))
     If p <= 0 Then p = LookupListPriceByPartNo(PpPartNo(PpCount))
     If p <= 0 And k > 0 Then
-        If matchKind = "KEYWORD" And Trim(partNo) = "" Then
-            LogLine "PRICE WARNING (" & desc & "): weak keyword match to '" & PlComp(k) & _
-                    "' with no part number - NEEDS PRICE, left at $0 instead of $" & FormatNumberForCsv(PlPrice(k)) & "."
+
+        If matchKind = "KEYWORD" Then
+
+            If Trim(partNo) <> "" Then
+                LogLine "PRICE WARNING (" & desc & "): part number '" & partNo & _
+                        "' was not found exactly. Weak keyword match to '" & PlPartNo(k) & _
+                        "' suppressed; NEEDS PRICE."
+            Else
+                LogLine "PRICE WARNING (" & desc & "): weak keyword match to '" & PlComp(k) & _
+                        "' with no part number - NEEDS PRICE."
+            End If
+
+            p = 0#
+
         Else
             p = PlPrice(k)
         End If
+
     End If
     If p <= 0 And InStr(UCase(PpVendor(PpCount)), "DME") > 0 Then
         p = LookupDmePriceWithPython(PpPartNo(PpCount))
