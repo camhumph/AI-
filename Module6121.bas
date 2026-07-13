@@ -731,6 +731,7 @@ On Error GoTo ErrHandler
                        vbCritical, "Wrong CAD source"
             End If
 
+            WriteMacroLaunchStatus "ERROR", "Refused generated \\base\\ CAD: " & modelPath
             Exit Sub
         End If
     End If
@@ -1812,6 +1813,15 @@ On Error GoTo ErrHandler
             LogLine "Using AttachDir fallback from handoff: " & gHandoffAttachDir
         End If
     End If
+    ' Prefer launcher/webapp-staged local workspace when network folder missing.
+    If NetworkJobFolder = "" Then
+        Dim localOnly As String
+        localOnly = LOCAL_WORKSPACE_ROOT & "\" & CleanFileName(CurrentJobNumber)
+        If fsoJ.FolderExists(localOnly) Then
+            NetworkJobFolder = localOnly
+            LogLine "Using staged local workspace: " & localOnly
+        End If
+    End If
     LogLine "Job folder result: " & NetworkJobFolder
     If NetworkJobFolder = "" Then
         LogErrorText "Could not find job folder for: " & CurrentJobNumber
@@ -1823,7 +1833,32 @@ On Error GoTo ErrHandler
     If JobBaseName = "" Then JobBaseName = CurrentJobNumber
 
     LogStart "Prepare local job workspace"
-    PrepareLocalJobWorkspace NetworkJobFolder, CurrentJobNumber, LocalJobFolder
+    Dim stagedLocal As String
+    stagedLocal = LOCAL_WORKSPACE_ROOT & "\" & CleanFileName(CurrentJobNumber)
+    If gHandoffCadPath <> "" Then
+        If IsGeneratedBaseCadPath(gHandoffCadPath) Then
+            LogLine "WARNING: clearing generated \\base\\ CadPath before staging: " & gHandoffCadPath
+            gHandoffCadPath = ""
+        End If
+    End If
+    ' If launcher already pulled files into C:\CMS_Local_Workspace\C##### and set
+    ' CadPath to the local XT, keep that folder (do not wipe while SolidWorks has it open).
+    If fsoJ.FolderExists(stagedLocal) Then
+        If StrComp(UCase(NetworkJobFolder), UCase(stagedLocal), vbTextCompare) = 0 Then
+            LocalJobFolder = stagedLocal
+            LogLine "Job source is already local workspace — skip wipe/recopy."
+        ElseIf gHandoffCadPath <> "" Then
+            If InStr(1, UCase(gHandoffCadPath), UCase(stagedLocal & "\"), vbTextCompare) = 1 Then
+                If fsoJ.FileExists(gHandoffCadPath) Then
+                    LocalJobFolder = stagedLocal
+                    LogLine "Launcher-staged local XT present — skip wipe/recopy: " & gHandoffCadPath
+                End If
+            End If
+        End If
+    End If
+    If LocalJobFolder = "" Then
+        PrepareLocalJobWorkspace NetworkJobFolder, CurrentJobNumber, LocalJobFolder
+    End If
     If LocalJobFolder = "" Then
         LogErrorText "Could not create local workspace for: " & CurrentJobNumber
         GoTo CleanExit
@@ -2685,12 +2720,13 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
     If InStr(nameUpper, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
     If InStr(nameUpper, "_EXTRACT") > 0 Or InStr(nameUpper, "OLD_") > 0 Then bonus = bonus - 80
     Select Case ext
+        ' Prefer customer XT/STEP over exported SLDASM when quoting from staged local files.
+        Case "x_t", "x_b": CadFilePriority = 120 + bonus
+        Case "step", "stp": CadFilePriority = 110 + bonus
         Case "sldasm": CadFilePriority = 100 + bonus
         Case "easm": CadFilePriority = 90 + bonus
         Case "asm": CadFilePriority = 85 + bonus
-        Case "step", "stp": CadFilePriority = 80 + bonus
-        Case "x_t", "x_b": CadFilePriority = 70 + bonus
-        Case "igs", "iges": CadFilePriority = 60 + bonus
+        Case "igs", "iges": CadFilePriority = 80 + bonus
         Case "sldprt": CadFilePriority = 50 + bonus
         Case "prt": CadFilePriority = 45 + bonus
         Case Else: CadFilePriority = 0

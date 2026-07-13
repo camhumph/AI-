@@ -59,12 +59,14 @@ Const EMAIL_OUTPUT_FILE = "C:\CMS_Local_Workspace\cms_email.txt"
 ' ============================================================
 Dim fso
 Set fso = CreateObject("Scripting.FileSystemObject")
-Dim gAttachDir, gPreferredCNum, gCadPath, gCustomerPrefix, gCustomerName
+Dim gAttachDir, gPreferredCNum, gCadPath, gCustomerPrefix, gCustomerName, gLocalJobFolder, gEmailCadPath
 gAttachDir = ""
 gPreferredCNum = ""
 gCadPath = ""
 gCustomerPrefix = ""
 gCustomerName = ""
+gLocalJobFolder = ""
+gEmailCadPath = ""
 
 ' Make sure the local workspace exists (handoff + email files live here)
 If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
@@ -159,8 +161,43 @@ If jobFolderPath = "" Then
     End If
 End If
 
-' 6. Find the CAD file NOW so SolidWorks can open it BEFORE the macro runs.
-gCadPath = FindBestCadInFolders(jobFolderPath, gAttachDir)
+' 5b. Pull job/attach files into C:\CMS_Local_Workspace\C##### and open XT from there.
+Dim localStagePath
+localStagePath = ""
+If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
+    If FindBestXtInFolder(gLocalJobFolder) <> "" Or FindBestCadInFolder(gLocalJobFolder) <> "" Then
+        localStagePath = gLocalJobFolder
+        LogStep "using webapp-staged local folder: " & localStagePath
+    Else
+        LogStep "webapp local folder empty of CAD — restaging from job/attach"
+    End If
+End If
+If localStagePath = "" Then
+    localStagePath = StageJobToLocalWorkspace(cNum, jobFolderPath, gAttachDir)
+End If
+If localStagePath <> "" Then
+    gLocalJobFolder = localStagePath
+    LogStep "local CMS workspace ready: " & gLocalJobFolder
+End If
+
+' 6. Prefer local XT (never \base\). Fall back to best CAD in local/job/attach.
+gCadPath = ""
+If gEmailCadPath <> "" Then
+    If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
+        gCadPath = gEmailCadPath
+        LogStep "using CadPath from cms_email.txt: " & gCadPath
+    End If
+End If
+If gCadPath = "" And gLocalJobFolder <> "" Then
+    gCadPath = FindBestXtInFolder(gLocalJobFolder)
+    If gCadPath = "" Then gCadPath = FindBestCadInFolder(gLocalJobFolder)
+End If
+If gCadPath = "" Then
+    gCadPath = FindBestXtInFolders(jobFolderPath, gAttachDir)
+End If
+If gCadPath = "" Then
+    gCadPath = FindBestCadInFolders(jobFolderPath, gAttachDir)
+End If
 If gCadPath <> "" Then
     If IsGeneratedBaseCadPath(gCadPath) Then
         LogStep "WARNING: ignoring generated base CAD path: " & gCadPath
@@ -168,9 +205,9 @@ If gCadPath <> "" Then
     End If
 End If
 If gCadPath <> "" Then
-    LogStep "CAD to open first: " & gCadPath
+    LogStep "CAD to open first (local XT preferred): " & gCadPath
 Else
-    LogStep "WARNING: no CAD file found yet in job/attach folders"
+    LogStep "WARNING: no CAD/XT file found yet in local/job/attach folders"
 End If
 
 ' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
@@ -526,15 +563,113 @@ Function CadPriority(ext, fileName)
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
     Select Case e
+        ' Prefer customer Parasolid XT / STEP for open-first quoting (not exported SLDASM).
+        Case "x_t", "x_b": CadPriority = 120 + bonus
+        Case "step", "stp": CadPriority = 110 + bonus
         Case "sldasm": CadPriority = 100 + bonus
-        Case "step", "stp": CadPriority = 80 + bonus
-        Case "x_t", "x_b": CadPriority = 75 + bonus
-        Case "igs", "iges": CadPriority = 70 + bonus
+        Case "igs", "iges": CadPriority = 90 + bonus
         Case "sldprt": CadPriority = 50 + bonus
         Case "prt": CadPriority = 45 + bonus
         Case Else: CadPriority = 0
     End Select
     If CadPriority < 0 Then CadPriority = 0
+End Function
+
+' Score only importable CAD (XT/STEP/IGES) — used when staging to local workspace.
+Function XtCadPriority(ext, fileName)
+    Dim e
+    e = LCase(ext)
+    Select Case e
+        Case "x_t", "x_b", "step", "stp", "igs", "iges"
+            XtCadPriority = CadPriority(ext, fileName)
+        Case Else
+            XtCadPriority = 0
+    End Select
+End Function
+
+Function FindBestXtInFolder(folderPath)
+    FindBestXtInFolder = ""
+    If folderPath = "" Then Exit Function
+    If Not fso.FolderExists(folderPath) Then Exit Function
+    If UCase(fso.GetFileName(folderPath)) = "BASE" Then Exit Function
+    If IsGeneratedBaseCadPath(folderPath) Then Exit Function
+
+    Dim bestPath, bestScore, f, sub1, score, hit
+    bestPath = "": bestScore = 0
+    On Error Resume Next
+    For Each f In fso.GetFolder(folderPath).Files
+        If Not IsGeneratedBaseCadPath(f.Path) Then
+            score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name)
+            If score > bestScore Then
+                bestScore = score
+                bestPath = f.Path
+            End If
+        End If
+    Next
+    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+        If UCase(Left(sub1.Name, 1)) <> "_" Then
+            If UCase(sub1.Name) <> "BASE" Then
+                hit = FindBestXtInFolder(sub1.Path)
+                If hit <> "" Then
+                    If Not IsGeneratedBaseCadPath(hit) Then
+                        score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                        If score > bestScore Then
+                            bestScore = score
+                            bestPath = hit
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next
+    On Error GoTo 0
+    FindBestXtInFolder = bestPath
+End Function
+
+Function FindBestXtInFolders(jobFolder, attachDir)
+    Dim a, b, sa, sb
+    a = FindBestXtInFolder(jobFolder)
+    b = FindBestXtInFolder(attachDir)
+    If a = "" Then FindBestXtInFolders = b: Exit Function
+    If b = "" Then FindBestXtInFolders = a: Exit Function
+    sa = XtCadPriority(fso.GetExtensionName(a), fso.GetFileName(a))
+    sb = XtCadPriority(fso.GetExtensionName(b), fso.GetFileName(b))
+    If sb > sa Then FindBestXtInFolders = b Else FindBestXtInFolders = a
+End Function
+
+' Copy job/attach files into C:\CMS_Local_Workspace\C##### for local XT open.
+Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
+    StageJobToLocalWorkspace = ""
+    On Error Resume Next
+    If cNumLocal = "" Then Exit Function
+    Dim dest, src, n
+    dest = LOCAL_WORKSPACE_ROOT & "\" & CleanFolderToken(cNumLocal)
+    If dest = "" Or dest = LOCAL_WORKSPACE_ROOT & "\" Then Exit Function
+
+    If fso.FolderExists(dest) Then
+        fso.DeleteFolder dest, True
+        Err.Clear
+    End If
+    EnsureFolderDeep dest
+    If Not fso.FolderExists(dest) Then Exit Function
+
+    n = 0
+    src = ""
+    If jobFolderPath <> "" And fso.FolderExists(jobFolderPath) Then
+        ' Prefer network/month job folder when present.
+        If UCase(jobFolderPath) <> UCase(dest) Then src = jobFolderPath
+    End If
+    If src = "" And attachDir <> "" And fso.FolderExists(attachDir) Then
+        If UCase(attachDir) <> UCase(dest) Then src = attachDir
+    End If
+    If src <> "" Then
+        n = CopyDirContents(src, dest)
+        LogStep "staged " & n & " file(s) from " & src & " -> " & dest
+    Else
+        LogStep "stage skipped — no source folder for " & dest
+    End If
+    On Error GoTo 0
+    If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
 End Function
 
 Function FindBestCadInFolder(folderPath)
@@ -892,6 +1027,8 @@ Function RunGmailSearch(ByRef custJob, ByRef similar, ByRef ship)
                 Case "SIMILARTO": similar = v
                 Case "SHIPDATE":  ship = v
                 Case "ATTACHDIR": gAttachDir = v
+                Case "LOCALJOBFOLDER": gLocalJobFolder = v
+                Case "CADPATH":   gEmailCadPath = v
                 Case "CUSTOMERPREFIX": gCustomerPrefix = v
                 Case "CUSTOMERNAME": gCustomerName = v
                 Case "ERROR":     errMsg = v

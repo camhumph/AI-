@@ -49,6 +49,115 @@ def _clear_macro_launch_status_files() -> None:
         _delete_if_exists(p)
 
 
+def _clear_quote_cancel(quote_id: str) -> None:
+    """Allow re-quote after Cancel — sticky cancel must not block a new launch."""
+    qid = (quote_id or "").strip()
+    if qid:
+        _cancelled_quotes.discard(qid)
+        # Also drop common C-number variants the UI may have used as quote_id.
+        _cancelled_quotes.discard(qid.upper())
+        _cancelled_quotes.discard(qid.replace("-", ""))
+        if qid.upper().startswith("C") and "-" not in qid:
+            _cancelled_quotes.discard("C-" + qid[1:])
+    try:
+        if CANCEL_FILE.exists():
+            text = CANCEL_FILE.read_text(encoding="utf-8", errors="ignore")
+            if not qid or qid in text or qid.upper() in text.upper():
+                CANCEL_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+_XT_EXTS = {".x_t", ".x_b", ".step", ".stp", ".igs", ".iges"}
+
+
+def _is_generated_base_path(path: Path | str) -> bool:
+    u = str(path).replace("/", "\\").upper()
+    return "\\BASE\\" in u or u.endswith("\\BASE")
+
+
+def _find_best_xt(folder: Path) -> Path | None:
+    """Prefer Parasolid XT (then STEP/IGES) under a staged job folder; never \\base\\."""
+    if not folder or not folder.is_dir():
+        return None
+    scored: list[tuple[int, Path]] = []
+    for p in folder.rglob("*"):
+        if not p.is_file():
+            continue
+        if _is_generated_base_path(p):
+            continue
+        if any(part.upper() == "BASE" for part in p.parts):
+            continue
+        ext = p.suffix.lower()
+        if ext not in _XT_EXTS:
+            continue
+        score = 120 if ext in {".x_t", ".x_b"} else 110 if ext in {".step", ".stp"} else 100
+        name_u = p.name.upper()
+        if "RFQ" in name_u:
+            score -= 40
+        scored.append((score, p))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: (-t[0], -t[1].stat().st_mtime))
+    return scored[0][1]
+
+
+def stage_job_to_local_workspace(
+    c_number: str,
+    source_dirs: list[str | Path] | None = None,
+) -> dict:
+    """Copy job/attach files into C:\\CMS_Local_Workspace\\C##### and return local XT path.
+
+    Used so SolidWorks opens the XT from the local workspace, not the network share.
+    """
+    c = (c_number or "").strip().upper().replace("-", "")
+    if c and not c.startswith("C"):
+        c = "C" + c
+    if not c:
+        return {"local_folder": "", "cad_path": "", "copied": 0}
+
+    LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+    dest = LOCAL_WORKSPACE / c
+    copied = 0
+
+    # Fresh stage each launch so we don't mix old BASE exports with new files.
+    if dest.exists():
+        try:
+            shutil.rmtree(dest, ignore_errors=True)
+        except Exception:
+            pass
+    dest.mkdir(parents=True, exist_ok=True)
+
+    for raw in source_dirs or []:
+        src = Path(str(raw or "").strip())
+        if not src.is_dir():
+            continue
+        if _is_generated_base_path(src):
+            continue
+        try:
+            for item in src.iterdir():
+                if item.name.startswith("."):
+                    continue
+                if item.is_dir() and item.name.upper() == "BASE":
+                    continue
+                target = dest / item.name
+                if item.is_file():
+                    shutil.copy2(item, target)
+                    copied += 1
+                elif item.is_dir():
+                    shutil.copytree(item, target, dirs_exist_ok=True)
+                    copied += sum(1 for _ in target.rglob("*") if _.is_file())
+        except Exception:
+            continue
+
+    xt = _find_best_xt(dest)
+    return {
+        "local_folder": str(dest),
+        "cad_path": str(xt) if xt else "",
+        "copied": copied,
+    }
+
+
 def _write_handoff_atomic(text: str) -> None:
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     tmp = HANDOFF_FILE.with_suffix(HANDOFF_FILE.suffix + ".tmp")
@@ -193,6 +302,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     _deploy_launcher_assets()
     _delete_if_exists(TRAINING_TRIGGER)
     _clear_macro_launch_status_files()
+    _clear_quote_cancel(quote_id)
 
     info = email_info or {}
     c_number = (info.get("c_number") or "").strip().upper()
@@ -209,6 +319,20 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         m = re.search(r"[-_]C(\d{4,6})\b", blob, re.I) or re.search(r"\bC[- ]?(\d{4,6})\b", blob, re.I)
         if m:
             c_number = "C" + m.group(1)
+
+    # Pull attach/job files into C:\CMS_Local_Workspace\C##### and prefer local XT.
+    stage_sources = [
+        attach_dir,
+        info.get("job_folder") or "",
+        info.get("root_path") or "",
+    ]
+    staged = stage_job_to_local_workspace(c_number, stage_sources) if c_number else {}
+    local_cad = str(staged.get("cad_path") or "")
+    local_folder = str(staged.get("local_folder") or "")
+    # Only advertise local stage when we actually found CAD or copied files.
+    if not local_cad and int(staged.get("copied") or 0) <= 0:
+        local_folder = ""
+
     lines = {
         "Found": "1",
         "Subject": info.get("subject", ""),
@@ -218,6 +342,8 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         "ShipDate": info.get("ship_date", ""),
         "Attachments": str(info.get("attachments", 0)),
         "AttachDir": attach_dir,
+        "LocalJobFolder": local_folder,
+        "CadPath": local_cad,
         "Error": "",
     }
     EMAIL_OUTPUT_FILE.write_text(
@@ -228,18 +354,28 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     set_status(
         quote_id,
         phase="starting",
-        message="Opening CAD in SolidWorks, then running Module6121.swp...",
+        message=(
+            f"Staged to {local_folder}; opening local XT..."
+            if local_cad
+            else "Opening CAD in SolidWorks, then running Module6121.swp..."
+        ),
         attach_dir=attach_dir,
         c_number=c_number or None,
+        local_job_folder=local_folder or None,
+        cad_path=local_cad or None,
     )
 
     run_dme_price_lookup(wait=False)
 
-    set_status(quote_id, phase="launching", message="Opening CAD in SolidWorks first, then Module6121.swp...")
-
-    if quote_id in _cancelled_quotes:
-        set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
-        return {"launched": False, "cancelled": True, "quote_id": quote_id}
+    set_status(
+        quote_id,
+        phase="launching",
+        message=(
+            f"Opening local XT then Module6121.swp..."
+            if local_cad
+            else "Opening CAD in SolidWorks first, then Module6121.swp..."
+        ),
+    )
 
     launcher = _find_launcher()
     launched = False
@@ -340,9 +476,20 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         if not c_number:
             continue
 
-        if quote_id in _cancelled_quotes:
-            set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
-            continue
+        # Re-quote after Cancel is allowed — clear sticky cancel for this id.
+        _clear_quote_cancel(quote_id)
+        _clear_quote_cancel(c_number)
+
+        staged = stage_job_to_local_workspace(
+            c_number,
+            [
+                attach_dir,
+                info.get("job_folder") or item.get("job_folder") or "",
+                info.get("root_path") or item.get("root_path") or "",
+            ],
+        )
+        cad_path = str(staged.get("cad_path") or info.get("cad_path") or item.get("cad_path") or "")
+        local_folder = str(staged.get("local_folder") or "")
 
         job = {
             "CNum": c_number,
@@ -351,11 +498,11 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             "SimilarTo": str(info.get("similar_to") or ""),
             "ShipDate": str(info.get("ship_date") or ""),
             "RootPath": str(info.get("root_path") or item.get("root_path") or ""),
-            "JobFolder": str(info.get("job_folder") or item.get("job_folder") or ""),
+            "JobFolder": str(info.get("job_folder") or item.get("job_folder") or local_folder or ""),
             "CustomerPrefix": str(info.get("customer_prefix") or ""),
             "CustomerName": str(info.get("customer_name") or ""),
-            "AttachDir": attach_dir,
-            "CadPath": str(info.get("cad_path") or item.get("cad_path") or ""),
+            "AttachDir": attach_dir or local_folder,
+            "CadPath": cad_path,
         }
         batch_jobs.append(job)
         qid = quote_id or c_number
