@@ -1274,10 +1274,28 @@ On Error GoTo ErrHandler
         If handoff.ShipDate <> "" Then LogLine "Ship date:         " & handoff.ShipDate
         If handoff.CadPath <> "" Then LogLine "CadPath from handoff: " & handoff.CadPath
 
+        If handoff.CadPath <> "" And IsGeneratedBaseCadPath(handoff.CadPath) Then
+            LogLine "WARNING: handoff CadPath is a generated \base\ assembly — ignoring it and searching for original XT/STEP."
+            LogLine "  Bad CadPath: " & handoff.CadPath
+            handoff.CadPath = ""
+        End If
+
         If ActiveCadIsOpen() Then
-            LogLine "CAD already open in SolidWorks — quoting from active document"
-            RunActiveAssemblyWithHandoff handoff
-            GoTo NormalEnd
+            Dim activePath As String
+            activePath = ""
+            On Error Resume Next
+            If Not swApp.ActiveDoc Is Nothing Then activePath = CStr(swApp.ActiveDoc.GetPathName)
+            On Error GoTo ErrHandler
+
+            If IsGeneratedBaseCadPath(activePath) Then
+                LogLine "WARNING: active CAD is a generated \base\ assembly — closing it and falling back to ProcessOneJob."
+                LogLine "  Active path: " & activePath
+                CloseAllDocumentsSafely
+            Else
+                LogLine "CAD already open in SolidWorks — quoting from active document"
+                RunActiveAssemblyWithHandoff handoff
+                GoTo NormalEnd
+            End If
         End If
 
         If handoff.CadPath <> "" Then
@@ -1723,6 +1741,11 @@ Private Function ProcessOneJobWithHandoff(ByVal jobText As String, ByRef h As Ha
     gExactJobFolderName = h.JobFolder
     gHandoffAttachDir = h.AttachDir
     gHandoffCadPath = h.CadPath
+    If IsGeneratedBaseCadPath(gHandoffCadPath) Then
+        LogLine "ProcessOneJobWithHandoff: clearing generated \base\ CadPath: " & gHandoffCadPath
+        gHandoffCadPath = ""
+        h.CadPath = ""
+    End If
     gProcessingHandoff = True
     ProcessOneJobWithHandoff = ProcessOneJob(jobText)
     gProcessingHandoff = False
@@ -1827,7 +1850,10 @@ On Error GoTo ErrHandler
     If gHandoffCadPath <> "" Then
         Dim fsoCad As Object
         Set fsoCad = CreateObject("Scripting.FileSystemObject")
-        If fsoCad.FileExists(gHandoffCadPath) Then
+        If IsGeneratedBaseCadPath(gHandoffCadPath) Then
+            LogLine "WARNING: ignoring handoff CadPath under \base\: " & gHandoffCadPath
+            gHandoffCadPath = ""
+        ElseIf fsoCad.FileExists(gHandoffCadPath) Then
             cadCandidates.Add gHandoffCadPath
             LogLine "Using CadPath from handoff first: " & gHandoffCadPath
         End If
@@ -2672,11 +2698,25 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
     If CadFilePriority < 0 Then CadFilePriority = 0
 End Function
 
+Private Function IsGeneratedBaseCadPath(ByVal cadPath As String) As Boolean
+    IsGeneratedBaseCadPath = False
+    Dim u As String
+    u = UCase$(Trim$(cadPath))
+    If u = "" Then Exit Function
+    If InStr(u, "\BASE\") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
+    If InStr(u, "/BASE/") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
+End Function
+
 Private Function OpenCadFile(ByVal cadPath As String) As Object
 On Error GoTo ErrHandler
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     If Not fso.FileExists(cadPath) Then
+        Set OpenCadFile = Nothing
+        Exit Function
+    End If
+    If IsGeneratedBaseCadPath(cadPath) Then
+        LogLine "OpenCadFile refused generated \base\ output: " & cadPath
         Set OpenCadFile = Nothing
         Exit Function
     End If

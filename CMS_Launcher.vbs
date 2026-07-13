@@ -162,6 +162,12 @@ End If
 ' 6. Find the CAD file NOW so SolidWorks can open it BEFORE the macro runs.
 gCadPath = FindBestCadInFolders(jobFolderPath, gAttachDir)
 If gCadPath <> "" Then
+    If IsGeneratedBaseCadPath(gCadPath) Then
+        LogStep "WARNING: ignoring generated base CAD path: " & gCadPath
+        gCadPath = ""
+    End If
+End If
+If gCadPath <> "" Then
     LogStep "CAD to open first: " & gCadPath
 Else
     LogStep "WARNING: no CAD file found yet in job/attach folders"
@@ -487,8 +493,18 @@ Function ExtractCNumberToken(s)
     Loop
 End Function
 
+Function IsGeneratedBaseCadPath(ByVal p)
+    IsGeneratedBaseCadPath = False
+    Dim u
+    u = UCase(CStr(p))
+    If u = "" Then Exit Function
+    If InStr(u, "\BASE\") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
+    If InStr(u, "/BASE/") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
+End Function
+
 ' Rank CAD files: strongly prefer the assembly that matches this job's C-number.
 ' Example: 863700126-C18614.sldasm beats 863700102_RFQ_MB_ASM_....sldasm
+' Never prefer previously exported \base\*.SLDASM outputs.
 Function CadPriority(ext, fileName)
     Dim e, bonus, u
     e = LCase(ext)
@@ -505,7 +521,7 @@ Function CadPriority(ext, fileName)
     End If
     If InStr(u, "MOLDBASE") > 0 Or InStr(u, "MOLD_BASE") > 0 Then
         bonus = bonus + 30
-    ElseIf InStr(u, "BASE") > 0 And InStr(u, "DATABASE") = 0 Then
+    ElseIf InStr(u, "BASE") > 0 And InStr(u, "DATABASE") = 0 And InStr(u, "MOLDBASE") = 0 Then
         bonus = bonus + 10
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
@@ -525,24 +541,35 @@ Function FindBestCadInFolder(folderPath)
     FindBestCadInFolder = ""
     If folderPath = "" Then Exit Function
     If Not fso.FolderExists(folderPath) Then Exit Function
+
+    ' Never search generated CMS output folders.
+    If UCase(fso.GetFileName(folderPath)) = "BASE" Then Exit Function
+    If IsGeneratedBaseCadPath(folderPath) Then Exit Function
+
     Dim bestPath, bestScore, f, sub1, score, hit
     bestPath = "": bestScore = 0
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
-        score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
-        If score > bestScore Then
-            bestScore = score
-            bestPath = f.Path
+        If Not IsGeneratedBaseCadPath(f.Path) Then
+            score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
+            If score > bestScore Then
+                bestScore = score
+                bestPath = f.Path
+            End If
         End If
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
-            hit = FindBestCadInFolder(sub1.Path)
-            If hit <> "" Then
-                score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
-                If score > bestScore Then
-                    bestScore = score
-                    bestPath = hit
+            If UCase(sub1.Name) <> "BASE" Then
+                hit = FindBestCadInFolder(sub1.Path)
+                If hit <> "" Then
+                    If Not IsGeneratedBaseCadPath(hit) Then
+                        score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                        If score > bestScore Then
+                            bestScore = score
+                            bestPath = hit
+                        End If
+                    End If
                 End If
             End If
         End If
@@ -555,6 +582,8 @@ Function FindBestCadInFolders(jobFolder, attachDir)
     Dim a, b, sa, sb
     a = FindBestCadInFolder(jobFolder)
     b = FindBestCadInFolder(attachDir)
+    If a <> "" And IsGeneratedBaseCadPath(a) Then a = ""
+    If b <> "" And IsGeneratedBaseCadPath(b) Then b = ""
     If a = "" Then FindBestCadInFolders = b: Exit Function
     If b = "" Then FindBestCadInFolders = a: Exit Function
     sa = CadPriority(fso.GetExtensionName(a), fso.GetFileName(a))
@@ -636,6 +665,10 @@ Function LaunchSolidWorksOpenCadThenMacro()
 
     ' ---- OPEN THE CAD FIRST ----
     opened = False
+    If gCadPath <> "" And IsGeneratedBaseCadPath(gCadPath) Then
+        LogStep "WARNING: refusing to open generated \base\ assembly before macro: " & gCadPath
+        gCadPath = ""
+    End If
     If gCadPath <> "" And fso.FileExists(gCadPath) Then
         ext = LCase(fso.GetExtensionName(gCadPath))
         errs = 0: warns = 0: importErrors = 0
