@@ -843,12 +843,107 @@ def _macro_log_says_done(folder: Path) -> bool:
     return False
 
 
+def _read_tail(path: Path, max_chars: int = 2500) -> str:
+    try:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return text[-max_chars:].strip()
+    except Exception:
+        return ""
+
+
+def _collect_launch_diagnostics(status: dict) -> dict:
+    """Read launcher/macro status files so the UI can show why a quote is stuck."""
+    diag: dict = {
+        "macro_started": MACRO_STARTED_FILE.exists(),
+        "macro_done": MACRO_DONE_FILE.exists(),
+        "macro_error": MACRO_ERROR_FILE.exists(),
+        "handoff_exists": HANDOFF_FILE.exists(),
+        "email_handoff_exists": EMAIL_OUTPUT_FILE.exists(),
+    }
+    status_txt = _read_tail(MACRO_STATUS_FILE, 800)
+    error_txt = _read_tail(MACRO_ERROR_FILE, 1200)
+    started_txt = _read_tail(MACRO_STARTED_FILE, 400)
+    done_txt = _read_tail(MACRO_DONE_FILE, 400)
+    launcher_status = _read_tail(LOCAL_WORKSPACE / "cms_launcher_status.txt", 800)
+    log_tail = _read_tail(LOCAL_WORKSPACE / "CMS_Quote_Log.txt", 3500)
+    if not log_tail:
+        log_tail = _read_tail(Path(r"C:\Users\lenovo\Downloads\CMS_Quote_Log.txt"), 3500)
+
+    if status_txt:
+        diag["macro_status"] = status_txt
+    if error_txt:
+        diag["macro_error_text"] = error_txt
+    if started_txt:
+        diag["macro_started_text"] = started_txt
+    if done_txt:
+        diag["macro_done_text"] = done_txt
+    if launcher_status:
+        diag["launcher_last_step"] = launcher_status
+    if log_tail:
+        # Keep last ~12 log lines for the UI
+        lines = [ln for ln in log_tail.splitlines() if ln.strip()]
+        diag["launcher_log_tail"] = "\n".join(lines[-12:])
+
+    # Human-readable stuck reason
+    phase = (status.get("phase") or "").lower()
+    log_lines = [ln for ln in (log_tail or "").splitlines() if ln.strip()]
+    last_log = log_lines[-1] if log_lines else ""
+    if error_txt:
+        diag["stuck_reason"] = f"Macro error: {error_txt.splitlines()[-1][:240]}"
+    elif phase in {"launching", "running", "starting", "queued"}:
+        if not MACRO_STARTED_FILE.exists():
+            last = launcher_status or last_log
+            low = (log_tail or "").lower()
+            if "module6121.swp not found" in low:
+                diag["stuck_reason"] = "Module6121.swp missing in C:\\CMS_Local_Workspace — recompile the macro."
+            elif "did not start" in low or "could not connect" in low:
+                diag["stuck_reason"] = "SolidWorks did not start or connect. Check CMS_SOLIDWORKS_EXE / SW 2023 install."
+            elif "opendoc/loadfile failed" in low:
+                diag["stuck_reason"] = "SolidWorks could not open the CAD/XT. Check CadPath in cms_handoff.txt."
+            elif "no cad" in low:
+                diag["stuck_reason"] = "No CAD/XT found in job/attach folders before macro run."
+            elif last:
+                diag["stuck_reason"] = f"Waiting for macro STARTED. Last launcher step: {last[-220:]}"
+            else:
+                diag["stuck_reason"] = (
+                    "Launcher/macro has not written cms_macro_started.txt yet. "
+                    "Check C:\\CMS_Local_Workspace\\CMS_Quote_Log.txt"
+                )
+        elif not MACRO_DONE_FILE.exists():
+            diag["stuck_reason"] = (
+                "Macro started but has not finished yet (no cms_macro_done.txt). "
+                "SolidWorks may still be processing — see job CMS_Base_Export_Log.txt."
+            )
+    return diag
+
+
 def poll_completion(quote_id: str) -> dict:
     """Check if macro has finished by looking for output files or status."""
     status = get_status(quote_id) or {"phase": "unknown", "quote_id": quote_id}
     if status.get("phase") == "cancelled":
         return status
     job_id = status.get("job_id") or status.get("c_number") or quote_id
+
+    # Always attach live launcher/macro diagnostics while active (or on error).
+    diag = _collect_launch_diagnostics(status)
+    status["diagnostics"] = diag
+    if diag.get("stuck_reason"):
+        status["stuck_reason"] = diag["stuck_reason"]
+    if diag.get("macro_error") and status.get("phase") not in {"completed", "cancelled", "error"}:
+        status["phase"] = "error"
+        status["message"] = diag.get("stuck_reason") or "Macro reported an error"
+        try:
+            set_status(
+                quote_id,
+                phase="error",
+                message=status["message"],
+                stuck_reason=status.get("stuck_reason"),
+                diagnostics=diag,
+            )
+        except Exception:
+            pass
 
     local = find_local_job_folder(job_id)
     if local:
@@ -865,6 +960,9 @@ def poll_completion(quote_id: str) -> dict:
                 try:
                     sync_completed_job(job_id, str(local))
                     status = get_status(quote_id) or status
+                    status["diagnostics"] = diag
+                    if diag.get("stuck_reason"):
+                        status["stuck_reason"] = diag["stuck_reason"]
                 except Exception as e:
                     status["sync_error"] = str(e)
             status["outputs_found"] = True
@@ -872,6 +970,12 @@ def poll_completion(quote_id: str) -> dict:
         else:
             status["outputs_found"] = has_xt
             status["local_folder"] = str(local)
+            # Surface last lines of the job export log when still running.
+            job_log = _read_tail(local / "CMS_Base_Export_Log.txt", 1500)
+            if job_log:
+                status.setdefault("diagnostics", diag)["job_log_tail"] = "\n".join(
+                    [ln for ln in job_log.splitlines() if ln.strip()][-8:]
+                )
 
     return status
 
@@ -886,7 +990,7 @@ def list_active_quotes() -> list[dict]:
         except Exception:
             continue
         phase = data.get("phase", "")
-        if phase in active_phases or phase == "completed":
+        if phase in active_phases or phase == "completed" or phase == "error":
             if phase == "completed" and data.get("dismissed"):
                 continue
             out.append(poll_completion(data.get("quote_id") or path.stem))

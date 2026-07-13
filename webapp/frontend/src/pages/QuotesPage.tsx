@@ -114,13 +114,8 @@ export default function QuotesPage() {
 }
 
 function isQuoteable(entry: WorkspaceEntry): boolean {
-  return Boolean(
-    entry.quote_ready ||
-      entry.has_xt_csv ||
-      entry.c_number ||
-      entry.has_quote_sheet ||
-      entry.has_steel_sheet
-  );
+  // Checkbox every folder the shop can quote (C##### / BMS- / XT present).
+  return Boolean(entry.is_dir && entry.quote_ready);
 }
 
 function FolderPickerModal({
@@ -271,15 +266,15 @@ function FolderPickerModal({
           </div>
           {quoteable.length > 0 && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={toggleAllQuoteable}
-                className="rounded-full border border-white/10 px-3 py-1 text-[10px] uppercase tracking-wider text-ink-300 hover:border-white/20 hover:text-ink-100"
-              >
-                {checked.size > 0 && quoteable.every((e) => checked.has(e.path))
-                  ? "Clear selection"
-                  : `Select all quoteable (${quoteable.length})`}
-              </button>
+              <label className="flex cursor-pointer items-center gap-2 rounded-full border border-white/10 px-3 py-1 text-[10px] uppercase tracking-wider text-ink-300 hover:border-white/20 hover:text-ink-100">
+                <input
+                  type="checkbox"
+                  className="accent-brand-400"
+                  checked={checked.size > 0 && quoteable.every((e) => checked.has(e.path))}
+                  onChange={toggleAllQuoteable}
+                />
+                Select all quoteable ({quoteable.length})
+              </label>
               {checked.size > 0 && (
                 <Button
                   variant="primary"

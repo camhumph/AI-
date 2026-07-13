@@ -247,10 +247,23 @@ def import_raw_csv(job_id: str, csv_path: str) -> bool:
 
 
 def _extract_c_number(name: str) -> str | None:
-    import re
-
-    m = re.search(r"\bC(\d{4,6})\b", name, re.I)
+    m = re.search(r"[-_]C(\d{4,6})\b", name, re.I) or re.search(r"\bC[- ]?(\d{4,6})\b", name, re.I)
     return f"C{m.group(1)}" if m else None
+
+
+def _looks_like_quote_job(name: str) -> bool:
+    """True for C-number / BMS job folders the shop can quote from New Quote."""
+    if not name or name.startswith("."):
+        return False
+    if _extract_c_number(name):
+        return True
+    u = name.upper().replace(" ", "")
+    if u.startswith("BMS-") or u.startswith("BMS_"):
+        return True
+    # e.g. 863700122-C18613 already covered; also bare long job ids with quote token
+    if re.search(r"\d{6,}.*C\d{4,6}", name, re.I):
+        return True
+    return False
 
 
 def _workspace_roots() -> list[Path]:
@@ -306,6 +319,9 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
             elif is_dir and quick:
                 # Cheap single-file check only (no wildcards)
                 has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
+            quote_ready = is_dir and (
+                _looks_like_quote_job(child.name) or bool(c_num) or has_xt or has_quote or has_steel
+            )
             entries.append(
                 {
                     "name": child.name,
@@ -315,7 +331,7 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
                     "has_xt_csv": has_xt,
                     "has_quote_sheet": has_quote,
                     "has_steel_sheet": has_steel,
-                    "quote_ready": is_dir and (bool(c_num) or has_xt or has_quote or has_steel),
+                    "quote_ready": quote_ready,
                 }
             )
     except PermissionError:

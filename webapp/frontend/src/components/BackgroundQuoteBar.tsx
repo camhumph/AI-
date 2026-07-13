@@ -41,6 +41,14 @@ export default function BackgroundQuoteBar() {
         const failed = phase === "error";
         const cancelled = phase === "cancelled";
         const active = !done && !failed && !cancelled;
+        const stuck =
+          job.status.stuck_reason ||
+          job.status.diagnostics?.stuck_reason ||
+          "";
+        const logTail =
+          job.status.diagnostics?.launcher_log_tail ||
+          job.status.diagnostics?.job_log_tail ||
+          "";
 
         return (
           <div
@@ -65,10 +73,20 @@ export default function BackgroundQuoteBar() {
                 {job.status.job_id ? ` · ${job.status.job_id}` : ""}
               </div>
               {job.status.message && (
-                <div className="mt-1 line-clamp-2 text-[10px] text-ink-500">{job.status.message}</div>
+                <div className="mt-1 line-clamp-3 text-[10px] text-ink-500">{job.status.message}</div>
               )}
               {job.status.warning && (
                 <div className="mt-1 line-clamp-2 text-[10px] text-accent-amber">{job.status.warning}</div>
+              )}
+              {stuck && (
+                <div className="mt-1 whitespace-pre-wrap break-words text-[10px] text-accent-rose">
+                  {stuck}
+                </div>
+              )}
+              {logTail && (active || failed) && (
+                <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-black/30 p-2 font-mono text-[9px] leading-snug text-ink-400">
+                  {logTail}
+                </pre>
               )}
               {done && job.status.job_id && (
                 <button

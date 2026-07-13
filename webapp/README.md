@@ -44,6 +44,17 @@ bind to 127.0.0.1 only** -- it is never exposed to the network or internet.
 
 ## Running
 
+### Start sequence (shop PC)
+
+```bat
+cd C:\CMS_AI\webapp\frontend
+npm run build
+cd C:\CMS_AI\webapp
+START_CMS_QUOTING_APP.bat
+```
+
+Or double-click `webapp\START_SEQUENCE.bat` (runs build, then starts the app).
+
 ### One-click on the shop PC (production, local-only)
 
 First-time setup:
@@ -56,6 +67,18 @@ cd webapp\frontend && npm install && npm run build
 Then just double-click `webapp\START_CMS_QUOTING_APP.bat`. One process on
 `127.0.0.1:8000` serves both the UI and the API (the backend serves the
 built frontend automatically when `frontend/dist` exists).
+
+### If a quote gets stuck
+
+The floating quote card shows the last launcher step / error. Also check:
+
+```
+C:\CMS_Local_Workspace\CMS_Quote_Log.txt
+C:\CMS_Local_Workspace\cms_launcher_status.txt
+C:\CMS_Local_Workspace\cms_macro_started.txt
+C:\CMS_Local_Workspace\cms_macro_error.txt
+C:\CMS_Local_Workspace\cms_macro_status.txt
+```
 
 ### Development mode
 

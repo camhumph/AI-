@@ -173,10 +173,23 @@ export interface QuoteRunStatus {
   phase: string;
   message?: string;
   warning?: string;
+  stuck_reason?: string;
+  diagnostics?: {
+    stuck_reason?: string;
+    launcher_last_step?: string;
+    launcher_log_tail?: string;
+    macro_status?: string;
+    macro_error_text?: string;
+    job_log_tail?: string;
+    macro_started?: boolean;
+    macro_done?: boolean;
+    macro_error?: boolean;
+  };
   job_id?: string;
   c_number?: string;
   quote_id?: string;
   cad_path?: string;
+  local_folder?: string;
 }
 
 export interface QuoteEmailResult {

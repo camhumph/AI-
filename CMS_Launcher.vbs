@@ -1198,9 +1198,18 @@ End Function
 ' Append a line to the Downloads log so the whole run is recorded.
 Sub LogStep(msg)
     On Error Resume Next
-    Dim f
-    Set f = fso.OpenTextFile(DOWNLOADS_FOLDER & "\CMS_Quote_Log.txt", 8, True)  ' 8 = append, create
-    f.WriteLine "[" & Now & "] launcher: " & msg
+    Dim f, line
+    line = "[" & Now & "] launcher: " & msg
+    ' Always mirror into CMS_Local_Workspace so the webapp can show why launch stuck.
+    Set f = fso.OpenTextFile(LOCAL_WORKSPACE_ROOT & "\CMS_Quote_Log.txt", 8, True)
+    f.WriteLine line
+    f.Close
+    Set f = fso.OpenTextFile(DOWNLOADS_FOLDER & "\CMS_Quote_Log.txt", 8, True)
+    f.WriteLine line
+    f.Close
+    ' Tiny status file the webapp polls (last step only).
+    Set f = fso.OpenTextFile(LOCAL_WORKSPACE_ROOT & "\cms_launcher_status.txt", 2, True)
+    f.WriteLine line
     f.Close
 End Sub
 
