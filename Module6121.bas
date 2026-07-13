@@ -77,7 +77,7 @@ Private Const PROMPT_FOR_TOP_ORIENTATION As Boolean = False
 Private Const SUPPRESS_USER_PROMPTS As Boolean = True
 ' Front-orientation tuning (ported from gemini1).
 Private Const POT_BLOCKS_MUST_BE_FRONT_OF_HOLDERS As Boolean = True
-Private Const POT_FRONT_REQUIRE_EVERY_POT_AHEAD_OF_EVERY_HOLDER As Boolean = True
+Private Const POT_FRONT_REQUIRE_EVERY_POT_AHEAD_OF_EVERY_HOLDER As Boolean = False
 Private Const POT_FRONT_DEPTH_MIN_DELTA_IN As Double = 0.03
 Private Const HOLDER_LONG_SIDE_VISIBLE_RATIO As Double = 0.8
 Private Const AUTO_DEFINE_FRONT_FROM_HOLDER_POT_COM As Boolean = True
@@ -690,6 +690,17 @@ On Error GoTo ErrHandler
     If modelPath <> "" Then LogLine "Active path: " & modelPath
     LogLine "Output folder: " & CurrentJobFolder
     LogLine "========================================"
+
+    If gProcessingHandoff Then
+        If CustomerJobNumber <> "" Then
+            If InStr(UCase(modelTitle & " " & modelPath), UCase(CustomerJobNumber)) = 0 Then
+                LogLine "WARNING: Active CAD does not appear to match handoff customer job."
+                LogLine "  Active CAD: " & modelTitle
+                LogLine "  Active path: " & modelPath
+                LogLine "  Handoff customer job: " & CustomerJobNumber
+            End If
+        End If
+    End If
 
     JobStartTime = Now
     FinalStlCoordFrameReady = False
@@ -2495,6 +2506,14 @@ On Error GoTo ErrHandler
     ' Geometry-classification fallback.
     ' Module6121 scans/classifies TCP/BCP, holders, and pots before orientation.
     ' Use those indexes when BOM/name matching is unavailable.
+    ' TCP/BCP first once clamp classification is trustworthy.
+    If oriented = False Then
+        oriented = OrientFromPairIndices(model, _
+                    gIdxTCP, _
+                    gIdxBCP, _
+                    "Geometry TCP/BCP")
+    End If
+
     If oriented = False Then
         oriented = OrientFromPairIndices(model, _
                     gIdxIDH, _
@@ -2507,13 +2526,6 @@ On Error GoTo ErrHandler
                     gIdxIDP, _
                     gIdxODP, _
                     "Geometry TOP/BOTTOM POT")
-    End If
-
-    If oriented = False Then
-        oriented = OrientFromPairIndices(model, _
-                    gIdxTCP, _
-                    gIdxBCP, _
-                    "Geometry TCP/BCP")
     End If
 
     If oriented = False Then
@@ -6994,11 +7006,10 @@ End Function
 ' Resolve a plate's finished dims: try CAD bounding-box (by name key) first,
 ' then fall back to the BOM row (by standard name). Returns True if found.
 ' Identify the six pot-block plates directly from CAD geometry:
-'   - clamps = thin relative to length (TCP / BCP / SMED)
+'   - clamps = broad, flat, near-full-footprint plates (TCP / BCP / SMED)
 '   - pots   = thick, chunky, clearly SMALLER than the mold footprint
-'             (never full-size A/B plates — those are flat + full footprint)
-'   - holders = the remaining thick elongated plates
-' Within each pair the higher one (Z, then volume) is the ID/top side.
+'   - holders = thick elongated plates (not skinny rails/straps)
+' Within each pair the dominant-axis separation picks ID/top vs OD/bottom.
 Private Sub ClassifyPotBlockPlatesFromCad()
     gIdxTCP = 0: gIdxBCP = 0: gIdxIDH = 0: gIdxODH = 0: gIdxIDP = 0: gIdxODP = 0
     If PartCount < 1 Then Exit Sub
@@ -7015,18 +7026,48 @@ Private Sub ClassifyPotBlockPlatesFromCad()
     Next i
 
     For i = 1 To PartCount
+
         If IsPyropelPartIndex(i) Then GoTo NextPart
-        t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
+
+        t = parts(i).Thickness
+        w = parts(i).Width
+        l = parts(i).Length
         fp = w * l
+
         If t >= PLATE_MIN_THICKNESS And fp >= PLATE_MIN_FOOTPRINT Then
-            If t <= CLAMP_THIN_RATIO * l Then
-                ncl = ncl + 1: cl(ncl) = i                       ' thin big plate = clamp / SMED
+
+            ' Clamp/TCP/BCP plates must be broad, flat, near-full-footprint plates.
+            ' Do NOT classify skinny rails/straps/insulation as clamps just because
+            ' they are thin relative to length.
+            If IsClampPlateGeometry(t, w, l, maxFp) Then
+
+                ncl = ncl + 1
+                cl(ncl) = i
+
             ElseIf IsPotBlockGeometry(t, w, l, maxFp) Then
-                npo = npo + 1: po(npo) = i                       ' thick chunky smaller block = pot
+
+                npo = npo + 1
+                po(npo) = i
+
+            ElseIf IsHolderBlockGeometry(t, w, l, maxFp) Then
+
+                nho = nho + 1
+                ho(nho) = i
+
             Else
-                nho = nho + 1: ho(nho) = i                       ' elongated / remaining = holder
+
+                ' Unknown plate-like component; do not use it for BMS orientation.
+                LogLine "BMS geometry classifier ignored: idx=" & i & _
+                        " comp='" & parts(i).componentName & "'" & _
+                        " T/W/L=" & FormatNumberForCsv(t) & "/" & _
+                                  FormatNumberForCsv(w) & "/" & _
+                                  FormatNumberForCsv(l) & _
+                        " fp=" & FormatNumberForCsv(fp)
+
             End If
+
         End If
+
 NextPart:
     Next i
     AssignPairTopBottom cl, ncl, gIdxTCP, gIdxBCP
@@ -7035,7 +7076,87 @@ NextPart:
     LogLine "Geometry plates: TCP=" & gIdxTCP & " BCP=" & gIdxBCP & _
             " IDholder=" & gIdxIDH & " ODholder=" & gIdxODH & _
             " IDpot=" & gIdxIDP & " ODpot=" & gIdxODP
+    LogPlateIndexDetails "TCP", gIdxTCP
+    LogPlateIndexDetails "BCP", gIdxBCP
+    LogPlateIndexDetails "ID HOLDER", gIdxIDH
+    LogPlateIndexDetails "OD HOLDER", gIdxODH
+    LogPlateIndexDetails "ID POT", gIdxIDP
+    LogPlateIndexDetails "OD POT", gIdxODP
 End Sub
+
+Private Sub LogPlateIndexDetails(ByVal label As String, ByVal idx As Long)
+On Error Resume Next
+
+    If idx <= 0 Or idx > PartCount Then
+        LogLine "GEOM " & label & ": NOT FOUND"
+        Exit Sub
+    End If
+
+    LogLine "GEOM " & label & ": idx=" & idx & _
+            " comp='" & parts(idx).componentName & "'" & _
+            " T/W/L=" & FormatNumberForCsv(parts(idx).Thickness) & "/" & _
+                      FormatNumberForCsv(parts(idx).Width) & "/" & _
+                      FormatNumberForCsv(parts(idx).Length) & _
+            " BoxDx/Dy/Dz=" & FormatNumberForCsv(parts(idx).BoxDx) & "/" & _
+                            FormatNumberForCsv(parts(idx).BoxDy) & "/" & _
+                            FormatNumberForCsv(parts(idx).BoxDz) & _
+            " CtrX/Y/Z=" & FormatNumberForCsv(parts(idx).AsmCenterX) & "/" & _
+                         FormatNumberForCsv(parts(idx).AsmCenterY) & "/" & _
+                         FormatNumberForCsv(parts(idx).AsmCenterZ)
+End Sub
+
+Private Function IsClampPlateGeometry(ByVal t As Double, _
+                                      ByVal w As Double, _
+                                      ByVal l As Double, _
+                                      ByVal maxFp As Double) As Boolean
+    IsClampPlateGeometry = False
+
+    If t <= 0# Or w <= 0# Or l <= 0# Then Exit Function
+    If maxFp <= 0# Then Exit Function
+
+    Dim fp As Double
+    fp = w * l
+
+    ' Clamp plates are broad plates, not skinny rails/hardware.
+    If fp < 0.65 * maxFp Then Exit Function
+
+    ' They are thin relative to footprint.
+    If t > CLAMP_THIN_RATIO * l Then Exit Function
+
+    ' Avoid extremely skinny objects being called TCP/BCP.
+    If w < 0.55 * l Then Exit Function
+
+    ' Normal BMS clamps are not 0.25" insulation and not 8-12" thick holders.
+    If t < 0.5 Then Exit Function
+    If t > 3# Then Exit Function
+
+    IsClampPlateGeometry = True
+End Function
+
+Private Function IsHolderBlockGeometry(ByVal t As Double, _
+                                       ByVal w As Double, _
+                                       ByVal l As Double, _
+                                       ByVal maxFp As Double) As Boolean
+    IsHolderBlockGeometry = False
+
+    If t <= 0# Or w <= 0# Or l <= 0# Then Exit Function
+
+    Dim fp As Double
+    fp = w * l
+
+    ' Holders are larger than pots, often near the mold footprint, and thick.
+    If t < 3# Then Exit Function
+
+    ' Do not call very small/chunky pot blocks holders.
+    If maxFp > 0# Then
+        If fp < 0.5 * maxFp Then Exit Function
+    End If
+
+    ' Holders are usually longer/plate-like, not compact cubes.
+    If l / w < 1.15 Then Exit Function
+
+    IsHolderBlockGeometry = True
+End Function
 
 ' Pots are easy to tell from mold plates:
 '   thick (>= 3"), blocky aspect, chunky (not flat), footprint << mold base.
