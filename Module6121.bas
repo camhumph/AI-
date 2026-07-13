@@ -3308,8 +3308,8 @@ On Error GoTo ErrHandler
 
         LogDone "Export full-assembly STL"
 
-        ' Restore all components after STL before ISO/DXF.
-        PrepareAssemblyForFullStlExport swModel
+        ' Light restore before ISO/DXF (do not re-run heavy STL prep).
+        PrepareAssemblyVisibilityFast swModel
 
     Else
 
