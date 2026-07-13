@@ -180,7 +180,8 @@ If localStagePath <> "" Then
     LogStep "local CMS workspace ready: " & gLocalJobFolder
 End If
 
-' 6. Prefer local XT (never \base\). Fall back to best CAD in local/job/attach.
+' 6. Prefer local CAD: XT/STEP if present, else SolidWorks .sldasm/.sldprt
+'    inside an unzipped mold-base subfolder (when that folder exists).
 gCadPath = ""
 If gEmailCadPath <> "" Then
     If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
@@ -197,10 +198,11 @@ If gCadPath = "" And gLocalJobFolder <> "" Then
     If gCadPath = "" Then gCadPath = FindBestCadInFolder(gLocalJobFolder)
 End If
 If gCadPath = "" Then
-    gCadPath = FindBestXtInFolders(jobFolderPath, gAttachDir)
+    ' AttachDir (Downloads BMS-... folder) often has the unzipped mold package.
+    gCadPath = FindBestXtInFolders(gAttachDir, jobFolderPath)
 End If
 If gCadPath = "" Then
-    gCadPath = FindBestCadInFolders(jobFolderPath, gAttachDir)
+    gCadPath = FindBestCadInFolders(gAttachDir, jobFolderPath)
 End If
 If gCadPath <> "" Then
     If IsGeneratedBaseCadPath(gCadPath) Then
@@ -209,15 +211,18 @@ If gCadPath <> "" Then
     End If
 End If
 If gCadPath <> "" Then
-    LogStep "CAD to open first (local XT preferred): " & gCadPath
+    LogStep "CAD to open first (nested unzipped folder OK): " & gCadPath
 Else
-    LogStep "WARNING: no CAD/XT file found yet in local/job/attach folders"
+    LogStep "WARNING: no CAD/XT/SLDASM found yet in local/job/attach folders"
     LogStep "CAD search paths: local=" & gLocalJobFolder & " job=" & jobFolderPath & " attach=" & gAttachDir
     If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
-        LogStep "local folder file sample: " & SampleFolderFiles(gLocalJobFolder)
+        LogStep "local folder sample: " & SampleFolderFiles(gLocalJobFolder)
+    End If
+    If gAttachDir <> "" And fso.FolderExists(gAttachDir) Then
+        LogStep "attach folder sample: " & SampleFolderFiles(gAttachDir)
     End If
     If jobFolderPath <> "" And fso.FolderExists(jobFolderPath) Then
-        LogStep "job folder file sample: " & SampleFolderFiles(jobFolderPath)
+        LogStep "job folder sample: " & SampleFolderFiles(jobFolderPath)
     End If
 End If
 
@@ -544,21 +549,28 @@ End Function
 Function SampleFolderFiles(ByVal folderPath)
     SampleFolderFiles = ""
     On Error Resume Next
-    Dim f, n, parts
+    Dim f, n, parts, sub1, f2
     n = 0
     parts = ""
     For Each f In fso.GetFolder(folderPath).Files
         If n > 0 Then parts = parts & ", "
         parts = parts & f.Name
         n = n + 1
-        If n >= 8 Then Exit For
+        If n >= 6 Then Exit For
     Next
-    Dim sub1
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
-        If n >= 8 Then Exit For
+        If UCase(sub1.Name) = "BASE" Then GoTo NextSampleSub
         If n > 0 Then parts = parts & ", "
-        parts = parts & "[" & sub1.Name & "/]"
+        parts = parts & "[" & sub1.Name & "/"
+        For Each f2 In sub1.Files
+            parts = parts & f2.Name & " "
+            n = n + 1
+            If n >= 10 Then Exit For
+        Next
+        parts = parts & "]"
         n = n + 1
+        If n >= 10 Then Exit For
+NextSampleSub:
     Next
     If parts = "" Then parts = "(empty)"
     SampleFolderFiles = parts
@@ -679,17 +691,32 @@ Function CadPriority(ext, fileName)
         bonus = bonus + 10
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
+    ' Unzipped mold-base packages often keep the older BMS id in the file name —
+    ' still prefer them when they are clearly mold-base / outsource quote CAD.
+    If InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0 Then
+        bonus = bonus + 60
+    End If
     Select Case e
-        ' Prefer customer Parasolid XT / STEP for open-first quoting (not exported SLDASM).
+        ' Native SW assemblies in unzipped mold folders are valid open-first CAD.
         Case "x_t", "x_b": CadPriority = 120 + bonus
         Case "step", "stp": CadPriority = 110 + bonus
-        Case "sldasm": CadPriority = 100 + bonus
+        Case "sldasm": CadPriority = 105 + bonus
         Case "igs", "iges": CadPriority = 90 + bonus
-        Case "sldprt": CadPriority = 50 + bonus
-        Case "prt": CadPriority = 45 + bonus
+        Case "sldprt": CadPriority = 55 + bonus
+        Case "prt", "asm": CadPriority = 50 + bonus
         Case Else: CadPriority = 0
     End Select
     If CadPriority < 0 Then CadPriority = 0
+End Function
+
+' Extra score when CAD lives under an unzipped mold-base subfolder.
+Function CadFolderBonus(ByVal folderPath)
+    Dim u
+    CadFolderBonus = 0
+    u = UCase(CStr(folderPath))
+    If InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0 Then
+        CadFolderBonus = 90
+    End If
 End Function
 
 ' Score only importable CAD (XT/STEP/IGES) — used when staging to local workspace.
@@ -716,7 +743,7 @@ Function FindBestXtInFolder(folderPath)
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
         If Not IsGeneratedBaseCadPath(f.Path) Then
-            score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name)
+            score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name) + CadFolderBonus(folderPath)
             If score > bestScore Then
                 bestScore = score
                 bestPath = f.Path
@@ -729,7 +756,7 @@ Function FindBestXtInFolder(folderPath)
                 hit = FindBestXtInFolder(sub1.Path)
                 If hit <> "" Then
                     If Not IsGeneratedBaseCadPath(hit) Then
-                        score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                        score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit)) + CadFolderBonus(fso.GetParentFolderName(hit))
                         If score > bestScore Then
                             bestScore = score
                             bestPath = hit
@@ -754,12 +781,14 @@ Function FindBestXtInFolders(jobFolder, attachDir)
     If sb > sa Then FindBestXtInFolders = b Else FindBestXtInFolders = a
 End Function
 
-' Copy job/attach files into C:\CMS_Local_Workspace\C##### for local XT open.
+' Copy AttachDir (Downloads BMS folder with zip / unzipped mold CAD) AND the
+' month job folder into C:\CMS_Local_Workspace\C#####, then expand ZIPs and
+' search nested unzipped folders (e.g. 851100021_MOLD_BASE_OUTSOURCE_QUOTE_...).
 Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
     StageJobToLocalWorkspace = ""
     On Error Resume Next
     If cNumLocal = "" Then Exit Function
-    Dim dest, src, n
+    Dim dest, n, n2
     dest = LOCAL_WORKSPACE_ROOT & "\" & CleanFolderToken(cNumLocal)
     If dest = "" Or dest = LOCAL_WORKSPACE_ROOT & "\" Then Exit Function
 
@@ -771,22 +800,27 @@ Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
     If Not fso.FolderExists(dest) Then Exit Function
 
     n = 0
-    src = ""
+    ' 1) AttachDir first — usually has the ZIP + already-unzipped mold folder with .sldasm
+    If attachDir <> "" And fso.FolderExists(attachDir) Then
+        If UCase(attachDir) <> UCase(dest) Then
+            n = CopyDirContents(attachDir, dest)
+            LogStep "staged " & n & " file(s) from AttachDir: " & attachDir
+        End If
+    End If
+    ' 2) Merge month/job folder (BOM extras, etc.) without wiping AttachDir CAD
     If jobFolderPath <> "" And fso.FolderExists(jobFolderPath) Then
-        ' Prefer network/month job folder when present.
-        If UCase(jobFolderPath) <> UCase(dest) Then src = jobFolderPath
+        If UCase(jobFolderPath) <> UCase(dest) And UCase(jobFolderPath) <> UCase(attachDir) Then
+            n2 = CopyDirContents(jobFolderPath, dest)
+            n = n + n2
+            LogStep "merged " & n2 & " file(s) from job folder: " & jobFolderPath
+        End If
     End If
-    If src = "" And attachDir <> "" And fso.FolderExists(attachDir) Then
-        If UCase(attachDir) <> UCase(dest) Then src = attachDir
-    End If
-    If src <> "" Then
-        n = CopyDirContents(src, dest)
-        LogStep "staged " & n & " file(s) from " & src & " -> " & dest
-    Else
-        LogStep "stage skipped — no source folder for " & dest
-    End If
-    ' Expand ZIPs so FindBestXt can see Parasolid/STEP before SolidWorks opens.
+    If n = 0 Then LogStep "stage skipped — no source folder for " & dest
+
+    ' Expand ZIPs so nested mold folders / XT / SLDASM are visible to FindBestCad.
     ExtractZipsInFolder dest
+    ' Wait a beat for Shell.NameSpace extract to finish writing nested folders.
+    WScript.Sleep 2000
     On Error GoTo 0
     If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
 End Function
@@ -847,7 +881,7 @@ Function FindBestCadInFolder(folderPath)
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
         If Not IsGeneratedBaseCadPath(f.Path) Then
-            score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
+            score = CadPriority(fso.GetExtensionName(f.Name), f.Name) + CadFolderBonus(folderPath)
             If score > bestScore Then
                 bestScore = score
                 bestPath = f.Path
@@ -857,10 +891,11 @@ Function FindBestCadInFolder(folderPath)
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
             If UCase(sub1.Name) <> "BASE" Then
+                ' Always recurse into unzipped mold folders (may or may not exist).
                 hit = FindBestCadInFolder(sub1.Path)
                 If hit <> "" Then
                     If Not IsGeneratedBaseCadPath(hit) Then
-                        score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                        score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit)) + CadFolderBonus(sub1.Path)
                         If score > bestScore Then
                             bestScore = score
                             bestPath = hit
@@ -882,8 +917,8 @@ Function FindBestCadInFolders(jobFolder, attachDir)
     If b <> "" And IsGeneratedBaseCadPath(b) Then b = ""
     If a = "" Then FindBestCadInFolders = b: Exit Function
     If b = "" Then FindBestCadInFolders = a: Exit Function
-    sa = CadPriority(fso.GetExtensionName(a), fso.GetFileName(a))
-    sb = CadPriority(fso.GetExtensionName(b), fso.GetFileName(b))
+    sa = CadPriority(fso.GetExtensionName(a), fso.GetFileName(a)) + CadFolderBonus(fso.GetParentFolderName(a))
+    sb = CadPriority(fso.GetExtensionName(b), fso.GetFileName(b)) + CadFolderBonus(fso.GetParentFolderName(b))
     If sb > sa Then FindBestCadInFolders = b Else FindBestCadInFolders = a
 End Function
 
