@@ -1078,16 +1078,55 @@ Function LaunchSolidWorksOpenCadThenMacro()
     LaunchSolidWorksOpenCadThenMacro = ran
 End Function
 
-' Try common module/proc name variants. NEVER set CommandInProgress=True before RunMacro —
-' that makes RunMacro2 return False with macroErr=0 on SW 2023.
+' Try GetMacroMethods entry points first, then common names.
+' NEVER set CommandInProgress=True before RunMacro.
+' If COM still fails, fall back to SLDWORKS.EXE /m "macro.swp".
 Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
     RunMacroWithRetry = False
 
     Dim startTime, attempt, runOk, runErr, waitStart
-    Dim modNames, procNames, mi, pi, moduleName, procName
-    Dim vbaErr
-    modNames = Array("Module6121", "Module61211", "Module612111", "Module1")
-    procNames = Array("main", "RunFromLauncher")
+    Dim pairs, pi, moduleName, procName, vbaErr
+    Dim methods, mi, parts, entry
+    Dim shell
+
+    On Error Resume Next
+    Dim f
+    Set f = fso.GetFile(macroPath)
+    LogStep "macro file size=" & f.Size & " modified=" & f.DateLastModified
+    If f.Size < 1000 Then
+        LogStep "WARNING: Module6121.swp looks too small — recompile Module6121.bas -> .swp"
+    End If
+    On Error GoTo 0
+
+    ' Build (module, proc) list from the .swp itself.
+    pairs = ""
+    On Error Resume Next
+    methods = swApp.GetMacroMethods(macroPath, 1)  ' without args
+    If IsEmpty(methods) Or IsNull(methods) Then methods = swApp.GetMacroMethods(macroPath, 0)
+    On Error GoTo 0
+    If IsArray(methods) Then
+        For mi = 0 To UBound(methods)
+            entry = CStr(methods(mi))
+            LogStep "GetMacroMethods entry: " & entry
+            parts = Split(entry, ".")
+            If UBound(parts) >= 1 Then
+                If pairs <> "" Then pairs = pairs & "|"
+                pairs = pairs & parts(0) & Chr(1) & parts(1)
+            End If
+        Next
+    Else
+        LogStep "GetMacroMethods returned no entry points — .swp may be corrupt/stale or macros disabled"
+    End If
+
+    ' Always append preferred guesses after discovered names.
+    If pairs <> "" Then pairs = pairs & "|"
+    pairs = pairs & "Module6121" & Chr(1) & "main" & "|" & _
+            "Module6121" & Chr(1) & "RunFromLauncher" & "|" & _
+            "Module61211" & Chr(1) & "main" & "|" & _
+            "Module1" & Chr(1) & "main"
+
+    Dim pairArr, pairParts
+    pairArr = Split(pairs, "|")
 
     startTime = Timer
     attempt = 0
@@ -1102,58 +1141,88 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
         swApp.UserControl = True
         On Error GoTo 0
 
-        For pi = 0 To UBound(procNames)
-            For mi = 0 To UBound(modNames)
-                moduleName = modNames(mi)
-                procName = procNames(pi)
-                runOk = False
-                runErr = 0
-                vbaErr = 0
+        For pi = 0 To UBound(pairArr)
+            pairParts = Split(pairArr(pi), Chr(1))
+            If UBound(pairParts) < 1 Then GoTo NextPair
+            moduleName = pairParts(0)
+            procName = pairParts(1)
+            runOk = False
+            runErr = CLng(0)
+            vbaErr = 0
 
-                On Error Resume Next
+            On Error Resume Next
+            Err.Clear
+            ' Prefer RunMacro (no ByRef) — avoids err=0 false negatives.
+            runOk = swApp.RunMacro(macroPath, moduleName, procName)
+            vbaErr = Err.Number
+            If runOk = False Or vbaErr <> 0 Then
                 Err.Clear
-                ' Option 0 = default; do not mark CommandInProgress beforehand.
+                runErr = CLng(0)
                 runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
                 vbaErr = Err.Number
-                If (runOk = False) Or (vbaErr <> 0) Then
-                    Err.Clear
-                    runOk = swApp.RunMacro2(macroPath, moduleName, procName, 1, runErr)
-                    vbaErr = Err.Number
-                End If
-                If (runOk = False) Or (vbaErr <> 0) Then
-                    Err.Clear
-                    runOk = swApp.RunMacro(macroPath, moduleName, procName)
-                    vbaErr = Err.Number
-                    If vbaErr = 0 And runOk <> False Then runOk = True
-                End If
-                On Error GoTo 0
+            End If
+            If runOk = False Or vbaErr <> 0 Then
+                Err.Clear
+                runErr = CLng(0)
+                runOk = swApp.RunMacro2(macroPath, moduleName, procName, 1, runErr)
+                vbaErr = Err.Number
+            End If
+            On Error GoTo 0
 
-                LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
-                        " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
+            LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
+                    " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
 
-                waitStart = Timer
-                Do
-                    If fso.FileExists(MACRO_STARTED_FILE) Then
-                        LogStep "macro acknowledged STARTED via " & MACRO_STARTED_FILE & " (module=" & moduleName & " proc=" & procName & ")"
-                        RunMacroWithRetry = True
-                        Exit Function
-                    End If
-                    If fso.FileExists(MACRO_ERROR_FILE) Then
-                        LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
-                        RunMacroWithRetry = True
-                        Exit Function
-                    End If
-                    WaitSeconds 1
-                    If Timer < waitStart Then Exit Do
-                    If Timer - waitStart >= 8 Then Exit Do
-                Loop
-            Next
+            waitStart = Timer
+            Do
+                If fso.FileExists(MACRO_STARTED_FILE) Then
+                    LogStep "macro acknowledged STARTED (module=" & moduleName & " proc=" & procName & ")"
+                    RunMacroWithRetry = True
+                    Exit Function
+                End If
+                If fso.FileExists(MACRO_ERROR_FILE) Then
+                    LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
+                    RunMacroWithRetry = True
+                    Exit Function
+                End If
+                WaitSeconds 1
+                If Timer < waitStart Then Exit Do
+                If Timer - waitStart >= 8 Then Exit Do
+            Loop
+NextPair:
         Next
 
         WaitSeconds 2
         If Timer < startTime Then Exit Do
-        If Timer - startTime >= timeoutSeconds Then Exit Do
+        If Timer - startTime >= (timeoutSeconds - 30) Then Exit Do
     Loop
+
+    ' Fallback: SLDWORKS.EXE /m "macro.swp"
+    LogStep "COM RunMacro failed — falling back to SLDWORKS.EXE /m"
+    DeleteIfExists MACRO_STARTED_FILE
+    DeleteIfExists MACRO_ERROR_FILE
+    On Error Resume Next
+    Set shell = CreateObject("WScript.Shell")
+    shell.Run """" & SW_EXE & """ /m """ & macroPath & """", 1, False
+    On Error GoTo 0
+    waitStart = Timer
+    Do
+        If fso.FileExists(MACRO_STARTED_FILE) Then
+            LogStep "macro acknowledged STARTED via /m fallback"
+            RunMacroWithRetry = True
+            Exit Function
+        End If
+        If fso.FileExists(MACRO_ERROR_FILE) Then
+            LogStep "macro wrote ERROR via /m fallback: " & MACRO_ERROR_FILE
+            RunMacroWithRetry = True
+            Exit Function
+        End If
+        WaitSeconds 1
+        If Timer < waitStart Then Exit Do
+        If Timer - waitStart >= 45 Then Exit Do
+    Loop
+
+    LogStep "HINT: Recompile Module6121.bas -> Module6121.swp in SolidWorks VBA, save to " & LOCAL_WORKSPACE_ROOT
+    LogStep "HINT: Tools > Options > System Options > Macro — enable macros / trusted path"
 End Function
 
 Sub WaitSeconds(ByVal sec)
