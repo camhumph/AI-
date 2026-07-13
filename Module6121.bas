@@ -36,7 +36,7 @@ Private Const PRIVATE_DATA_ROOT As String = "C:\CMS_Local_Workspace\Matching"
 Private Const FORCE_LOCAL_PUBLISH As Boolean = False         ' True = always use the PRIVATE local folder
 Private Const PUBLISH_OUTPUTS As Boolean = True              ' copy signature/sheets/images to the matching folder for Elgin
 Private Const DELETE_EXTRACTED_ZIP_AFTER_FLATTEN As Boolean = True
-Private Const SYNC_COMPLETED_JOB_TO_NETWORK As Boolean = True  ' completed local package copied back to the source job folder
+Private Const SYNC_COMPLETED_JOB_TO_NETWORK As Boolean = False  ' completed local package copied back to the source job folder (off while testing)
 Private Const WRITE_PCS_NAMING_ANALYSIS As Boolean = False
 ' Always write the Qwen-parity stack / leader-pin position analysis (lightweight CSV).
 Private Const WRITE_STACK_LEADERPIN_ANALYSIS As Boolean = True
@@ -3043,6 +3043,149 @@ ErrHandler:
     Resume CleanExit
 End Sub
 
+Private Sub PrepareAssemblyVisibilityFast(ByVal model As Object)
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+
+    Dim errs As Long
+    swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+    Set model = swApp.ActiveDoc
+
+    If model Is Nothing Then Exit Sub
+
+    swApp.UserControl = True
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+
+    If Not swView Is Nothing Then
+        swView.EnableGraphicsUpdate = True
+    End If
+
+    model.ClearSelection2 True
+
+    If model.GetType = swDocASSEMBLY Then
+        ' Fast: do not resolve/unsuppress all here.
+        ShowAllAssemblyComponents model
+    ElseIf model.GetType = swDocPART Then
+        ShowAllPartBodies model
+    End If
+
+    model.GraphicsRedraw2
+    DoEvents
+End Sub
+
+Private Sub PrepareModelForJpegCapture(ByVal model As Object, _
+                                       Optional ByVal showEverything As Boolean = False)
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+    If swApp Is Nothing Then Exit Sub
+
+    ' JPG capture needs real visible graphics.
+    swApp.Visible = True
+    swApp.UserControl = True
+
+    Dim errs As Long
+    swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+    Set model = swApp.ActiveDoc
+
+    If model Is Nothing Then Exit Sub
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+
+    If Not swView Is Nothing Then
+        swView.EnableGraphicsUpdate = True
+    End If
+
+    model.FeatureManager.EnableFeatureTree = True
+    model.ClearSelection2 True
+
+    If showEverything Then
+        If model.GetType = swDocASSEMBLY Then
+            ShowAllAssemblyComponents model
+            ShowAllBodiesInAssemblyComponents model
+        ElseIf model.GetType = swDocPART Then
+            ShowAllPartBodies model
+        End If
+    End If
+
+    ' Shaded mode is much safer for screenshots than wireframe/hidden-line.
+    Err.Clear
+    model.ViewDisplayShaded
+    Err.Clear
+
+    model.ViewZoomtofit2
+    model.GraphicsRedraw2
+    DoEvents
+    WaitMilliseconds 500
+
+    model.ViewZoomtofit2
+    model.GraphicsRedraw2
+    DoEvents
+    WaitMilliseconds 500
+End Sub
+
+Private Sub ShowAllBodiesInAssemblyComponents(ByVal assyModel As Object)
+On Error Resume Next
+
+    If assyModel Is Nothing Then Exit Sub
+    If assyModel.GetType <> swDocASSEMBLY Then Exit Sub
+
+    Dim vComps As Variant
+    vComps = assyModel.GetComponents(False)
+
+    If IsEmpty(vComps) Then Exit Sub
+    If IsArray(vComps) = False Then Exit Sub
+
+    Dim i As Long
+    Dim comp As Object
+    Dim partDoc As Object
+
+    For i = 0 To UBound(vComps)
+
+        Set comp = vComps(i)
+
+        If Not comp Is Nothing Then
+            If comp.IsSuppressed = False Then
+
+                Set partDoc = comp.GetModelDoc2
+
+                If Not partDoc Is Nothing Then
+                    If partDoc.GetType = swDocPART Then
+                        ShowAllPartBodies partDoc
+                    End If
+                End If
+
+            End If
+        End If
+
+    Next i
+End Sub
+
+Private Sub ShowAllPartBodies(ByVal partModel As Object)
+On Error Resume Next
+
+    If partModel Is Nothing Then Exit Sub
+    If partModel.GetType <> swDocPART Then Exit Sub
+
+    Dim vBodies As Variant
+    vBodies = partModel.GetBodies2(swSolidBody, False)
+
+    If IsEmpty(vBodies) Then Exit Sub
+    If IsArray(vBodies) = False Then Exit Sub
+
+    Dim i As Long
+
+    For i = 0 To UBound(vBodies)
+        If Not vBodies(i) Is Nothing Then
+            vBodies(i).Hide2 False
+        End If
+    Next i
+End Sub
+
 Private Sub ForceViewRedrawForImage(ByVal model As Object)
 On Error Resume Next
 
@@ -3248,7 +3391,7 @@ On Error GoTo ErrHandler
                 " of " & BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF & _
                 ". Falling back to full visible native DXF."
 
-        PrepareAssemblyForFullStlExport swModel
+        PrepareAssemblyVisibilityFast swModel
 
         CreateProjectedDxfFromNativePath nativeSourcePath, dxfPath, "BASE", _
                                          CMS_TOP_VIEW_NAME, "*Top", False, True
@@ -3270,7 +3413,7 @@ On Error GoTo ErrHandler
 
     LogLine "Creating BASE DXF without Pyropel. Selected base component count=" & keepNames.Count
 
-    PrepareAssemblyForFullStlExport swModel
+    PrepareAssemblyVisibilityFast swModel
 
     If HideAllExceptComponentNamesOnce(swModel, keepNames, hiddenNames) = False Then
         LogLine "WARNING: Could not isolate base components for no-Pyropel DXF; falling back to full native DXF."
@@ -3497,35 +3640,48 @@ On Error GoTo ErrHandler
     If baseName = "" Then baseName = CurrentJobNumber
     EnsureFolderDeep outputFolder
 
-    UnsuppressAllAssemblyComponents swModel
-    ShowAllAssemblyComponents swModel
+    PrepareAssemblyVisibilityFast swModel
 
     On Error Resume Next
     swApp.Visible = True
     On Error GoTo ErrHandler
+
     RestoreMainViewportGraphics
-    ApplyCmsTopView swModel
 
     Dim isoPath As String
     Dim backIsoPath As String
+
     isoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " ISO.jpg")
     backIsoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " BACK ISO.jpg")
 
+    ' FRONT ISO
     swModel.ShowNamedView2 "*Isometric", 7
-    ForceViewRedrawForImage swModel
-    SaveViewAsImage swModel, isoPath
-    LogLine "Saved front ISO jpg (STANDARD full assembly): " & isoPath
-    LogFileExistsAndSize "ISO JPG", isoPath
+    PrepareModelForJpegCapture swModel, True
 
-    ' BACK ISO = spin 180 about VERTICAL axis (top plate stays up).
+    If SaveViewAsImage(swModel, isoPath) Then
+        LogLine "Saved front ISO jpg (STANDARD full assembly): " & isoPath
+    Else
+        LogLine "WARNING: front ISO jpg failed: " & isoPath
+    End If
+
+    ' BACK ISO
     swModel.ShowNamedView2 "*Isometric", 7
+    PrepareModelForJpegCapture swModel, True
+
     Dim swView As Object
     Set swView = swModel.ActiveView
-    If Not swView Is Nothing Then swView.RotateAboutCenter 0#, PI_VALUE
-    ForceViewRedrawForImage swModel
-    SaveViewAsImage swModel, backIsoPath
-    LogLine "Saved back ISO jpg (STANDARD full assembly): " & backIsoPath
-    LogFileExistsAndSize "BACK ISO JPG", backIsoPath
+
+    If Not swView Is Nothing Then
+        swView.RotateAboutCenter 0#, PI_VALUE
+    End If
+
+    PrepareModelForJpegCapture swModel, True
+
+    If SaveViewAsImage(swModel, backIsoPath) Then
+        LogLine "Saved back ISO jpg (STANDARD full assembly): " & backIsoPath
+    Else
+        LogLine "WARNING: back ISO jpg failed: " & backIsoPath
+    End If
 
     swModel.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     ApplyCmsTopView swModel
@@ -3554,10 +3710,12 @@ On Error GoTo ErrHandler
     Set hiddenNames = Nothing
     Dim keepNames As Collection
     Set keepNames = Nothing
+    Dim captureShowEverything As Boolean
+    captureShowEverything = False
 
     If swModel.GetType = swDocASSEMBLY Then
 
-        PrepareAssemblyForFullStlExport swModel
+        PrepareAssemblyVisibilityFast swModel
 
         Set keepNames = BuildBaseDxfKeepComponentNames()
 
@@ -3570,24 +3728,31 @@ On Error GoTo ErrHandler
 
                 If HideAllExceptComponentNamesOnce(swModel, keepNames, hiddenNames) Then
                     LogLine "ISO JPG: BMS base components isolated. keep=" & keepNames.Count
+                    captureShowEverything = False
                 Else
                     LogLine "ISO JPG: could not isolate BMS base components; capturing full visible assembly."
                     Set hiddenNames = Nothing
-                    PrepareAssemblyForFullStlExport swModel
+                    PrepareAssemblyVisibilityFast swModel
+                    PrepareModelForJpegCapture swModel, True
+                    captureShowEverything = True
                 End If
 
             Else
 
                 LogLine "ISO JPG: BMS keep-list incomplete or isolation disabled; capturing full visible assembly."
                 Set hiddenNames = Nothing
-                PrepareAssemblyForFullStlExport swModel
+                PrepareAssemblyVisibilityFast swModel
+                PrepareModelForJpegCapture swModel, True
+                captureShowEverything = True
 
             End If
 
         Else
 
             LogLine "ISO JPG: BMS keep-list unavailable; capturing full visible assembly."
-            PrepareAssemblyForFullStlExport swModel
+            PrepareAssemblyVisibilityFast swModel
+            PrepareModelForJpegCapture swModel, True
+            captureShowEverything = True
 
         End If
 
@@ -3596,29 +3761,43 @@ On Error GoTo ErrHandler
     On Error Resume Next
     swApp.Visible = True
     On Error GoTo ErrHandler
+
     RestoreMainViewportGraphics
-    ApplyCmsTopView swModel
 
     Dim isoPath As String
     Dim backIsoPath As String
+
     isoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " ISO.jpg")
     backIsoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " BACK ISO.jpg")
 
+    ' FRONT ISO
     swModel.ShowNamedView2 "*Isometric", 7
-    ForceViewRedrawForImage swModel
-    SaveViewAsImage swModel, isoPath
-    LogLine "Saved front ISO jpg (no Pyropel): " & isoPath
-    LogFileExistsAndSize "ISO JPG", isoPath
+    PrepareModelForJpegCapture swModel, captureShowEverything
 
-    ' BACK ISO = spin 180 about VERTICAL axis (top plate stays up).
+    If SaveViewAsImage(swModel, isoPath) Then
+        LogLine "Saved front ISO jpg: " & isoPath
+    Else
+        LogLine "WARNING: front ISO jpg failed: " & isoPath
+    End If
+
+    ' BACK ISO
     swModel.ShowNamedView2 "*Isometric", 7
+    PrepareModelForJpegCapture swModel, captureShowEverything
+
     Dim swView As Object
     Set swView = swModel.ActiveView
-    If Not swView Is Nothing Then swView.RotateAboutCenter 0#, PI_VALUE
-    ForceViewRedrawForImage swModel
-    SaveViewAsImage swModel, backIsoPath
-    LogLine "Saved back ISO jpg (no Pyropel): " & backIsoPath
-    LogFileExistsAndSize "BACK ISO JPG", backIsoPath
+
+    If Not swView Is Nothing Then
+        swView.RotateAboutCenter 0#, PI_VALUE
+    End If
+
+    PrepareModelForJpegCapture swModel, captureShowEverything
+
+    If SaveViewAsImage(swModel, backIsoPath) Then
+        LogLine "Saved back ISO jpg: " & backIsoPath
+    Else
+        LogLine "WARNING: back ISO jpg failed: " & backIsoPath
+    End If
 
 CleanExit:
     On Error Resume Next
@@ -4243,16 +4422,57 @@ ErrHandler:
     ReorientAsciiStlFileToMatrix = False
 End Function
 
-Private Sub SaveViewAsImage(ByVal model As Object, ByVal imagePath As String)
+Private Function SaveViewAsImage(ByVal model As Object, ByVal imagePath As String) As Boolean
 On Error GoTo ErrHandler
+
+    SaveViewAsImage = False
+
+    If model Is Nothing Then Exit Function
+    If imagePath = "" Then Exit Function
+
     Dim errs As Long
     Dim warns As Long
-    model.Extension.SaveAs3 imagePath, swSaveAsCurrentVersion, swSaveAsOptions_Silent, Nothing, Nothing, errs, warns
+
+    swApp.Visible = True
+    swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+    Set model = swApp.ActiveDoc
+
+    If model Is Nothing Then Exit Function
+
+    PrepareModelForJpegCapture model, False
+
+    LogLine "Saving JPG image: " & imagePath
+
+    model.Extension.SaveAs3 imagePath, _
+                            swSaveAsCurrentVersion, _
+                            swSaveAsOptions_Silent, _
+                            Nothing, Nothing, errs, warns
+
     LogLine "Image save (" & imagePath & ") errs=" & errs & " warns=" & warns
-    Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim i As Long
+    For i = 1 To 20
+        If fso.FileExists(imagePath) Then Exit For
+        WaitMilliseconds 250
+        DoEvents
+    Next i
+
+    If fso.FileExists(imagePath) Then
+        LogLine "JPG OK: " & imagePath & " size=" & CStr(fso.GetFile(imagePath).Size) & " bytes"
+        SaveViewAsImage = True
+    Else
+        LogLine "WARNING: JPG was not created: " & imagePath
+    End If
+
+    Exit Function
+
 ErrHandler:
     LogLine "SaveViewAsImage error: " & Err.Description
-End Sub
+    SaveViewAsImage = False
+End Function
 
 ' ============================================================
 Private Sub RunVisualMoldInspection()
