@@ -77,6 +77,12 @@ Private Const BMS_STL_EXPORT_QUOTED_BASE_ONLY As Boolean = True
 ' the full assembly STL. This prevents accidentally sending a 100+ part STL.
 Private Const BMS_STL_SKIP_IF_KEEP_LIST_INCOMPLETE As Boolean = True
 
+' Export STL as one merged STL file containing only quoted/steel components.
+Private Const STL_EXPORT_STEEL_COMPONENTS_ONLY As Boolean = True
+
+' Clean accidental component STL shards from the job folder after the merged STL is made.
+Private Const CLEAN_EXTRA_STL_SHARDS_IN_JOB_FOLDER As Boolean = True
+
 ' If True, BMS ISO/DXF hides everything except TCP/BCP/holders/pots.
 ' If the keep-list is incomplete, macro falls back to full visible assembly
 ' instead of making a bad 2-part picture/DXF.
@@ -94,6 +100,7 @@ Private Const FORCE_BINARY_STL_EXPORT As Boolean = True
 Private Const swSTLBinaryFormat As Long = 69
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
+Private Const CMS_FRONT_VIEW_NAME As String = "CMS_FRONT"
 Private Const CMS_BASE_TOP_VIEW_NAME As String = "*Bottom"
 Private Const CMS_BASE_TOP_VIEW_ID As Long = 6
 Private Const CMS_TOP_ROTATE_Z_STEPS As Long = 0
@@ -369,6 +376,22 @@ Private Const STD_RAIL_MIN_THICK As Double = 1#
 Private Const STD_EJECTOR_MIN_FOOT_FRAC As Double = 0.15
 Private Const STD_A_B_GRADE As String = "P20"        ' A & B plates default to P20 (#3 block)
 Private Const STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK As Boolean = False
+
+' For PCS / standard mold bases, quote only the primary steel stack:
+' A Plate, B Plate, 2 Rails, Ejector Plate, and Ejector Retainer/Backup Plate.
+Private Const STD_QUOTE_PRIMARY_PCS_STACK_ONLY As Boolean = True
+Private Const STD_QUOTE_INCLUDE_CLAMP_PLATES As Boolean = False
+Private Const STD_QUOTE_RAIL_QTY As Long = 2
+Private Const STD_QUOTE_KEEP_ONE_A_PLATE As Boolean = True
+Private Const STD_QUOTE_KEEP_ONE_B_PLATE As Boolean = True
+Private Const STD_QUOTE_KEEP_ONE_EJECTOR_PLATE As Boolean = True
+Private Const STD_QUOTE_KEEP_ONE_EJECTOR_BACKUP As Boolean = True
+
+' BMS TCP/BCP mass/volume sanity check.
+Private Const BMS_TCP_EXPECT_LIGHTER_THAN_BCP As Boolean = True
+Private Const BMS_TCP_BCP_FORCE_LIGHTER_TCP As Boolean = False
+Private Const BMS_TCP_BCP_MASS_DIFF_FRAC As Double = 0.01
+
 Private Const PULLCORE_RATE As Double = 88#          ' pullcore/key quote = total cubic inches x this
 Private Const PULLCORE_QUOTE_START_ROW As Long = 218 ' Quote sheet row where the pull-core category begins
 Private Const PULLCORE_PRICE_FILE As String = "Pullcore Prices.csv"
@@ -439,6 +462,7 @@ Private StdL() As Double
 Private StdQty() As Long
 Private StdGrade() As String
 Private StdQuoteRow() As Long
+Private StdCadIndex() As Long   ' exact CAD part index used for this standard steel/quote row
 Private StdCount As Long
 Private gStdRoleByPart() As String
 Private gStdStackAxis As Integer
@@ -782,6 +806,8 @@ On Error GoTo ErrHandler
     ClassifyPotBlockPlatesFromCad
     LogLine "CAD PartCount=" & PartCount
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    WriteAllCadComponentsDebugCsv CurrentJobFolder & "\CAD_All_Components_Debug_PRE_ORIENT.csv"
+    WriteJobFileInventoryCsv CurrentJobFolder, CurrentJobFolder & "\Job_File_Inventory.csv"
     LogDone "Scan active CAD/XT parts"
     DoEvents
 
@@ -903,6 +929,13 @@ On Error GoTo ErrHandler
     ComputePullcoreQuote
     ComputePurchasedQuote
 
+    If isStd Then
+        LogStart "Apply primary PCS standard steel filter before STL"
+        ApplyPrimaryPcsStandardQuoteFilter
+        WriteStandardQuoteRowsDebugCsv CurrentJobFolder & "\Standard_Quote_Rows_Debug_BEFORE_STL.csv"
+        LogDone "Apply primary PCS standard steel filter before STL"
+    End If
+
     ' Export FIRST so DXF EnsureNativeDxfSourceUsesCmsTop locks the view frame.
     LogStart "Export base package (active CAD)"
     ExportBasePackage CurrentJobFolder & "\base"
@@ -918,7 +951,11 @@ On Error GoTo ErrHandler
 
     If isStd Then
         RefreshStandardPlateDimsFromCurrentPartRoles
+        ApplyPrimaryPcsStandardQuoteFilter
+        WriteStandardQuoteRowsDebugCsv CurrentJobFolder & "\Standard_Quote_Rows_Debug.csv"
     End If
+
+    WriteAllCadComponentsDebugCsv CurrentJobFolder & "\CAD_All_Components_Debug_FINAL.csv"
 
     LogDone "Assign CMS view-frame dims after DXF"
 
@@ -1485,6 +1522,8 @@ On Error GoTo ErrHandler
     ClassifyPotBlockPlatesFromCad
     LogLine "CAD PartCount=" & PartCount
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    WriteAllCadComponentsDebugCsv CurrentJobFolder & "\CAD_All_Components_Debug_PRE_ORIENT.csv"
+    WriteJobFileInventoryCsv CurrentJobFolder, CurrentJobFolder & "\Job_File_Inventory.csv"
     LogDone "Scan CAD parts"
 
     LogStart "Find + read BOM"
@@ -1584,6 +1623,13 @@ On Error GoTo ErrHandler
     ComputePullcoreQuote
     ComputePurchasedQuote
 
+    If isStd Then
+        LogStart "Apply primary PCS standard steel filter before STL"
+        ApplyPrimaryPcsStandardQuoteFilter
+        WriteStandardQuoteRowsDebugCsv CurrentJobFolder & "\Standard_Quote_Rows_Debug_BEFORE_STL.csv"
+        LogDone "Apply primary PCS standard steel filter before STL"
+    End If
+
     ' Fast mode must skip heavy SolidWorks prep for BOTH standard and BMS jobs.
     If FAST_QUOTE_MODE Then
 
@@ -1621,7 +1667,11 @@ On Error GoTo ErrHandler
 
     If isStd Then
         RefreshStandardPlateDimsFromCurrentPartRoles
+        ApplyPrimaryPcsStandardQuoteFilter
+        WriteStandardQuoteRowsDebugCsv CurrentJobFolder & "\Standard_Quote_Rows_Debug.csv"
     End If
+
+    WriteAllCadComponentsDebugCsv CurrentJobFolder & "\CAD_All_Components_Debug_FINAL.csv"
 
     LogDone "Assign CMS view-frame dims after DXF"
 
@@ -2612,13 +2662,9 @@ On Error GoTo ErrHandler
 
         LogLine "Gemini1 matched-pair orientation failed. Trying geometry fallback before *Bottom fallback."
 
-        If oriented = False Then
-            oriented = OrientFromPairIndices(model, _
-                        gIdxTCP, _
-                        gIdxBCP, _
-                        "Geometry fallback TCP/BCP")
-        End If
-
+        ' Geometry fallback should prefer holder/pot pairs first.
+        ' For generic XT imports, the thin clamp pair can be labeled TCP/BCP backward,
+        ' but ID/OD holders and pots usually define the true top-side better.
         If oriented = False Then
             oriented = OrientFromPairIndices(model, _
                         gIdxIDH, _
@@ -2631,6 +2677,13 @@ On Error GoTo ErrHandler
                         gIdxIDP, _
                         gIdxODP, _
                         "Geometry fallback TOP/BOTTOM POT")
+        End If
+
+        If oriented = False Then
+            oriented = OrientFromPairIndices(model, _
+                        gIdxTCP, _
+                        gIdxBCP, _
+                        "Geometry fallback TCP/BCP")
         End If
 
     End If
@@ -2854,6 +2907,37 @@ ErrHandler:
     SetStandardBaseTopFromClassifiedStack = False
 End Function
 
+Private Function FindNextStdRolePart(ByVal wantedKey As String, ByRef usedPart() As Boolean) As Long
+On Error GoTo ErrHandler
+
+    FindNextStdRolePart = 0
+
+    If wantedKey = "" Then Exit Function
+    If PartCount < 1 Then Exit Function
+    If Not StdRoleArrayReady() Then Exit Function
+
+    Dim p As Long
+    Dim roleKey As String
+
+    For p = 1 To PartCount
+        If p <= UBound(usedPart) Then
+            If Not usedPart(p) Then
+                roleKey = NormalizeKey(StdCadRole(p))
+
+                If roleKey = wantedKey Then
+                    FindNextStdRolePart = p
+                    Exit Function
+                End If
+            End If
+        End If
+    Next p
+
+    Exit Function
+
+ErrHandler:
+    FindNextStdRolePart = 0
+End Function
+
 Private Sub RefreshStandardPlateDimsFromCurrentPartRoles()
 On Error GoTo ErrHandler
 
@@ -2861,11 +2945,15 @@ On Error GoTo ErrHandler
     If PartCount < 1 Then Exit Sub
     If Not StdRoleArrayReady() Then Exit Sub
 
+    Dim usedPart() As Boolean
+    ReDim usedPart(1 To PartCount)
+
     Dim i As Long
     Dim p As Long
     Dim wantedKey As String
     Dim roleKey As String
     Dim foundIdx As Long
+
     Dim railCount As Long
     Dim railIdx As Long
 
@@ -2874,11 +2962,21 @@ On Error GoTo ErrHandler
 
     For p = 1 To PartCount
         roleKey = NormalizeKey(StdCadRole(p))
+
         If roleKey = "RAILS" Then
             railCount = railCount + 1
             If railIdx = 0 Then railIdx = p
         End If
     Next p
+
+    ' Mark exact indexed parts as used first.
+    For i = 1 To StdCount
+        If StdCadIndex(i) >= 1 And StdCadIndex(i) <= PartCount Then
+            If NormalizeKey(stdName(i)) <> "RAILS" Then
+                usedPart(StdCadIndex(i)) = True
+            End If
+        End If
+    Next i
 
     For i = 1 To StdCount
 
@@ -2899,13 +2997,18 @@ On Error GoTo ErrHandler
 
         Else
 
-            For p = 1 To PartCount
-                roleKey = NormalizeKey(StdCadRole(p))
-                If roleKey = wantedKey Then
-                    foundIdx = p
-                    Exit For
+            If StdCadIndex(i) >= 1 And StdCadIndex(i) <= PartCount Then
+                foundIdx = StdCadIndex(i)
+            End If
+
+            If foundIdx = 0 Then
+                foundIdx = FindNextStdRolePart(wantedKey, usedPart)
+
+                If foundIdx > 0 Then
+                    usedPart(foundIdx) = True
+                    StdCadIndex(i) = foundIdx
                 End If
-            Next p
+            End If
 
             If foundIdx > 0 Then
                 StdT(i) = parts(foundIdx).Thickness
@@ -2913,8 +3016,11 @@ On Error GoTo ErrHandler
                 StdL(i) = parts(foundIdx).Length
 
                 LogLine "STANDARD dims refreshed after CMS view frame: " & stdName(i) & _
-                        " <- idx " & foundIdx & _
-                        " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i)
+                        " <- exact idx " & foundIdx & _
+                        " comp='" & parts(foundIdx).componentName & "'" & _
+                        " T=" & StdT(i) & _
+                        " W=" & StdW(i) & _
+                        " L=" & StdL(i)
             End If
 
         End If
@@ -2925,6 +3031,214 @@ On Error GoTo ErrHandler
 
 ErrHandler:
     LogLine "RefreshStandardPlateDimsFromCurrentPartRoles error: " & Err.Description
+End Sub
+
+Private Function StdRowVolume(ByVal rowIdx As Long) As Double
+    If rowIdx < 1 Or rowIdx > StdCount Then Exit Function
+    StdRowVolume = StdT(rowIdx) * StdW(rowIdx) * StdL(rowIdx)
+End Function
+
+Private Function StdRowScoreForPrimary(ByVal rowIdx As Long) As Double
+    If rowIdx < 1 Or rowIdx > StdCount Then Exit Function
+    StdRowScoreForPrimary = StdRowVolume(rowIdx) + (StdT(rowIdx) * 100000#)
+End Function
+
+Private Function BestStdRowByRole(ByVal roleKey As String) As Long
+    Dim i As Long
+    Dim k As String
+    Dim bestI As Long
+    Dim bestScore As Double
+    Dim sc As Double
+
+    roleKey = NormalizeKey(roleKey)
+    bestI = 0
+    bestScore = -1E+99
+
+    For i = 1 To StdCount
+        k = NormalizeKey(stdName(i))
+        If k = roleKey Then
+            sc = StdRowScoreForPrimary(i)
+            If sc > bestScore Then
+                bestScore = sc
+                bestI = i
+            End If
+        End If
+    Next i
+
+    BestStdRowByRole = bestI
+End Function
+
+Private Function BestStdRailPartIndex() As Long
+    Dim p As Long
+    Dim bestIdx As Long
+    Dim bestScore As Double
+    Dim sc As Double
+
+    bestIdx = 0
+    bestScore = -1E+99
+
+    If PartCount < 1 Then Exit Function
+    If Not StdRoleArrayReady() Then Exit Function
+
+    For p = 1 To PartCount
+        If NormalizeKey(StdCadRole(p)) = "RAILS" Then
+            sc = parts(p).Length * 100000# + parts(p).BBoxVolume
+            If sc > bestScore Then
+                bestScore = sc
+                bestIdx = p
+            End If
+        End If
+    Next p
+
+    BestStdRailPartIndex = bestIdx
+End Function
+
+Private Sub AddStdRowToTemp(ByVal srcRow As Long, _
+                            ByRef nCount As Long, _
+                            ByRef nName() As String, _
+                            ByRef nT() As Double, _
+                            ByRef nW() As Double, _
+                            ByRef nL() As Double, _
+                            ByRef nQty() As Long, _
+                            ByRef nGrade() As String, _
+                            ByRef nQuoteRow() As Long, _
+                            ByRef nCadIndex() As Long)
+    If srcRow < 1 Or srcRow > StdCount Then Exit Sub
+
+    nCount = nCount + 1
+    nName(nCount) = stdName(srcRow)
+    nT(nCount) = StdT(srcRow)
+    nW(nCount) = StdW(srcRow)
+    nL(nCount) = StdL(srcRow)
+    nQty(nCount) = StdQty(srcRow)
+    nGrade(nCount) = StdGrade(srcRow)
+    nQuoteRow(nCount) = StdQuoteRow(srcRow)
+    nCadIndex(nCount) = StdCadIndex(srcRow)
+End Sub
+
+Private Sub AddRailRowToTemp(ByRef nCount As Long, _
+                             ByRef nName() As String, _
+                             ByRef nT() As Double, _
+                             ByRef nW() As Double, _
+                             ByRef nL() As Double, _
+                             ByRef nQty() As Long, _
+                             ByRef nGrade() As String, _
+                             ByRef nQuoteRow() As Long, _
+                             ByRef nCadIndex() As Long)
+    Dim railIdx As Long
+    railIdx = BestStdRailPartIndex()
+    If railIdx <= 0 Then Exit Sub
+
+    nCount = nCount + 1
+    nName(nCount) = "Rails"
+    nT(nCount) = parts(railIdx).Thickness
+    nW(nCount) = parts(railIdx).Width
+    nL(nCount) = parts(railIdx).Length
+    nQty(nCount) = STD_QUOTE_RAIL_QTY
+    nGrade(nCount) = "A36"
+    nQuoteRow(nCount) = StdQuoteRowFor("RAILS", "A36")
+    nCadIndex(nCount) = railIdx
+
+    LogLine "STANDARD primary-stack filter: Rails kept from idx " & railIdx & _
+            " qty=" & STD_QUOTE_RAIL_QTY & _
+            " comp='" & parts(railIdx).componentName & "'" & _
+            " T=" & nT(nCount) & " W=" & nW(nCount) & " L=" & nL(nCount)
+End Sub
+
+Private Sub ApplyPrimaryPcsStandardQuoteFilter()
+On Error GoTo ErrHandler
+
+    If Not STD_QUOTE_PRIMARY_PCS_STACK_ONLY Then Exit Sub
+    If StdCount < 1 Then Exit Sub
+
+    Dim nName() As String
+    Dim nT() As Double
+    Dim nW() As Double
+    Dim nL() As Double
+    Dim nQty() As Long
+    Dim nGrade() As String
+    Dim nQuoteRow() As Long
+    Dim nCadIndex() As Long
+    Dim nCount As Long
+
+    ReDim nName(1 To 80)
+    ReDim nT(1 To 80)
+    ReDim nW(1 To 80)
+    ReDim nL(1 To 80)
+    ReDim nQty(1 To 80)
+    ReDim nGrade(1 To 80)
+    ReDim nQuoteRow(1 To 80)
+    ReDim nCadIndex(1 To 80)
+
+    Dim rA As Long
+    Dim rB As Long
+    Dim rEj As Long
+    Dim rEjBack As Long
+    Dim rTopClamp As Long
+    Dim rBottomClamp As Long
+
+    rA = BestStdRowByRole("APLATE")
+    rB = BestStdRowByRole("BPLATE")
+    rEj = BestStdRowByRole("EJECTORPLATE")
+    rEjBack = BestStdRowByRole("BOTTOMEJECTORPLATE")
+
+    If STD_QUOTE_INCLUDE_CLAMP_PLATES Then
+        rTopClamp = BestStdRowByRole("TOPCLAMPPLATE")
+        rBottomClamp = BestStdRowByRole("BOTTOMCLAMPPLATE")
+    End If
+
+    If rB > 0 Then AddStdRowToTemp rB, nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+    If rA > 0 Then AddStdRowToTemp rA, nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+
+    If STD_QUOTE_INCLUDE_CLAMP_PLATES Then
+        If rTopClamp > 0 Then AddStdRowToTemp rTopClamp, nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+        If rBottomClamp > 0 Then AddStdRowToTemp rBottomClamp, nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+    Else
+        If rTopClamp > 0 Or rBottomClamp > 0 Then
+            LogLine "STANDARD primary-stack filter: clamp plates intentionally skipped for PCS standard quote."
+        End If
+    End If
+
+    If rEjBack > 0 Then AddStdRowToTemp rEjBack, nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+    If rEj > 0 Then AddStdRowToTemp rEj, nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+
+    AddRailRowToTemp nCount, nName, nT, nW, nL, nQty, nGrade, nQuoteRow, nCadIndex
+
+    LogLine "STANDARD primary-stack filter: StdCount " & StdCount & " -> " & nCount
+
+    ReDim stdName(1 To 80)
+    ReDim StdT(1 To 80)
+    ReDim StdW(1 To 80)
+    ReDim StdL(1 To 80)
+    ReDim StdQty(1 To 80)
+    ReDim StdGrade(1 To 80)
+    ReDim StdQuoteRow(1 To 80)
+    ReDim StdCadIndex(1 To 80)
+
+    Dim i As Long
+    For i = 1 To nCount
+        stdName(i) = nName(i)
+        StdT(i) = nT(i)
+        StdW(i) = nW(i)
+        StdL(i) = nL(i)
+        StdQty(i) = nQty(i)
+        StdGrade(i) = nGrade(i)
+        StdQuoteRow(i) = nQuoteRow(i)
+        StdCadIndex(i) = nCadIndex(i)
+
+        LogLine "  KEEP STD " & i & ": " & stdName(i) & _
+                " qty=" & StdQty(i) & _
+                " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i) & _
+                " cadIdx=" & StdCadIndex(i) & _
+                IIf(StdCadIndex(i) > 0, " comp='" & parts(StdCadIndex(i)).componentName & "'", "")
+    Next i
+
+    StdCount = nCount
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ApplyPrimaryPcsStandardQuoteFilter error: " & Err.Description
 End Sub
 
 ' Standard-base front (non-BMS): shop molds face the operator with the long
@@ -3036,6 +3350,10 @@ On Error GoTo ErrHandler
     If PersistCurrentViewAsStandardFront(model) Then
         model.ShowNamedView2 "*Front", 1
         StabilizeActiveView model, 50
+
+        SaveCurrentViewAsNamed model, CMS_FRONT_VIEW_NAME
+        LogLine "CMS_FRONT named view saved from corrected STANDARD *Front."
+
         LogLine "Standard front complete. Persisted as SolidWorks *Front (" & candidateViewName & " candidate)."
         DefineStandardFrontFromRailsAndFootprint = True
     Else
@@ -3535,33 +3853,28 @@ On Error GoTo ErrHandler
 
     ' ============================================================
     ' STL FIRST:
-    ' For STANDARD bases: export normal full/base STL.
-    ' For BMS holder-pot bases: export ONLY the quoted base components:
-    '   TCP, BCP, ID Holder, OD Holder, ID Pot, OD Pot.
-    ' This excludes hardware/pins/bushings/straps/insulation and avoids slow
-    ' 100+ part STL merges.
+    ' Export ONE merged STL containing only quoted/steel components.
+    ' This avoids SolidWorks component STL shards in the job folder.
     ' ============================================================
     If CREATE_FULL_ASSEMBLY_STL Then
 
         Dim stlCreated As Boolean
         stlCreated = False
 
-        If swModel.GetType = swDocASSEMBLY And _
-           (Not gJobIsStandardBase) And _
-           BMS_STL_EXPORT_QUOTED_BASE_ONLY Then
+        If swModel.GetType = swDocASSEMBLY And STL_EXPORT_STEEL_COMPONENTS_ONLY Then
 
-            LogStart "Export BMS quoted-base STL only"
+            LogStart "Export merged steel-components STL"
 
-            stlCreated = ExportBmsQuotedBaseStlOnly(swModel, stlPath)
+            stlCreated = ExportSteelComponentsMergedStlOnly(swModel, stlPath)
 
             If stlCreated Then
-                LogLine "BMS quoted-base STL written: " & stlPath
-                LogFileExistsAndSize "BMS QUOTED BASE STL", stlPath
+                LogLine "Merged steel-components STL written: " & stlPath
+                LogFileExistsAndSize "MERGED STEEL COMPONENTS STL", stlPath
             Else
-                LogLine "WARNING: BMS quoted-base STL was not created."
+                LogLine "WARNING: merged steel-components STL was not created."
             End If
 
-            LogDone "Export BMS quoted-base STL only"
+            LogDone "Export merged steel-components STL"
 
         Else
 
@@ -3597,7 +3910,10 @@ On Error GoTo ErrHandler
 
         End If
 
-        ' Copy STL into base\ too, but only if it was actually created.
+        If stlCreated Then
+            DeleteStlFilesExcept CurrentJobFolder, stlPath
+        End If
+
         If stlCreated Then
             On Error Resume Next
             If LCase(stlPath) <> LCase(stlBasePath) Then
@@ -3608,7 +3924,6 @@ On Error GoTo ErrHandler
             On Error GoTo ErrHandler
         End If
 
-        ' Light restore before ISO/DXF.
         PrepareAssemblyVisibilityFast swModel
 
     Else
@@ -3616,7 +3931,6 @@ On Error GoTo ErrHandler
         LogLine "FAST QUOTE: skipped STL."
 
     End If
-
     If CREATE_ISO_JPEGS Then
         If gJobIsStandardBase Then
             ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
@@ -4074,6 +4388,9 @@ On Error GoTo ErrHandler
     swModel.ShowNamedView2 "*Isometric", 7
     PrepareModelForJpegCapture swModel, captureShowEverything
 
+    ' Make sure the FRONT ISO actually shows the pot side in front.
+    EnsureBmsIsoShowsPotSideFront swModel
+
     If SaveViewAsImage(swModel, isoPath) Then
         LogLine "Saved front ISO jpg: " & isoPath
     Else
@@ -4083,6 +4400,9 @@ On Error GoTo ErrHandler
     ' BACK ISO
     swModel.ShowNamedView2 "*Isometric", 7
     PrepareModelForJpegCapture swModel, captureShowEverything
+
+    ' Start from the verified front ISO, then flip to the opposite side.
+    EnsureBmsIsoShowsPotSideFront swModel
 
     Dim swView As Object
     Set swView = swModel.ActiveView
@@ -4115,6 +4435,65 @@ CleanExit:
 ErrHandler:
     LogLine "ExportFrontAndBackIsoJpegsWithoutPyropel error: " & Err.Description
     Resume CleanExit
+End Sub
+
+Private Sub EnsureBmsIsoShowsPotSideFront(ByVal model As Object)
+On Error GoTo ErrHandler
+
+    If model Is Nothing Then Exit Sub
+    If gJobIsStandardBase Then Exit Sub
+
+    Dim holderIndexes As Collection
+    Dim potIndexes As Collection
+
+    BuildFrontOrientIndexCollections holderIndexes, potIndexes
+
+    If holderIndexes Is Nothing Or potIndexes Is Nothing Then Exit Sub
+    If holderIndexes.Count = 0 Or potIndexes.Count = 0 Then Exit Sub
+
+    Dim holderAvg As Double
+    Dim holderMin As Double
+    Dim holderMax As Double
+    Dim potAvg As Double
+    Dim potMin As Double
+    Dim potMax As Double
+    Dim delta As Double
+
+    If TryGetPotHolderActiveViewFrontDelta(model, _
+                                           holderIndexes, _
+                                           potIndexes, _
+                                           holderAvg, holderMin, holderMax, _
+                                           potAvg, potMin, potMax, _
+                                           delta) = False Then
+        LogLine "BMS ISO pot-front validation skipped: could not calculate active-view depth."
+        Exit Sub
+    End If
+
+    LogLine "BMS ISO pot-front validation: holderAvg=" & FormatNumberForCsv(holderAvg) & _
+            " potAvg=" & FormatNumberForCsv(potAvg) & _
+            " delta=" & FormatNumberForCsv(delta)
+
+    ' Larger active-view depth means closer to camera/front.
+    If delta <= POT_FRONT_DEPTH_MIN_DELTA_IN Then
+
+        LogLine "BMS ISO view appears flipped: pots are behind holders. Rotating ISO 180 degrees."
+
+        Dim swView As Object
+        Set swView = model.ActiveView
+
+        If Not swView Is Nothing Then
+            swView.RotateAboutCenter 0#, PI_VALUE
+            ForceViewRedrawForImage model
+        End If
+
+    Else
+        LogLine "BMS ISO view OK: pots are closer to camera/front than holders."
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "EnsureBmsIsoShowsPotSideFront error: " & Err.Description
 End Sub
 
 ' Compatibility wrapper — branches on standard vs BMS.
@@ -4280,6 +4659,507 @@ On Error GoTo eh
 eh:
     CountSolidBodiesInPart = 0
 End Function
+
+
+Private Function CollectStlFilesInFolder(ByVal folderPath As String) As Collection
+On Error GoTo ErrHandler
+
+    Dim result As New Collection
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(folderPath) Then
+        Set CollectStlFilesInFolder = result
+        Exit Function
+    End If
+
+    Dim f As Object
+    For Each f In fso.GetFolder(folderPath).Files
+        If LCase$(fso.GetExtensionName(f.path)) = "stl" Then
+            result.Add f.path
+        End If
+    Next f
+
+    Set CollectStlFilesInFolder = result
+    Exit Function
+
+ErrHandler:
+    Set CollectStlFilesInFolder = New Collection
+End Function
+
+Private Function IsValidBinaryStlFile(ByVal stlPath As String, ByRef triCount As Long) As Boolean
+On Error GoTo ErrHandler
+
+    IsValidBinaryStlFile = False
+    triCount = 0
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If stlPath = "" Then Exit Function
+    If Not fso.FileExists(stlPath) Then Exit Function
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open stlPath For Binary Access Read As #f
+
+    Dim hdr As BinaryStlHeader
+    Get #f, 1, hdr
+
+    triCount = hdr.TriangleCount
+
+    If triCount <= 0 Then
+        Close #f
+        Exit Function
+    End If
+
+    Dim expectedLen As Double
+    expectedLen = 84# + CDbl(triCount) * 50#
+
+    If CDbl(LOF(f)) <> expectedLen Then
+        Close #f
+        triCount = 0
+        Exit Function
+    End If
+
+    Close #f
+
+    IsValidBinaryStlFile = True
+    Exit Function
+
+ErrHandler:
+    On Error Resume Next
+    Close #f
+    triCount = 0
+    IsValidBinaryStlFile = False
+End Function
+
+Private Function MergeBinaryStlFilesToOne(ByVal stlFiles As Collection, ByVal outPath As String) As Boolean
+On Error GoTo ErrHandler
+
+    MergeBinaryStlFilesToOne = False
+
+    If stlFiles Is Nothing Then Exit Function
+    If stlFiles.Count < 1 Then Exit Function
+    If outPath = "" Then Exit Function
+
+    Dim validFiles As New Collection
+    Dim totalTris As Long
+    Dim i As Long
+    Dim tc As Long
+    Dim p As String
+
+    totalTris = 0
+
+    For i = 1 To stlFiles.Count
+        p = CStr(stlFiles(i))
+        If IsValidBinaryStlFile(p, tc) Then
+            validFiles.Add p
+            totalTris = totalTris + tc
+        Else
+            LogLine "STL merge: skipping non-binary/invalid STL shard: " & p
+        End If
+    Next i
+
+    If validFiles.Count < 1 Or totalTris <= 0 Then
+        LogLine "STL merge failed: no valid binary STL shards."
+        Exit Function
+    End If
+
+    Dim outF As Integer
+    outF = FreeFile
+
+    Dim outHdr As BinaryStlHeader
+    outHdr.HeaderText = "CMS MERGED STEEL COMPONENT STL"
+    outHdr.TriangleCount = totalTris
+
+    Open outPath For Binary Access Write As #outF
+    Put #outF, 1, outHdr
+
+    Dim inF As Integer
+    Dim inHdr As BinaryStlHeader
+    Dim tri As BinaryStlTriangle
+    Dim t As Long
+
+    For i = 1 To validFiles.Count
+
+        p = CStr(validFiles(i))
+        inF = FreeFile
+
+        Open p For Binary Access Read As #inF
+
+        Get #inF, 1, inHdr
+
+        For t = 0 To inHdr.TriangleCount - 1
+            Get #inF, 85 + t * 50, tri
+            Put #outF, , tri
+        Next t
+
+        Close #inF
+    Next i
+
+    Close #outF
+
+    LogLine "STL merge: merged " & validFiles.Count & " STL shard(s), triangles=" & totalTris & " -> " & outPath
+
+    MergeBinaryStlFilesToOne = (Dir(outPath) <> "")
+    Exit Function
+
+ErrHandler:
+    LogLine "MergeBinaryStlFilesToOne error: " & Err.Description
+    On Error Resume Next
+    Close #inF
+    Close #outF
+    MergeBinaryStlFilesToOne = False
+End Function
+
+Private Function ExportVisibleModelStlToTempAndMerge(ByVal model As Object, _
+                                                     ByVal finalStlPath As String, _
+                                                     ByVal label As String) As Boolean
+On Error GoTo ErrHandler
+
+    ExportVisibleModelStlToTempAndMerge = False
+
+    If model Is Nothing Then Exit Function
+    If finalStlPath = "" Then Exit Function
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim tempFolder As String
+    tempFolder = Environ$("TEMP") & "\CMS_STL_TEMP_" & Format(Now, "yyyymmdd_hhnnss")
+    EnsureFolderDeep tempFolder
+
+    Dim tempStlPath As String
+    tempStlPath = tempFolder & "\CMS_STEEL_COMPONENTS.stl"
+
+    Dim priorOneFile As Boolean
+    Dim oneFileSet As Boolean
+    Dim priorBinary As Long
+    Dim binarySet As Boolean
+
+    oneFileSet = False
+    binarySet = False
+
+    If Not swApp Is Nothing Then
+
+        On Error Resume Next
+
+        priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
+        swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
+        oneFileSet = True
+
+        If FORCE_BINARY_STL_EXPORT Then
+            Err.Clear
+            priorBinary = swApp.GetUserPreferenceIntegerValue(swSTLBinaryFormat)
+            If Err.Number = 0 Then
+                swApp.SetUserPreferenceIntegerValue swSTLBinaryFormat, 1
+                binarySet = True
+                LogLine "STL temp export: binary STL preference forced."
+            Else
+                Err.Clear
+                LogLine "STL temp export: binary preference could not be set."
+            End If
+        End If
+
+        On Error GoTo ErrHandler
+
+    End If
+
+    Dim errs As Long
+    Dim warns As Long
+
+    LogLine "STL temp export: saving visible " & label & " to temp folder:"
+    LogLine "  " & tempStlPath
+
+    model.Extension.SaveAs3 tempStlPath, _
+                            swSaveAsCurrentVersion, _
+                            swSaveAsOptions_Silent, _
+                            Nothing, Nothing, errs, warns
+
+    LogLine "STL temp export save done. Errors=" & errs & " Warnings=" & warns
+
+    Dim stlFiles As Collection
+    Set stlFiles = CollectStlFilesInFolder(tempFolder)
+
+    LogLine "STL temp export produced " & stlFiles.Count & " STL file(s)."
+
+    If stlFiles.Count = 0 Then
+        LogLine "STL temp export failed: no STL files found in temp folder."
+        GoTo CleanExit
+    End If
+
+    If stlFiles.Count = 1 Then
+
+        fso.CopyFile CStr(stlFiles(1)), finalStlPath, True
+        LogLine "STL temp export: single STL copied to final path."
+
+    Else
+
+        If MergeBinaryStlFilesToOne(stlFiles, finalStlPath) = False Then
+            LogLine "STL temp export failed: could not merge component STL shards."
+            GoTo CleanExit
+        End If
+
+    End If
+
+    If MATCH_STUDIO_STL_MATCH_MAIN_BASE_ORIENTATION And POST_ROTATE_STL_TO_CORRECTED_FRONT Then
+
+        If FinalStlCoordFrameReady Then
+            If ReorientStlFileToMatrix(finalStlPath, FinalStlCoordM) Then
+                LogLine "Merged STL post-rotated into corrected final coordinate frame."
+            Else
+                LogLine "WARNING: merged STL post-rotation failed. File still exists."
+            End If
+        Else
+            LogLine "WARNING: final STL coordinate frame not ready; merged STL was not post-rotated."
+        End If
+
+    End If
+
+    ExportVisibleModelStlToTempAndMerge = (Dir(finalStlPath) <> "")
+
+CleanExit:
+    On Error Resume Next
+
+    If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
+    If binarySet Then swApp.SetUserPreferenceIntegerValue swSTLBinaryFormat, priorBinary
+
+    If tempFolder <> "" Then
+        If fso.FolderExists(tempFolder) Then fso.DeleteFolder tempFolder, True
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "ExportVisibleModelStlToTempAndMerge error: " & Err.Description
+    Resume CleanExit
+End Function
+
+Private Sub AddLargestRailComponentsToKeep(ByVal keepNames As Collection, ByVal qtyNeeded As Long)
+On Error GoTo ErrHandler
+
+    If keepNames Is Nothing Then Exit Sub
+    If qtyNeeded < 1 Then Exit Sub
+    If PartCount < 1 Then Exit Sub
+    If Not StdRoleArrayReady() Then Exit Sub
+
+    Dim railIdx() As Long
+    Dim n As Long
+    Dim i As Long
+
+    ReDim railIdx(1 To PartCount)
+    n = 0
+
+    For i = 1 To PartCount
+        If NormalizeKey(StdCadRole(i)) = "RAILS" Then
+            n = n + 1
+            railIdx(n) = i
+        End If
+    Next i
+
+    If n < 1 Then Exit Sub
+
+    Dim a As Long
+    Dim b As Long
+    Dim tmp As Long
+
+    For a = 1 To n - 1
+        For b = a + 1 To n
+            If (parts(railIdx(b)).Length * 100000# + parts(railIdx(b)).BBoxVolume) > _
+               (parts(railIdx(a)).Length * 100000# + parts(railIdx(a)).BBoxVolume) Then
+
+                tmp = railIdx(a)
+                railIdx(a) = railIdx(b)
+                railIdx(b) = tmp
+            End If
+        Next b
+    Next a
+
+    Dim maxAdd As Long
+    maxAdd = qtyNeeded
+    If maxAdd > n Then maxAdd = n
+
+    For i = 1 To maxAdd
+        AddUniqueComponentName keepNames, parts(railIdx(i)).componentName
+        LogLine "STL steel keep rail: idx=" & railIdx(i) & _
+                " comp='" & parts(railIdx(i)).componentName & "'"
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "AddLargestRailComponentsToKeep error: " & Err.Description
+End Sub
+
+Private Function BuildStandardSteelStlKeepComponentNames() As Collection
+On Error GoTo ErrHandler
+
+    Dim keepNames As New Collection
+
+    If StdCount < 1 Then
+        Set BuildStandardSteelStlKeepComponentNames = keepNames
+        Exit Function
+    End If
+
+    Dim i As Long
+    Dim ci As Long
+    Dim k As String
+
+    For i = 1 To StdCount
+
+        k = NormalizeKey(stdName(i))
+
+        If k = "RAILS" Then
+
+            AddLargestRailComponentsToKeep keepNames, StdQty(i)
+
+        Else
+
+            ci = 0
+            If i <= UBound(StdCadIndex) Then ci = StdCadIndex(i)
+
+            If ci >= 1 And ci <= PartCount Then
+                AddUniqueComponentName keepNames, parts(ci).componentName
+                LogLine "STL steel keep standard: " & stdName(i) & _
+                        " idx=" & ci & _
+                        " comp='" & parts(ci).componentName & "'"
+            Else
+                LogLine "WARNING: STL standard steel keep skipped row " & i & _
+                        " (" & stdName(i) & ") because StdCadIndex is missing."
+            End If
+
+        End If
+
+    Next i
+
+    Set BuildStandardSteelStlKeepComponentNames = keepNames
+    Exit Function
+
+ErrHandler:
+    LogLine "BuildStandardSteelStlKeepComponentNames error: " & Err.Description
+    Set BuildStandardSteelStlKeepComponentNames = New Collection
+End Function
+
+Private Function BuildSteelStlKeepComponentNamesForCurrentJob() As Collection
+On Error GoTo ErrHandler
+
+    If gJobIsStandardBase Then
+        Set BuildSteelStlKeepComponentNamesForCurrentJob = BuildStandardSteelStlKeepComponentNames()
+    Else
+        Set BuildSteelStlKeepComponentNamesForCurrentJob = BuildBaseDxfKeepComponentNames()
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "BuildSteelStlKeepComponentNamesForCurrentJob error: " & Err.Description
+    Set BuildSteelStlKeepComponentNamesForCurrentJob = New Collection
+End Function
+
+Private Function ExportSteelComponentsMergedStlOnly(ByVal assyModel As Object, ByVal stlPath As String) As Boolean
+On Error GoTo ErrHandler
+
+    ExportSteelComponentsMergedStlOnly = False
+
+    If assyModel Is Nothing Then Exit Function
+    If stlPath = "" Then Exit Function
+
+    If assyModel.GetType <> swDocASSEMBLY Then
+        LogLine "Steel STL: source is not assembly; exporting current model."
+        ExportSteelComponentsMergedStlOnly = ExportVisibleModelStlToTempAndMerge(assyModel, stlPath, "PART")
+        Exit Function
+    End If
+
+    Dim keepNames As Collection
+    Set keepNames = BuildSteelStlKeepComponentNamesForCurrentJob()
+
+    If keepNames Is Nothing Or keepNames.Count = 0 Then
+        LogLine "Steel STL export skipped: no steel components identified for keep-list."
+        Exit Function
+    End If
+
+    If Not gJobIsStandardBase Then
+        If keepNames.Count < BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF Then
+            LogLine "BMS steel STL export skipped: keep-list incomplete. Found " & keepNames.Count
+            If BMS_STL_SKIP_IF_KEEP_LIST_INCOMPLETE Then Exit Function
+        End If
+    End If
+
+    Dim hiddenNames As Collection
+    Set hiddenNames = New Collection
+
+    LogLine "Steel STL: isolating steel/quoted components only. keep=" & keepNames.Count
+
+    PrepareAssemblyVisibilityFast assyModel
+
+    If HideAllExceptComponentNamesOnce(assyModel, keepNames, hiddenNames) = False Then
+        LogLine "Steel STL export failed: could not isolate steel components."
+        GoTo CleanExit
+    End If
+
+    ApplyCmsTopView assyModel
+    StabilizeActiveView assyModel, 50
+
+    ExportSteelComponentsMergedStlOnly = ExportVisibleModelStlToTempAndMerge(assyModel, stlPath, "STEEL COMPONENTS")
+
+    If ExportSteelComponentsMergedStlOnly Then
+        LogLine "Steel components merged STL written: " & stlPath
+    Else
+        LogLine "WARNING: Steel components merged STL was not created."
+    End If
+
+CleanExit:
+    On Error Resume Next
+
+    If Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then
+            ShowNamedComponentsOnce assyModel, hiddenNames
+        Else
+            ShowAllAssemblyComponents assyModel
+        End If
+    Else
+        ShowAllAssemblyComponents assyModel
+    End If
+
+    ApplyCmsTopView assyModel
+    Exit Function
+
+ErrHandler:
+    LogLine "ExportSteelComponentsMergedStlOnly error: " & Err.Description
+    Resume CleanExit
+End Function
+
+Private Sub DeleteStlFilesExcept(ByVal folderPath As String, ByVal keepPath As String)
+On Error GoTo ErrHandler
+
+    If Not CLEAN_EXTRA_STL_SHARDS_IN_JOB_FOLDER Then Exit Sub
+    If folderPath = "" Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(folderPath) Then Exit Sub
+
+    Dim keepLower As String
+    keepLower = LCase$(keepPath)
+
+    Dim f As Object
+    For Each f In fso.GetFolder(folderPath).Files
+        If LCase$(fso.GetExtensionName(f.path)) = "stl" Then
+            If LCase$(f.path) <> keepLower Then
+                LogLine "Deleting extra STL shard: " & f.path
+                fso.DeleteFile f.path, True
+            End If
+        End If
+    Next f
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "DeleteStlFilesExcept error: " & Err.Description
+End Sub
 
 Private Function ExportBmsQuotedBaseStlOnly(ByVal assyModel As Object, ByVal stlPath As String) As Boolean
 On Error GoTo ErrHandler
@@ -5143,11 +6023,36 @@ On Error GoTo ErrHandler
 
     swApp.ActivateDoc3 mdl.GetTitle, False, 0, errs
 
+    ' Preserve corrected FRONT before touching TOP.
+    Dim frontReady As Boolean
+    frontReady = False
+
+    On Error Resume Next
+    Err.Clear
+    mdl.ShowNamedView2 CMS_FRONT_VIEW_NAME, -1
+    If Err.Number = 0 Then
+        frontReady = True
+        LogLine "DXF view prep: found CMS_FRONT named view."
+    Else
+        Err.Clear
+        mdl.ShowNamedView2 "*Front", 1
+        If Err.Number = 0 Then
+            SaveCurrentViewAsNamed mdl, CMS_FRONT_VIEW_NAME
+            frontReady = True
+            LogLine "DXF view prep: CMS_FRONT not found; saved current *Front as CMS_FRONT."
+        Else
+            Err.Clear
+            LogLine "DXF view prep warning: could not preserve corrected front view."
+        End If
+    End If
+    On Error GoTo ErrHandler
+
     Dim usedView As String
     usedView = ""
 
     If primaryViewName <> "" Then
         On Error Resume Next
+        Err.Clear
         mdl.ShowNamedView2 primaryViewName, -1
         If Err.Number = 0 Then usedView = primaryViewName
         Err.Clear
@@ -5156,6 +6061,7 @@ On Error GoTo ErrHandler
 
     If usedView = "" Then
         On Error Resume Next
+        Err.Clear
         mdl.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
         If Err.Number = 0 Then usedView = CMS_TOP_VIEW_NAME
         Err.Clear
@@ -5164,6 +6070,7 @@ On Error GoTo ErrHandler
 
     If usedView = "" Then
         On Error Resume Next
+        Err.Clear
         mdl.ShowNamedView2 "*Top", 5
         If Err.Number = 0 Then usedView = "*Top"
         Err.Clear
@@ -5177,21 +6084,41 @@ On Error GoTo ErrHandler
 
     StabilizeActiveView mdl, 100
 
-    ' Use the exact active CMS_TOP orientation as the model's standard *Top so
-    ' SolidWorks drawing/DXF creation cannot fall back to the old rotated top.
     If PersistCurrentViewAsStandardTop(mdl) Then
-        mdl.ShowNamedView2 "*Top", 5
+        LogLine "DXF view prep: corrected top persisted as SolidWorks *Top from " & usedView
     Else
-        mdl.ShowNamedView2 usedView, -1
+        LogLine "DXF view prep warning: could not persist corrected top as *Top."
     End If
 
+    ' Re-apply corrected FRONT after TOP persistence.
+    If frontReady Then
+        On Error Resume Next
+        Err.Clear
+        mdl.ShowNamedView2 CMS_FRONT_VIEW_NAME, -1
+        On Error GoTo ErrHandler
+
+        StabilizeActiveView mdl, 100
+
+        If PersistCurrentViewAsStandardFront(mdl) Then
+            LogLine "DXF view prep: corrected CMS_FRONT persisted as SolidWorks *Front."
+        Else
+            LogLine "DXF view prep warning: could not persist CMS_FRONT as *Front."
+        End If
+    End If
+
+    On Error Resume Next
+    mdl.ShowNamedView2 "*Top", 5
+    On Error GoTo ErrHandler
+
     StabilizeActiveView mdl, 100
+
     mdl.Extension.SaveAs3 nativePath, swSaveAsCurrentVersion, swSaveAsOptions_Silent, Nothing, Nothing, errs, warns
-    LogLine "DXF view prep: saved native source from " & usedView & " into standard *Top. Errors=" & errs & " Warnings=" & warns
+
+    LogLine "DXF view prep: saved native source with corrected *Top and *Front. Errors=" & errs & " Warnings=" & warns
 
 CleanExit:
     On Error Resume Next
-    swApp.CloseDoc mdl.GetTitle
+    If Not mdl Is Nothing Then swApp.CloseDoc mdl.GetTitle
     Exit Sub
 
 ErrHandler:
@@ -6469,6 +7396,196 @@ ErrHandler:
     Close #f
     GetWritableCsvPath = AppendBeforeExtension(csvPath, "_" & Format(Now, "hhnnss"))
 End Function
+
+Private Function BmsRoleForCadIndex(ByVal idx As Long) As String
+    If idx = gIdxTCP Then BmsRoleForCadIndex = "TCP": Exit Function
+    If idx = gIdxBCP Then BmsRoleForCadIndex = "BCP": Exit Function
+    If idx = gIdxIDH Then BmsRoleForCadIndex = "ID HOLDER": Exit Function
+    If idx = gIdxODH Then BmsRoleForCadIndex = "OD HOLDER": Exit Function
+    If idx = gIdxIDP Then BmsRoleForCadIndex = "ID POT": Exit Function
+    If idx = gIdxODP Then BmsRoleForCadIndex = "OD POT": Exit Function
+End Function
+
+Private Sub WriteAllCadComponentsDebugCsv(ByVal csvPath As String)
+On Error GoTo ErrHandler
+
+    Dim p As String
+    p = GetWritableCsvPath(csvPath)
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open p For Output As #f
+
+    Print #f, "Index,ComponentName,CleanName,StdRole,BmsRole,Qty,Thickness,Width,Length,BoxDx,BoxDy,BoxDz,BBoxVolume,MassOrVol,CenterX,CenterY,CenterZ,HasCenter,FilePath,ConfigName,BodyName,IsBodyOnly,UsedForBomMatch,FileExists"
+
+    Dim i As Long
+    Dim existsText As String
+
+    For i = 1 To PartCount
+
+        existsText = "FALSE"
+        If parts(i).filePath <> "" Then
+            If Dir(parts(i).filePath) <> "" Then existsText = "TRUE"
+        End If
+
+        Print #f, _
+            i & "," & _
+            CsvText(parts(i).componentName) & "," & _
+            CsvText(parts(i).cleanName) & "," & _
+            CsvText(StdCadRole(i)) & "," & _
+            CsvText(BmsRoleForCadIndex(i)) & "," & _
+            parts(i).Quantity & "," & _
+            FormatNumberForCsv(parts(i).Thickness) & "," & _
+            FormatNumberForCsv(parts(i).Width) & "," & _
+            FormatNumberForCsv(parts(i).Length) & "," & _
+            FormatNumberForCsv(parts(i).BoxDx) & "," & _
+            FormatNumberForCsv(parts(i).BoxDy) & "," & _
+            FormatNumberForCsv(parts(i).BoxDz) & "," & _
+            FormatNumberForCsv(parts(i).BBoxVolume) & "," & _
+            FormatNumberForCsv(parts(i).massValue) & "," & _
+            FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
+            FormatNumberForCsv(parts(i).AsmCenterY) & "," & _
+            FormatNumberForCsv(parts(i).AsmCenterZ) & "," & _
+            CsvText(CStr(parts(i).hasAsmCenter)) & "," & _
+            CsvText(parts(i).filePath) & "," & _
+            CsvText(parts(i).configName) & "," & _
+            CsvText(parts(i).bodyName) & "," & _
+            CsvText(CStr(parts(i).isBodyOnly)) & "," & _
+            CsvText(CStr(parts(i).UsedForBomMatch)) & "," & _
+            CsvText(existsText)
+    Next i
+
+    Close #f
+
+    LogLine "Wrote all-CAD components debug CSV: " & p
+    Exit Sub
+
+ErrHandler:
+    LogLine "WriteAllCadComponentsDebugCsv error: " & Err.Description
+    On Error Resume Next
+    Close #f
+End Sub
+
+Private Sub WriteJobFileInventoryCsv(ByVal rootFolder As String, ByVal csvPath As String)
+On Error GoTo ErrHandler
+
+    If rootFolder = "" Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FolderExists(rootFolder) Then Exit Sub
+
+    Dim p As String
+    p = GetWritableCsvPath(csvPath)
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open p For Output As #f
+    Print #f, "FullPath,Folder,FileName,Extension,SizeBytes,DateModified"
+
+    WriteJobFileInventoryFolderRows fso.GetFolder(rootFolder), f
+
+    Close #f
+
+    LogLine "Wrote job file inventory CSV: " & p
+    Exit Sub
+
+ErrHandler:
+    LogLine "WriteJobFileInventoryCsv error: " & Err.Description
+    On Error Resume Next
+    Close #f
+End Sub
+
+Private Sub WriteJobFileInventoryFolderRows(ByVal folder As Object, ByVal fileNum As Integer)
+On Error Resume Next
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim file As Object
+    For Each file In folder.Files
+        Print #fileNum, _
+            CsvText(file.path) & "," & _
+            CsvText(folder.path) & "," & _
+            CsvText(file.Name) & "," & _
+            CsvText(fso.GetExtensionName(file.path)) & "," & _
+            CStr(file.Size) & "," & _
+            CsvText(CStr(file.DateLastModified))
+    Next file
+
+    Dim subFolder As Object
+    For Each subFolder In folder.SubFolders
+        WriteJobFileInventoryFolderRows subFolder, fileNum
+    Next subFolder
+End Sub
+
+Private Sub WriteStandardQuoteRowsDebugCsv(ByVal csvPath As String)
+On Error GoTo ErrHandler
+
+    Dim p As String
+    p = GetWritableCsvPath(csvPath)
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open p For Output As #f
+
+    Print #f, "StdRow,Name,Qty,Thickness,Width,Length,Grade,QuoteRow,CadIndex,CadComponent,StdRole,CenterX,CenterY,CenterZ"
+
+    Dim i As Long
+    Dim ci As Long
+    Dim comp As String
+    Dim role As String
+    Dim cx As Double, cy As Double, cz As Double
+
+    For i = 1 To StdCount
+        ci = 0
+        comp = ""
+        role = ""
+        cx = 0#: cy = 0#: cz = 0#
+
+        If i <= UBound(StdCadIndex) Then ci = StdCadIndex(i)
+
+        If ci >= 1 And ci <= PartCount Then
+            comp = parts(ci).componentName
+            role = StdCadRole(ci)
+            cx = parts(ci).AsmCenterX
+            cy = parts(ci).AsmCenterY
+            cz = parts(ci).AsmCenterZ
+        End If
+
+        Print #f, _
+            i & "," & _
+            CsvText(stdName(i)) & "," & _
+            StdQty(i) & "," & _
+            FormatNumberForCsv(StdT(i)) & "," & _
+            FormatNumberForCsv(StdW(i)) & "," & _
+            FormatNumberForCsv(StdL(i)) & "," & _
+            CsvText(StdGrade(i)) & "," & _
+            StdQuoteRow(i) & "," & _
+            ci & "," & _
+            CsvText(comp) & "," & _
+            CsvText(role) & "," & _
+            FormatNumberForCsv(cx) & "," & _
+            FormatNumberForCsv(cy) & "," & _
+            FormatNumberForCsv(cz)
+    Next i
+
+    Close #f
+
+    LogLine "Wrote standard quote rows debug CSV: " & p
+    Exit Sub
+
+ErrHandler:
+    LogLine "WriteStandardQuoteRowsDebugCsv error: " & Err.Description
+    On Error Resume Next
+    Close #f
+End Sub
+
+
 
 Private Function AppendBeforeExtension(ByVal path As String, ByVal suffix As String) As String
     Dim dotPos As Long
@@ -8227,6 +9344,12 @@ NextPart:
         AssignPairTopBottom potList, nPot, gIdxIDP, gIdxODP
     End If
 
+    ' Make the thin clamp labels agree with the holder/pot top side.
+    ValidateAndCorrectBmsTcpBcpAgainstHolderPot
+
+    ' Check whether TCP is lighter than BCP.
+    ValidateAndLogBmsTcpBcpMass
+
     LogLine "Geometry plates: TCP=" & gIdxTCP & " BCP=" & gIdxBCP & _
             " IDholder=" & gIdxIDH & " ODholder=" & gIdxODH & _
             " IDpot=" & gIdxIDP & " ODpot=" & gIdxODP
@@ -8242,6 +9365,206 @@ NextPart:
 
 ErrHandler:
     LogLine "ClassifyPotBlockPlatesFromCad error: " & Err.Description
+End Sub
+
+Private Function AxisCenterForBms(ByVal idx As Long, ByVal axis As Integer) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    Select Case axis
+        Case 1
+            AxisCenterForBms = parts(idx).AsmCenterX
+        Case 2
+            AxisCenterForBms = parts(idx).AsmCenterY
+        Case Else
+            AxisCenterForBms = parts(idx).AsmCenterZ
+    End Select
+End Function
+
+Private Function DominantAxisBetweenParts(ByVal idxA As Long, ByVal idxB As Long) As Integer
+    DominantAxisBetweenParts = 0
+
+    If idxA < 1 Or idxB < 1 Then Exit Function
+    If idxA > PartCount Or idxB > PartCount Then Exit Function
+
+    Dim dx As Double
+    Dim dy As Double
+    Dim dz As Double
+
+    dx = Abs(parts(idxA).AsmCenterX - parts(idxB).AsmCenterX)
+    dy = Abs(parts(idxA).AsmCenterY - parts(idxB).AsmCenterY)
+    dz = Abs(parts(idxA).AsmCenterZ - parts(idxB).AsmCenterZ)
+
+    If dy >= dx And dy >= dz Then
+        DominantAxisBetweenParts = 2
+    ElseIf dz >= dx And dz >= dy Then
+        DominantAxisBetweenParts = 3
+    Else
+        DominantAxisBetweenParts = 1
+    End If
+End Function
+
+Private Function AxisDeltaBetweenParts(ByVal idxA As Long, ByVal idxB As Long, ByVal axis As Integer) As Double
+    AxisDeltaBetweenParts = AxisCenterForBms(idxA, axis) - AxisCenterForBms(idxB, axis)
+End Function
+
+Private Sub SwapLongValues(ByRef a As Long, ByRef b As Long)
+    Dim t As Long
+    t = a
+    a = b
+    b = t
+End Sub
+
+Private Sub ValidateAndCorrectBmsTcpBcpAgainstHolderPot()
+On Error GoTo ErrHandler
+
+    If gIdxTCP <= 0 Or gIdxBCP <= 0 Then Exit Sub
+    If gIdxTCP > PartCount Or gIdxBCP > PartCount Then Exit Sub
+
+    Dim refTop As Long
+    Dim refBot As Long
+    Dim refLabel As String
+
+    refTop = 0
+    refBot = 0
+    refLabel = ""
+
+    If gIdxIDH > 0 And gIdxODH > 0 Then
+        refTop = gIdxIDH
+        refBot = gIdxODH
+        refLabel = "ID/OD HOLDER"
+    ElseIf gIdxIDP > 0 And gIdxODP > 0 Then
+        refTop = gIdxIDP
+        refBot = gIdxODP
+        refLabel = "ID/OD POT"
+    Else
+        LogLine "BMS TCP/BCP validation skipped: no holder or pot reference pair."
+        Exit Sub
+    End If
+
+    If refTop > PartCount Or refBot > PartCount Then Exit Sub
+
+    Dim ax As Integer
+    ax = DominantAxisBetweenParts(refTop, refBot)
+    If ax < 1 Or ax > 3 Then Exit Sub
+
+    Dim refDelta As Double
+    Dim tcpDelta As Double
+
+    refDelta = AxisDeltaBetweenParts(refTop, refBot, ax)
+    tcpDelta = AxisDeltaBetweenParts(gIdxTCP, gIdxBCP, ax)
+
+    If Abs(refDelta) < 0.001 Or Abs(tcpDelta) < 0.001 Then
+        LogLine "BMS TCP/BCP validation skipped: tiny axis delta. refDelta=" & _
+                FormatNumberForCsv(refDelta) & " tcpDelta=" & FormatNumberForCsv(tcpDelta)
+        Exit Sub
+    End If
+
+    LogLine "BMS TCP/BCP validation against " & refLabel & _
+            ": axis=" & CStr(ax) & _
+            " refDelta=" & FormatNumberForCsv(refDelta) & _
+            " tcpDelta=" & FormatNumberForCsv(tcpDelta)
+
+    If refDelta * tcpDelta < 0# Then
+        LogLine "BMS TCP/BCP validation: TCP/BCP appear flipped relative to " & refLabel & ". Swapping gIdxTCP/gIdxBCP."
+        SwapLongValues gIdxTCP, gIdxBCP
+    Else
+        LogLine "BMS TCP/BCP validation OK: TCP is on same side as " & refLabel & " top."
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ValidateAndCorrectBmsTcpBcpAgainstHolderPot error: " & Err.Description
+End Sub
+
+Private Function BmsHasHolderOrPotSideReference() As Boolean
+    BmsHasHolderOrPotSideReference = False
+
+    If gIdxIDH > 0 And gIdxODH > 0 Then
+        BmsHasHolderOrPotSideReference = True
+        Exit Function
+    End If
+
+    If gIdxIDP > 0 And gIdxODP > 0 Then
+        BmsHasHolderOrPotSideReference = True
+        Exit Function
+    End If
+End Function
+
+Private Sub ValidateAndLogBmsTcpBcpMass()
+On Error GoTo ErrHandler
+
+    If Not BMS_TCP_EXPECT_LIGHTER_THAN_BCP Then Exit Sub
+
+    If gIdxTCP <= 0 Or gIdxBCP <= 0 Then
+        LogLine "BMS TCP/BCP mass check skipped: TCP or BCP index missing."
+        Exit Sub
+    End If
+
+    If gIdxTCP > PartCount Or gIdxBCP > PartCount Then Exit Sub
+
+    Dim mTcp As Double
+    Dim mBcp As Double
+    Dim diff As Double
+    Dim tol As Double
+    Dim maxM As Double
+
+    mTcp = parts(gIdxTCP).massValue
+    mBcp = parts(gIdxBCP).massValue
+
+    If mTcp <= 0# Or mBcp <= 0# Then
+        LogLine "BMS TCP/BCP mass check skipped: mass/volume unavailable. " & _
+                "TCP mass=" & FormatNumberForCsv(mTcp) & _
+                " BCP mass=" & FormatNumberForCsv(mBcp)
+        Exit Sub
+    End If
+
+    maxM = mTcp
+    If mBcp > maxM Then maxM = mBcp
+
+    tol = maxM * BMS_TCP_BCP_MASS_DIFF_FRAC
+    If tol < 0.001 Then tol = 0.001
+
+    diff = mTcp - mBcp
+
+    LogLine "BMS TCP/BCP mass check:"
+    LogLine "  TCP idx=" & gIdxTCP & _
+            " mass/vol=" & FormatNumberForCsv(mTcp) & _
+            " comp='" & parts(gIdxTCP).componentName & "'"
+    LogLine "  BCP idx=" & gIdxBCP & _
+            " mass/vol=" & FormatNumberForCsv(mBcp) & _
+            " comp='" & parts(gIdxBCP).componentName & "'"
+    LogLine "  TCP-BCP mass/vol diff=" & FormatNumberForCsv(diff) & _
+            " tolerance=" & FormatNumberForCsv(tol)
+
+    If Abs(diff) <= tol Then
+        LogLine "BMS TCP/BCP mass check: TCP and BCP are effectively same weight/volume."
+        Exit Sub
+    End If
+
+    If diff < 0# Then
+        LogLine "BMS TCP/BCP mass check OK: TCP is lighter than BCP."
+        Exit Sub
+    End If
+
+    LogLine "WARNING: BMS TCP/BCP mass check says TCP is HEAVIER than BCP."
+
+    If BMS_TCP_BCP_FORCE_LIGHTER_TCP Then
+
+        If BmsHasHolderOrPotSideReference() Then
+            LogLine "WARNING: Not force-swapping TCP/BCP because holder/pot side reference exists. " & _
+                    "Holder/pot side is safer than mass when imported CAD has missing material/density."
+        Else
+            LogLine "BMS TCP/BCP mass check: force-swapping TCP/BCP because no holder/pot side reference exists."
+            SwapLongValues gIdxTCP, gIdxBCP
+        End If
+
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ValidateAndLogBmsTcpBcpMass error: " & Err.Description
 End Sub
 
 Private Function IsBmsMajorPlateCandidate(ByVal idx As Long, ByVal maxFp As Double) As Boolean
@@ -9781,27 +11104,61 @@ Private Function LooksLikeBmsJob() As Boolean
     LooksLikeBmsJob = LooksLikeBmsJobFromName() Or LooksLikeBmsJobFromBom() Or LooksLikeBmsJobFromGeometry()
 End Function
 
-Private Sub AddStdPlate(ByVal nm As String, ByVal t As Double, ByVal w As Double, ByVal l As Double, ByVal qty As Long, Optional ByVal gradeHint As String = "")
+Private Sub AddStdPlate(ByVal nm As String, _
+                        ByVal t As Double, _
+                        ByVal w As Double, _
+                        ByVal l As Double, _
+                        ByVal qty As Long, _
+                        Optional ByVal gradeHint As String = "", _
+                        Optional ByVal cadIdx As Long = 0)
+
     Dim e As Long
     e = FindStdByName(nm)
+
+    ' Combine only if same name AND same size.
     If e > 0 Then
-        If Abs(StdT(e) - t) <= 0.01 And Abs(StdW(e) - w) <= 0.01 And Abs(StdL(e) - l) <= 0.01 Then
+        If Abs(StdT(e) - t) <= 0.01 And _
+           Abs(StdW(e) - w) <= 0.01 And _
+           Abs(StdL(e) - l) <= 0.01 Then
+
             StdQty(e) = StdQty(e) + IIf(qty < 1, 1, qty)
+
+            If StdCadIndex(e) = 0 And cadIdx > 0 Then
+                StdCadIndex(e) = cadIdx
+            End If
+
             Exit Sub
         End If
     End If
+
     StdCount = StdCount + 1
+
     stdName(StdCount) = nm
-    StdT(StdCount) = t: StdW(StdCount) = w: StdL(StdCount) = l
+    StdT(StdCount) = t
+    StdW(StdCount) = w
+    StdL(StdCount) = l
     StdQty(StdCount) = IIf(qty < 1, 1, qty)
-    Dim g As String, qr As Long
+    StdCadIndex(StdCount) = cadIdx
+
+    Dim g As String
+    Dim qr As Long
+
     StdTargetForName nm, gradeHint, g, qr
+
     StdGrade(StdCount) = g
     StdQuoteRow(StdCount) = qr
 End Sub
 
 Private Sub AddStdPlateFromCad(ByVal idx As Long, ByVal nm As String)
-    AddStdPlate nm, parts(idx).Thickness, parts(idx).Width, parts(idx).Length, 1
+    If idx < 1 Or idx > PartCount Then Exit Sub
+
+    AddStdPlate nm, _
+                parts(idx).Thickness, _
+                parts(idx).Width, _
+                parts(idx).Length, _
+                1, _
+                "", _
+                idx
 End Sub
 
 ' Grade + Quote row for a standard plate name (gradeHint from BOM material, "" if unknown).
@@ -11317,8 +12674,14 @@ End Function
 
 Private Sub StdResetArrays()
     StdCount = 0
-    ReDim stdName(1 To 80): ReDim StdT(1 To 80): ReDim StdW(1 To 80)
-    ReDim StdL(1 To 80): ReDim StdQty(1 To 80): ReDim StdGrade(1 To 80): ReDim StdQuoteRow(1 To 80)
+    ReDim stdName(1 To 80)
+    ReDim StdT(1 To 80)
+    ReDim StdW(1 To 80)
+    ReDim StdL(1 To 80)
+    ReDim StdQty(1 To 80)
+    ReDim StdGrade(1 To 80)
+    ReDim StdQuoteRow(1 To 80)
+    ReDim StdCadIndex(1 To 80)
     If PartCount > 0 Then
         ReDim gStdRoleByPart(1 To PartCount)
         ReDim gStdLeaderPinSetByPart(1 To PartCount)
@@ -11928,17 +13291,34 @@ End Function
 
 ' Build the pullcore/key list: names + sizing (BOM dims, else matched CAD bbox).
 Private Function CadPurchasePartToken(ByVal componentName As String) As String
+On Error GoTo ErrHandler
+
     Dim s As String
+    Dim p As Long
+
     s = Trim(componentName)
 
-    Dim p As Long
-    p = InStr(1, UCase(s), ".STEP", vbTextCompare)
-    If p > 1 Then s = Left(s, p - 1)
+    ' Use the leaf component name, not the parent assembly path.
+    p = InStrRev(s, "/")
+    If p > 0 Then s = Mid$(s, p + 1)
 
-    p = InStr(1, s, "/", vbTextCompare)
-    If p > 1 Then s = Left(s, p - 1)
+    p = InStrRev(s, Chr$(92))
+    If p > 0 Then s = Mid$(s, p + 1)
+
+    p = InStr(1, UCase$(s), ".STEP", vbTextCompare)
+    If p > 1 Then s = Left$(s, p - 1)
+
+    p = InStr(1, UCase$(s), ".SLDPRT", vbTextCompare)
+    If p > 1 Then s = Left$(s, p - 1)
+
+    p = InStr(1, UCase$(s), ".X_T", vbTextCompare)
+    If p > 1 Then s = Left$(s, p - 1)
 
     CadPurchasePartToken = Trim(s)
+    Exit Function
+
+ErrHandler:
+    CadPurchasePartToken = Trim(componentName)
 End Function
 
 Private Function LooksLikeFullBasePlateCad(ByVal idx As Long) As Boolean
@@ -11976,6 +13356,11 @@ Private Function TryClassifyStandardCadPurchased(ByVal idx As Long, _
     u = UCase(raw)
     partNo = CadPurchasePartToken(raw)
 
+    ' If the token is still just the parent assembly, do not use it as a part number.
+    If InStr(UCase$(partNo), "MOLDBASE_ASM") > 0 Or InStr(UCase$(partNo), "MOLD_BASE_ASM") > 0 Then
+        partNo = ""
+    End If
+
     If IsRoundBarLike(idx) Then
         Dim rr As String
         rr = StandardRoundComponentRole(idx)
@@ -12007,7 +13392,15 @@ Private Function TryClassifyStandardCadPurchased(ByVal idx As Long, _
                 Exit Function
             Case "SUPPORTPILLAR"
                 desc = "Support Pillar"
-                vendor = "DME"
+
+                If InStr(UCase$(partNo), "_PCS") > 0 Or InStr(UCase$(raw), "_PCS") > 0 Then
+                    vendor = "PCS"
+                ElseIf InStr(UCase$(partNo), "_DME") > 0 Or InStr(UCase$(raw), "_DME") > 0 Then
+                    vendor = "DME"
+                Else
+                    vendor = ""
+                End If
+
                 TryClassifyStandardCadPurchased = True
                 Exit Function
         End Select
@@ -12859,118 +14252,194 @@ Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase
     GeometryRoleForCadIndex = "HARDWARE / OTHER"
 End Function
 
+Private Function IsScrewFastenerName(ByVal raw As String) As Boolean
+    Dim u As String
+    u = UCase$(raw)
+
+    IsScrewFastenerName = False
+
+    If InStr(u, "SHCS") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "FHCS") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "BHCS") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "HHCS") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "SBHCS") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "UNC-") > 0 And InStr(u, "X-") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "SCREW") > 0 Then IsScrewFastenerName = True: Exit Function
+    If InStr(u, "BOLT") > 0 Then IsScrewFastenerName = True: Exit Function
+End Function
+
+Private Function IsDowelOrMinorRoundHardwareName(ByVal raw As String) As Boolean
+    Dim u As String
+    u = UCase$(raw)
+
+    IsDowelOrMinorRoundHardwareName = False
+
+    If InStr(u, "DOWEL") > 0 Then IsDowelOrMinorRoundHardwareName = True: Exit Function
+    If InStr(u, "TUBE_DOWEL") > 0 Then IsDowelOrMinorRoundHardwareName = True: Exit Function
+    If InStr(u, "TLP") > 0 Then IsDowelOrMinorRoundHardwareName = True: Exit Function
+    If InStr(u, "PLUG") > 0 Then IsDowelOrMinorRoundHardwareName = True: Exit Function
+End Function
+
+Private Function IsExplicitGuideHardwareName(ByVal raw As String) As Boolean
+    Dim u As String
+    u = UCase$(raw)
+
+    IsExplicitGuideHardwareName = False
+
+    If InStr(u, "LDR-PIN") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "LDR_PIN") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "LEADER PIN") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "GUIDE PIN") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+
+    If InStr(u, "LBB_") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "/LBB") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "BUSHING") > 0 And InStr(u, "EJECTOR") = 0 Then IsExplicitGuideHardwareName = True: Exit Function
+
+    If InStr(u, "GEB_") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "GUIDED EJECTOR") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+
+    If InStr(u, "RETURN-PIN") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "RETURN PIN") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+
+    If InStr(u, "PILLAR_D") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+    If InStr(u, "SUPPORT PILLAR") > 0 Then IsExplicitGuideHardwareName = True: Exit Function
+End Function
+
+Private Function IsGuideRoundCandidate(ByVal idx As Long) As Boolean
+    IsGuideRoundCandidate = False
+
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If Not IsRoundBarLike(idx) Then Exit Function
+
+    Dim nm As String
+    nm = parts(idx).componentName
+
+    If IsScrewFastenerName(nm) Then Exit Function
+    If IsDowelOrMinorRoundHardwareName(nm) Then Exit Function
+
+    If IsExplicitGuideHardwareName(nm) Then
+        IsGuideRoundCandidate = True
+        Exit Function
+    End If
+
+    Dim dia As Double
+    Dim lenA As Double
+
+    dia = RoundBarDiameter(idx)
+    lenA = RoundBarAxisLength(idx)
+
+    If dia <= 0# Then Exit Function
+
+    If dia >= 2# And lenA >= 3# Then
+        IsGuideRoundCandidate = True
+        Exit Function
+    End If
+
+    If dia >= 0.875 And lenA >= 6# Then
+        IsGuideRoundCandidate = True
+        Exit Function
+    End If
+End Function
+
 Private Function StandardRoundComponentRole(ByVal idx As Long) As String
+On Error GoTo ErrHandler
+
     StandardRoundComponentRole = ""
+
     If idx < 1 Or idx > PartCount Then Exit Function
 
+    Dim raw As String
     Dim u As String
     Dim pn As String
     Dim dia As Double
     Dim axisLen As Double
     Dim ratio As Double
 
-    u = UCase(parts(idx).componentName)
-    pn = UCase(CadPurchasePartToken(parts(idx).componentName))
+    raw = parts(idx).componentName
+    u = UCase$(raw)
+    pn = UCase$(CadPurchasePartToken(raw))
+
+    If IsScrewFastenerName(raw) Then
+        StandardRoundComponentRole = ""
+        Exit Function
+    End If
+
+    If IsDowelOrMinorRoundHardwareName(raw) Then
+        StandardRoundComponentRole = ""
+        Exit Function
+    End If
+
+    If Not IsRoundBarLike(idx) Then Exit Function
+
     dia = RoundBarDiameter(idx)
     axisLen = RoundBarAxisLength(idx)
-    If dia > 0# Then ratio = axisLen / dia
 
-    ' Strong shop STEP tokens first (same as qwen apply_strong_shop_name_hints).
+    If dia <= 0# Then Exit Function
+    If dia > 4# Then Exit Function
+
+    ratio = axisLen / dia
+
     If InStr(u, "LDR-PIN") > 0 Or InStr(u, "LDR_PIN") > 0 Then
         StandardRoundComponentRole = "Leader Pin"
         Exit Function
     End If
+
     If InStr(u, "/LBB_") > 0 Or InStr(u, "LBB_") > 0 Or InStr(u, "-LBB") > 0 Or InStr(u, "_LBB") > 0 Then
         StandardRoundComponentRole = "Leader Pin Bushing"
         Exit Function
     End If
-    If IsLatchLockName(parts(idx).componentName) Then
-        StandardRoundComponentRole = "Latch Lock / Safety Strap"
+
+    If InStr(u, "GEB_") > 0 Or InStr(u, "GUIDED EJECTOR") > 0 Then
+        StandardRoundComponentRole = "Guided Ejector Bushing"
         Exit Function
     End If
 
-    ' Geometry first. CAD component names in customer files are often copied,
-    ' swapped, or stale. The stack logic needs the physical shape, not the label.
-    ' Thresholds mirror qwen_classify_xt_csv.round_bar_diameter role rules.
-    If dia > 0# Then
-        If dia > 4# Then Exit Function
-
-        ' Support pillar: large long round post (dia 2.5-4, length >= 6)
-        If dia >= 2.5 And axisLen >= 6# Then
-            StandardRoundComponentRole = "Support Pillar"
-            Exit Function
-        End If
-
-        ' Leader pin: long smaller round bar (dia 1.35-2.2, length >= 10)
-        If ratio >= 1.6 And dia >= 1.35 And dia <= 2.2 And axisLen >= 10# Then
-            StandardRoundComponentRole = "Leader Pin"
-            Exit Function
-        End If
-
-        ' Return pin: long ~1" class round pin (dia 0.9-1.35, length >= 8)
-        If ratio >= 1.6 And dia >= 0.9 And dia < 1.35 And axisLen >= 8# Then
-            StandardRoundComponentRole = "Ejector Return Pin"
-            Exit Function
-        End If
-
-        If ratio >= 4# Then
-            If dia <= 1.15 Then
-                StandardRoundComponentRole = "Ejector Return Pin"
-            Else
-                StandardRoundComponentRole = "Leader Pin"
-            End If
-            Exit Function
-        End If
-
-        ' Short cylinder bushing-size (dia 1.0-2.6); zone pass refines leader vs guided-ejector
-        If ratio <= 2# And ratio >= 0.6 And dia >= 1# And dia <= 2.6 And parts(idx).BBoxVolume <= 150# Then
-            StandardRoundComponentRole = "Leader Pin Bushing"
-            Exit Function
-        End If
-    End If
-
-    ' Name fallback only for ambiguous round items that geometry did not settle.
-    If InStr(u, "SUPPORT PILLAR") > 0 Or InStr(u, "PILLAR") > 0 Or InStr(u, "SUPPORT POST") > 0 Then
-        StandardRoundComponentRole = "Support Pillar"
-        Exit Function
-    End If
-
-    If InStr(u, "BUSH") > 0 Or InStr(u, "SLEEVE") > 0 Or Left(pn, 1) = "B" Or Left(pn, 3) = "GEB" Then
-        If InStr(u, "EJECT") > 0 Or Left(pn, 3) = "GEB" Then
-            StandardRoundComponentRole = "Guided Ejector Bushing"
-        Else
-            StandardRoundComponentRole = "Leader Pin Bushing"
-        End If
-        Exit Function
-    End If
-
-    If InStr(u, "RETURN") > 0 Then
+    If InStr(u, "RETURN-PIN") > 0 Or InStr(u, "RETURN PIN") > 0 Then
         StandardRoundComponentRole = "Return Pin"
         Exit Function
     End If
 
-    If InStr(u, "LEADER") > 0 Or InStr(u, "GUIDE PIN") > 0 Or Left(pn, 2) = "LP" Or Left(pn, 1) = "P" Then
+    If InStr(u, "PILLAR_D") > 0 Or InStr(u, "SUPPORT PILLAR") > 0 Or InStr(u, "PILLAR") > 0 Then
+        StandardRoundComponentRole = "Support Pillar"
+        Exit Function
+    End If
+
+    If IsLatchLockName(raw) Then
+        StandardRoundComponentRole = "Latch Lock / Safety Strap"
+        Exit Function
+    End If
+
+    If dia >= 2# And axisLen >= 3# Then
+        StandardRoundComponentRole = "Support Pillar"
+        Exit Function
+    End If
+
+    If dia >= 1.35 And dia <= 2.5 And axisLen >= 6# And ratio >= 2# Then
         StandardRoundComponentRole = "Leader Pin"
         Exit Function
     End If
 
-    If InStr(u, "EJECT") > 0 And InStr(u, "PIN") > 0 Then
-        StandardRoundComponentRole = "Ejector Pin"
-        Exit Function
+    If dia >= 0.75 And dia < 1.35 And axisLen >= 6# And ratio >= 4# Then
+        If InStr(u, "RETURN") > 0 Or InStr(u, "EJECT") > 0 Then
+            StandardRoundComponentRole = "Return Pin"
+            Exit Function
+        End If
     End If
 
-    If ratio >= 3.5 Then
-        If dia >= 0.875 Then
-            StandardRoundComponentRole = "Leader Pin"
-        Else
-            StandardRoundComponentRole = "Ejector Return Pin"
+    If ratio <= 2# And dia >= 1# And dia <= 2.75 Then
+        If InStr(u, "BUSH") > 0 Or InStr(u, "SLEEVE") > 0 Then
+            StandardRoundComponentRole = "Leader Pin Bushing"
+            Exit Function
         End If
-    Else
-        StandardRoundComponentRole = "Leader Pin Bushing"
     End If
+
+    Exit Function
+
+ErrHandler:
+    StandardRoundComponentRole = ""
 End Function
 
-' Latch-lock / PLC / safety-strap tokens (qwen is_latch_lock_name).
+
 Private Function IsLatchLockName(ByVal raw As String) As Boolean
     Dim u As String
     u = UCase(raw)
@@ -13068,16 +14537,34 @@ Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp
     Next i
 
     For i = 1 To PartCount
-        If Not IsRoundBarLike(i) Then GoTo nextRound
+
+        If Not IsGuideRoundCandidate(i) Then GoTo nextRound
+
         dia = RoundBarDiameter(i)
         axisLen = RoundBarAxisLength(i)
+
         If dia <= 0# Or dia > 4# Then GoTo nextRound
+
         ratio = axisLen / dia
-        If ratio >= 3# And axisLen >= 6# Then
-            If nLong < UBound(longPinIdx) Then nLong = nLong + 1: longPinIdx(nLong) = i
-        ElseIf ratio >= 0.6 And ratio <= 1.35 And dia >= 1# And dia <= 2.6 Then
-            If nShort < UBound(shortBushIdx) Then nShort = nShort + 1: shortBushIdx(nShort) = i
+
+        If ratio >= 2# And axisLen >= 6# Then
+            If nLong < UBound(longPinIdx) Then
+                nLong = nLong + 1
+                longPinIdx(nLong) = i
+            End If
+
+        ElseIf ratio >= 0.6 And ratio <= 1.6 And dia >= 1# And dia <= 2.75 Then
+            If InStr(UCase$(parts(i).componentName), "BUSH") > 0 Or _
+               InStr(UCase$(parts(i).componentName), "LBB") > 0 Or _
+               InStr(UCase$(parts(i).componentName), "GEB") > 0 Then
+
+                If nShort < UBound(shortBushIdx) Then
+                    nShort = nShort + 1
+                    shortBushIdx(nShort) = i
+                End If
+            End If
         End If
+
 nextRound:
     Next i
 
@@ -13153,7 +14640,13 @@ nextRound:
                 If setShoulderHits(sid) = 0 And setEjectorHits(sid) = 0 Then
                     setShoulderHits(sid) = setShoulderHits(sid) + 1
                 End If
-                SetStdCadRole pinIdx(i), "Leader Pin"
+                Dim bushEvRole As String
+                bushEvRole = StandardRoundComponentRole(pinIdx(i))
+                If NormalizeKey(bushEvRole) = "RETURNPIN" Or NormalizeKey(bushEvRole) = "EJECTORRETURNPIN" Then
+                    SetStdCadRole pinIdx(i), "Return Pin"
+                Else
+                    SetStdCadRole pinIdx(i), "Leader Pin"
+                End If
                 If StdCadRole(shortBushIdx(j)) = "" Then SetStdCadRole shortBushIdx(j), "Leader Pin Bushing"
                 Exit For
             End If
@@ -13206,22 +14699,35 @@ nextBushEv:
                 " (bushing/shoulder evidence) SECONDARY=set" & secondarySet
     End If
 
+    Dim pinRole As String
+
     For i = 1 To nPin
         sid = pinSetId(i)
+
+        pinRole = StandardRoundComponentRole(pinIdx(i))
+
+        If NormalizeKey(pinRole) = "RETURNPIN" Or NormalizeKey(pinRole) = "EJECTORRETURNPIN" Then
+            pinRole = "Return Pin"
+        Else
+            pinRole = "Leader Pin"
+        End If
+
         If sid = primarySet Then
             gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
-            SetStdCadRole pinIdx(i), "Leader Pin"
+            SetStdCadRole pinIdx(i), pinRole
+
         ElseIf sid = secondarySet Or (secondarySet = 0 And setEjectorHits(sid) > setShoulderHits(sid)) Then
             gStdLeaderPinSetByPart(pinIdx(i)) = "SECONDARY"
-            SetStdCadRole pinIdx(i), "Leader Pin"
+            SetStdCadRole pinIdx(i), pinRole
+
         ElseIf sid > 0 Then
-            ' Extra clusters: treat as secondary if nearer ejectors than primary.
             If ejCount > 0 And Abs(setPos(sid) - ejMean) + 0.25 < Abs(setPos(primarySet) - ejMean) Then
                 gStdLeaderPinSetByPart(pinIdx(i)) = "SECONDARY"
             Else
                 gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
             End If
-            SetStdCadRole pinIdx(i), "Leader Pin"
+
+            SetStdCadRole pinIdx(i), pinRole
         End If
     Next i
 
@@ -13848,16 +15354,14 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     If p <= 0 Then p = LookupListPriceByPartNo(PpPartNo(PpCount))
     If p <= 0 And k > 0 Then
 
-        If matchKind = "KEYWORD" Then
+        Dim isCadCapture As Boolean
+        isCadCapture = (InStr(UCase$(purchType), "CAD") > 0)
 
-            If Trim(partNo) <> "" Then
-                LogLine "PRICE WARNING (" & desc & "): part number '" & partNo & _
-                        "' was not found exactly. Weak keyword match to '" & PlPartNo(k) & _
-                        "' suppressed; NEEDS PRICE."
-            Else
-                LogLine "PRICE WARNING (" & desc & "): weak keyword match to '" & PlComp(k) & _
-                        "' with no part number - NEEDS PRICE."
-            End If
+        If matchKind = "KEYWORD" Or (isCadCapture And matchKind <> "PARTNO" And matchKind <> "DESCNO") Then
+
+            LogLine "PRICE WARNING (" & desc & "): weak CAD/keyword price match suppressed. " & _
+                    "partNo='" & partNo & "' matched list row '" & PlPartNo(k) & _
+                    "' by " & matchKind & ". NEEDS PRICE."
 
             p = 0#
 
@@ -14992,6 +16496,12 @@ On Error GoTo ErrHandler
             End If
         End If
 
+        ' Save a named corrected front view so DXF/JPG export can preserve it.
+        model.ShowNamedView2 "*Front", 1
+        StabilizeActiveView model, 50
+        SaveCurrentViewAsNamed model, CMS_FRONT_VIEW_NAME
+        LogLine "CMS_FRONT named view saved from corrected BMS *Front."
+
         LogLine "Front definition complete. Current orientation persisted as SolidWorks *Front."
         DefineStandardFrontFromHolderAndPotCom = True
 
@@ -15008,6 +16518,19 @@ ErrHandler:
     LogLine "DefineStandardFrontFromHolderAndPotCom error: " & Err.Description
     DefineStandardFrontFromHolderAndPotCom = False
 End Function
+
+Private Sub SaveCurrentViewAsNamed(ByVal model As Object, ByVal viewName As String)
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+    If Trim(viewName) = "" Then Exit Sub
+
+    model.DeleteNamedView viewName
+    Err.Clear
+
+    model.NameView viewName
+    Err.Clear
+End Sub
 
 Private Function PersistCurrentViewAsStandardFront(ByVal model As Object) As Boolean
 On Error GoTo ErrHandler
