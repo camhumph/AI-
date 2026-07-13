@@ -67,6 +67,9 @@ export default function BackgroundQuoteBar() {
               {job.status.message && (
                 <div className="mt-1 line-clamp-2 text-[10px] text-ink-500">{job.status.message}</div>
               )}
+              {job.status.warning && (
+                <div className="mt-1 line-clamp-2 text-[10px] text-accent-amber">{job.status.warning}</div>
+              )}
               {done && job.status.job_id && (
                 <button
                   onClick={() => openQuote(job.status.job_id!)}

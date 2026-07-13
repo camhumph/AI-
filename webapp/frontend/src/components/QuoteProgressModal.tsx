@@ -23,6 +23,9 @@ export default function QuoteProgressModal({
       <Card className="w-full max-w-md p-6">
         <div className="section-label mb-2">Quote in progress</div>
         <p className="text-sm text-ink-300">{status.message || "Running full CMS quote pipeline..."}</p>
+        {status.warning && (
+          <p className="mt-2 text-xs text-accent-amber">{status.warning}</p>
+        )}
         {status.job_id && (
           <p className="mt-1 font-mono text-xs text-ink-500">C-number: {status.job_id}</p>
         )}

@@ -172,9 +172,11 @@ export interface EmailSettings {
 export interface QuoteRunStatus {
   phase: string;
   message?: string;
+  warning?: string;
   job_id?: string;
   c_number?: string;
   quote_id?: string;
+  cad_path?: string;
 }
 
 export interface QuoteEmailResult {

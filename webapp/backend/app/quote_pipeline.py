@@ -80,25 +80,33 @@ def _digits_only(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
 
-def _is_foreign_job_cad(path: Path | str, c_number: str = "", cust_job: str = "") -> bool:
-    """Reject CAD that clearly belongs to another C##### or BMS job id."""
-    text = str(path).replace("/", "\\").upper()
-    want_c = (c_number or "").strip().upper().replace("-", "")
-    if want_c and not want_c.startswith("C"):
-        want_c = "C" + want_c
-    want_job = _digits_only(cust_job)
+def _cad_folder_job_mismatch_warning(
+    cad_path: str,
+    cust_job: str = "",
+    folder_hint: str = "",
+) -> str:
+    """Soft warning when XT/CAD name uses a different BMS job # than the quote folder.
 
-    c_tokens = re.findall(r"(?<![A-Z0-9])C(\d{4,6})(?!\d)", text)
-    if want_c and c_tokens:
-        want_digits = want_c[1:] if want_c.startswith("C") else want_c
-        if want_digits not in c_tokens and any(t != want_digits for t in c_tokens):
-            return True
-
-    job_tokens = re.findall(r"\d{8,}", text)
-    if want_job and job_tokens:
-        if want_job not in job_tokens and any(t != want_job for t in job_tokens):
-            return True
-    return False
+    Same physical mold is often named under an older BMS id (e.g. 851100021 XT
+    quoted as folder 851100043) — still allow the quote; just note it.
+    """
+    cad = (cad_path or "").strip()
+    if not cad:
+        return ""
+    want = _digits_only(cust_job)
+    if not want:
+        m = re.search(r"(?<!\d)(\d{8,})(?!\d)", folder_hint or "")
+        if m:
+            want = m.group(1)
+    if not want:
+        return ""
+    tokens = re.findall(r"\d{8,}", cad.replace("/", "\\"))
+    others = [t for t in tokens if t != want]
+    if not others:
+        return ""
+    return (
+        f"CAD job {others[0]} differs from folder job {want} — continuing with this XT."
+    )
 
 
 def _find_best_xt(
@@ -122,8 +130,6 @@ def _find_best_xt(
             continue
         if any(part.upper() == "BASE" for part in p.parts):
             continue
-        if _is_foreign_job_cad(p, want_c, want_job):
-            continue
         ext = p.suffix.lower()
         if ext not in _XT_EXTS:
             continue
@@ -136,8 +142,6 @@ def _find_best_xt(
             score += 500
         if "RFQ" in name_u and score < 400:
             score -= 40
-        if score < 400 and ("MOLD_BASE" in name_u or "OUTSOURCE" in name_u):
-            score -= 20
         scored.append((score, p))
     if not scored:
         return None
@@ -158,12 +162,13 @@ def stage_job_to_local_workspace(
     if c and not c.startswith("C"):
         c = "C" + c
     if not c:
-        return {"local_folder": "", "cad_path": "", "copied": 0}
+        return {"local_folder": "", "cad_path": "", "copied": 0, "warning": ""}
 
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     dest = LOCAL_WORKSPACE / c
     copied = 0
     want_job = _digits_only(cust_job)
+    folder_hint = " ".join(str(s) for s in (source_dirs or []) if s)
 
     # Fresh stage each launch so we don't mix old BASE exports with new files.
     if dest.exists():
@@ -185,33 +190,24 @@ def stage_job_to_local_workspace(
                     continue
                 if item.is_dir() and item.name.upper() == "BASE":
                     continue
-                if _is_foreign_job_cad(item, c, want_job):
-                    continue
                 target = dest / item.name
                 if item.is_file():
                     shutil.copy2(item, target)
                     copied += 1
                 elif item.is_dir():
-                    shutil.copytree(
-                        item,
-                        target,
-                        dirs_exist_ok=True,
-                        ignore=lambda _dir, names: [
-                            n
-                            for n in names
-                            if n.upper() == "BASE"
-                            or _is_foreign_job_cad(Path(_dir) / n, c, want_job)
-                        ],
-                    )
+                    shutil.copytree(item, target, dirs_exist_ok=True)
                     copied += sum(1 for _ in target.rglob("*") if _.is_file())
         except Exception:
             continue
 
     xt = _find_best_xt(dest, c_number=c, cust_job=want_job)
+    cad_path = str(xt) if xt else ""
+    warning = _cad_folder_job_mismatch_warning(cad_path, cust_job=want_job, folder_hint=folder_hint)
     return {
         "local_folder": str(dest),
-        "cad_path": str(xt) if xt else "",
+        "cad_path": cad_path,
         "copied": copied,
+        "warning": warning,
     }
 
 
@@ -390,6 +386,13 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     ) if c_number else {}
     local_cad = str(staged.get("cad_path") or "")
     local_folder = str(staged.get("local_folder") or "")
+    cad_warning = str(staged.get("warning") or "")
+    if not cad_warning and local_cad:
+        cad_warning = _cad_folder_job_mismatch_warning(
+            local_cad,
+            cust_job=str(info.get("cust_job") or ""),
+            folder_hint=attach_dir,
+        )
     # Only advertise local stage when we actually found CAD or copied files.
     if not local_cad and int(staged.get("copied") or 0) <= 0:
         local_folder = ""
@@ -412,30 +415,40 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         encoding="utf-8",
     )
 
+    start_msg = (
+        f"Staged to {local_folder}; opening local XT..."
+        if local_cad
+        else "Opening CAD in SolidWorks, then running Module6121.swp..."
+    )
+    if cad_warning:
+        start_msg = f"{cad_warning} {start_msg}"
+
     set_status(
         quote_id,
         phase="starting",
-        message=(
-            f"Staged to {local_folder}; opening local XT..."
-            if local_cad
-            else "Opening CAD in SolidWorks, then running Module6121.swp..."
-        ),
+        message=start_msg,
         attach_dir=attach_dir,
         c_number=c_number or None,
         local_job_folder=local_folder or None,
         cad_path=local_cad or None,
+        warning=cad_warning or None,
     )
 
     run_dme_price_lookup(wait=False)
 
+    launch_msg = (
+        f"Opening local XT then Module6121.swp..."
+        if local_cad
+        else "Opening CAD in SolidWorks first, then Module6121.swp..."
+    )
+    if cad_warning:
+        launch_msg = f"{cad_warning} {launch_msg}"
+
     set_status(
         quote_id,
         phase="launching",
-        message=(
-            f"Opening local XT then Module6121.swp..."
-            if local_cad
-            else "Opening CAD in SolidWorks first, then Module6121.swp..."
-        ),
+        message=launch_msg,
+        warning=cad_warning or None,
     )
 
     launcher = _find_launcher()
@@ -469,18 +482,23 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     if c_num:
         jobs.create_job(c_num, display_name=info.get("subject", c_num)[:80], customer=info.get("cust_job", ""))
         started = MACRO_STARTED_FILE.exists()
+        run_msg = (
+            f"Module6121 acknowledged start for {c_num}..."
+            if started
+            else f"SolidWorks opening CAD — Module6121 quoting {c_num}..."
+        )
+        if cad_warning:
+            run_msg = f"{cad_warning} {run_msg}"
         set_status(
             quote_id,
             phase="running",
-            message=(
-                f"Module6121 acknowledged start for {c_num}..."
-                if started
-                else f"SolidWorks opening CAD — Module6121 quoting {c_num}..."
-            ),
+            message=run_msg,
             c_number=c_num,
             job_id=c_num,
             handoff=handoff if c_num else {},
             macro_started=started,
+            warning=cad_warning or None,
+            cad_path=local_cad or handoff.get("CadPath") or None,
         )
     else:
         set_status(
@@ -552,10 +570,13 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         )
         cad_path = str(staged.get("cad_path") or "")
         if not cad_path:
-            raw_cad = str(info.get("cad_path") or item.get("cad_path") or "")
-            if raw_cad and not _is_foreign_job_cad(raw_cad, c_number, str(info.get("cust_job") or "")):
-                cad_path = raw_cad
+            cad_path = str(info.get("cad_path") or item.get("cad_path") or "")
         local_folder = str(staged.get("local_folder") or "")
+        cad_warning = str(staged.get("warning") or "") or _cad_folder_job_mismatch_warning(
+            cad_path,
+            cust_job=str(info.get("cust_job") or ""),
+            folder_hint=attach_dir,
+        )
 
         job = {
             "CNum": c_number,
@@ -573,13 +594,18 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         batch_jobs.append(job)
         qid = quote_id or c_number
         quote_ids.append(qid)
+        queue_msg = f"Queued in batch ({len(batch_jobs)} jobs)..."
+        if cad_warning:
+            queue_msg = f"{cad_warning} {queue_msg}"
         set_status(
             qid,
             phase="queued",
-            message=f"Queued in batch ({len(batch_jobs)} jobs)...",
+            message=queue_msg,
             c_number=c_number,
             attach_dir=attach_dir,
             batch=True,
+            cad_path=cad_path or None,
+            warning=cad_warning or None,
         )
         jobs.create_job(c_number, display_name=str(info.get("subject", c_number))[:80], customer=str(info.get("cust_job", "")))
 

@@ -184,11 +184,10 @@ End If
 gCadPath = ""
 If gEmailCadPath <> "" Then
     If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
+        gCadPath = gEmailCadPath
         If IsForeignJobCad(gEmailCadPath) Then
-            LogStep "WARNING: ignoring foreign-job CadPath from cms_email.txt: " & gEmailCadPath
-            gEmailCadPath = ""
+            LogStep "NOTE: CAD job # differs from folder job # — continuing: " & gCadPath
         Else
-            gCadPath = gEmailCadPath
             LogStep "using CadPath from cms_email.txt: " & gCadPath
         End If
     End If
@@ -631,7 +630,6 @@ Function CadPriority(ext, fileName)
     Dim e, bonus, u
     e = LCase(ext)
     u = UCase(fileName)
-    If IsForeignJobCad(u) Then CadPriority = 0: Exit Function
     bonus = 0
     If cNum <> "" Then
         If InStr(u, UCase(cNum)) > 0 Then bonus = bonus + 500
@@ -651,10 +649,6 @@ Function CadPriority(ext, fileName)
         bonus = bonus + 10
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
-    ' Generic mold-base XT with no job tokens loses to job-matched files.
-    If bonus = 0 And (InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0) Then
-        bonus = bonus - 20
-    End If
     Select Case e
         ' Prefer customer Parasolid XT / STEP for open-first quoting (not exported SLDASM).
         Case "x_t", "x_b": CadPriority = 120 + bonus
@@ -692,27 +686,23 @@ Function FindBestXtInFolder(folderPath)
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
         If Not IsGeneratedBaseCadPath(f.Path) Then
-            If Not IsForeignJobCad(f.Path) Then
-                score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name)
-                If score > bestScore Then
-                    bestScore = score
-                    bestPath = f.Path
-                End If
+            score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name)
+            If score > bestScore Then
+                bestScore = score
+                bestPath = f.Path
             End If
         End If
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
             If UCase(sub1.Name) <> "BASE" Then
-                If Not IsForeignJobCad(sub1.Path) Then
-                    hit = FindBestXtInFolder(sub1.Path)
-                    If hit <> "" Then
-                        If Not IsGeneratedBaseCadPath(hit) And Not IsForeignJobCad(hit) Then
-                            score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
-                            If score > bestScore Then
-                                bestScore = score
-                                bestPath = hit
-                            End If
+                hit = FindBestXtInFolder(sub1.Path)
+                If hit <> "" Then
+                    If Not IsGeneratedBaseCadPath(hit) Then
+                        score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                        If score > bestScore Then
+                            bestScore = score
+                            bestPath = hit
                         End If
                     End If
                 End If
@@ -760,42 +750,13 @@ Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
         If UCase(attachDir) <> UCase(dest) Then src = attachDir
     End If
     If src <> "" Then
-        n = CopyDirContentsSkippingForeignJobs(src, dest)
+        n = CopyDirContents(src, dest)
         LogStep "staged " & n & " file(s) from " & src & " -> " & dest
     Else
         LogStep "stage skipped — no source folder for " & dest
     End If
     On Error GoTo 0
     If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
-End Function
-
-' Like CopyDirContents, but skip subfolders/files that belong to another BMS/C job.
-Function CopyDirContentsSkippingForeignJobs(src, dst)
-    Dim n, f, sub1, d2
-    n = 0
-    On Error Resume Next
-    For Each f In fso.GetFolder(src).Files
-        If Not IsForeignJobCad(f.Path) Then
-            fso.CopyFile f.Path, dst & "\" & f.Name, True
-            If Err.Number = 0 Then n = n + 1
-            Err.Clear
-        Else
-            LogStep "stage skip foreign CAD file: " & f.Name
-            Err.Clear
-        End If
-    Next
-    For Each sub1 In fso.GetFolder(src).SubFolders
-        If UCase(sub1.Name) = "BASE" Then
-            ' skip generated outputs
-        ElseIf IsForeignJobCad(sub1.Path) Then
-            LogStep "stage skip foreign job folder: " & sub1.Name
-        Else
-            d2 = dst & "\" & sub1.Name
-            If Not fso.FolderExists(d2) Then fso.CreateFolder d2
-            n = n + CopyDirContentsSkippingForeignJobs(sub1.Path, d2)
-        End If
-    Next
-    CopyDirContentsSkippingForeignJobs = n
 End Function
 
 Function FindBestCadInFolder(folderPath)
@@ -812,27 +773,23 @@ Function FindBestCadInFolder(folderPath)
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
         If Not IsGeneratedBaseCadPath(f.Path) Then
-            If Not IsForeignJobCad(f.Path) Then
-                score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
-                If score > bestScore Then
-                    bestScore = score
-                    bestPath = f.Path
-                End If
+            score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
+            If score > bestScore Then
+                bestScore = score
+                bestPath = f.Path
             End If
         End If
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
             If UCase(sub1.Name) <> "BASE" Then
-                If Not IsForeignJobCad(sub1.Path) Then
-                    hit = FindBestCadInFolder(sub1.Path)
-                    If hit <> "" Then
-                        If Not IsGeneratedBaseCadPath(hit) And Not IsForeignJobCad(hit) Then
-                            score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
-                            If score > bestScore Then
-                                bestScore = score
-                                bestPath = hit
-                            End If
+                hit = FindBestCadInFolder(sub1.Path)
+                If hit <> "" Then
+                    If Not IsGeneratedBaseCadPath(hit) Then
+                        score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                        If score > bestScore Then
+                            bestScore = score
+                            bestPath = hit
                         End If
                     End If
                 End If
