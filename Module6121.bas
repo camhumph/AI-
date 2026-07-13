@@ -694,10 +694,21 @@ On Error GoTo ErrHandler
     If gProcessingHandoff Then
         If CustomerJobNumber <> "" Then
             If InStr(UCase(modelTitle & " " & modelPath), UCase(CustomerJobNumber)) = 0 Then
-                LogLine "WARNING: Active CAD does not appear to match handoff customer job."
+
+                LogErrorText "Active CAD does not match handoff customer job. Stopping to prevent wrong BOM/CAD quote."
                 LogLine "  Active CAD: " & modelTitle
                 LogLine "  Active path: " & modelPath
                 LogLine "  Handoff customer job: " & CustomerJobNumber
+
+                If Not SUPPRESS_USER_PROMPTS Then
+                    MsgBox "The open CAD does not match the launcher/job handoff." & vbCrLf & vbCrLf & _
+                           "Open CAD: " & modelTitle & vbCrLf & _
+                           "Expected customer job: " & CustomerJobNumber & vbCrLf & vbCrLf & _
+                           "Close the wrong CAD or clear the handoff file before running.", _
+                           vbCritical, "CMS Base Export - CAD/BOM mismatch"
+                End If
+
+                Exit Sub
             End If
         End If
     End If
@@ -2234,13 +2245,6 @@ On Error GoTo ErrHandler
     If model Is Nothing Then Exit Function
     If model.GetType <> swDocASSEMBLY Then Exit Function
 
-    ' Module6121 geometry-classified fallback.
-    If OrientFromPairIndices(model, gIdxTCP, gIdxBCP, "Geometry TCP/BCP fallback") Then
-        TryShowTcpTopViewFromComponentCenters = True
-        Exit Function
-    End If
-
-    ' Original name-based method.
     If TryOrientTcpUpByViewProjection(model) Then
         TryShowTcpTopViewFromComponentCenters = True
         Exit Function
@@ -2472,8 +2476,9 @@ On Error GoTo ErrHandler
     Dim oriented As Boolean
     oriented = False
 
+    ' GEMINI1 ORDER:
     ' More reliable than TCP/BCP when imported parts have generic names:
-    ' try top-side/bottom-side holder/pot/insert pairs first (gemini1 order).
+    ' try top-side/bottom-side holder/pot/insert pairs first.
 
     If oriented = False Then
         oriented = TryOrientFromMatchedQuotePair(model, _
@@ -2501,31 +2506,6 @@ On Error GoTo ErrHandler
                     "TCP", _
                     "BCP", _
                     "Matched TCP/BCP")
-    End If
-
-    ' Geometry-classification fallback.
-    ' Module6121 scans/classifies TCP/BCP, holders, and pots before orientation.
-    ' Use those indexes when BOM/name matching is unavailable.
-    ' TCP/BCP first once clamp classification is trustworthy.
-    If oriented = False Then
-        oriented = OrientFromPairIndices(model, _
-                    gIdxTCP, _
-                    gIdxBCP, _
-                    "Geometry TCP/BCP")
-    End If
-
-    If oriented = False Then
-        oriented = OrientFromPairIndices(model, _
-                    gIdxIDH, _
-                    gIdxODH, _
-                    "Geometry TOP/BOTTOM HOLDER")
-    End If
-
-    If oriented = False Then
-        oriented = OrientFromPairIndices(model, _
-                    gIdxIDP, _
-                    gIdxODP, _
-                    "Geometry TOP/BOTTOM POT")
     End If
 
     If oriented = False Then
@@ -2569,13 +2549,6 @@ On Error GoTo ErrHandler
 
     model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     StabilizeActiveView model, 100
-
-    ' IMPORTANT:
-    ' Do NOT run the extra TCP flat-face / mass-flip corrections here.
-    ' The first/gemini1 macro does not do this, and extra X/Y or 180° rotations
-    ' can destroy the already-correct CMS_TOP orientation.
-    'EnsureTcpLargeFlatFaceTowardCamera model, persistAsStandardTop
-    'EnsureLighterClampTowardCamera model, persistAsStandardTop
 
     Exit Sub
 
@@ -7961,9 +7934,8 @@ Private Function CountFullFootprintPlates() As Long
 End Function
 
 ' Detect whether this job is a standard base (vs pot/holder block).
-' Prefer clear PCS/DME plate names (A/B/EJ/clamp) so steel uses those labels
-' instead of BMS ID/OD Pot. True BMS jobs (BMS/Tempcraft in the name, and no
-' PCS plate stack) still take the pot-block path.
+' BMS/pot-block signals must win before BOM standard-plate detection so BMS
+' jobs use EnsureCmsTopOrientationFromMatchedTcpBcp (gemini1), not SetStandardBaseOrientation.
 Private Function DetectBaseTypeIsStandard() As Boolean
     If UCase(BASE_TYPE_MODE) = "STANDARD" Then DetectBaseTypeIsStandard = True: Exit Function
     If UCase(BASE_TYPE_MODE) = "POT" Then DetectBaseTypeIsStandard = False: Exit Function
@@ -7971,7 +7943,28 @@ Private Function DetectBaseTypeIsStandard() As Boolean
     Dim nFull As Long
     nFull = CountFullFootprintPlates()
 
-    ' 1) Strong PCS / DME structural plate tokens in CAD names.
+    ' 1) BMS / Tempcraft / pot-block in folder or CAD file name.
+    If LooksLikeBmsJobFromName() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from job/folder/CAD file name (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' 2) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
+    If LooksLikeBmsJobFromBom() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' 3) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
+    If LooksLikeBmsJobFromGeometry() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' 4) Strong PCS / DME structural plate tokens in CAD names.
     Dim nPcs As Long, nStrongPcs As Long
     nPcs = CountPcsStandardPlateNameHits()
     nStrongPcs = CountPcsStrongPlateNameHits()
@@ -7981,8 +7974,7 @@ Private Function DetectBaseTypeIsStandard() As Boolean
         Exit Function
     End If
 
-    ' 2) BOM that names several standard structural plates -> standard base
-    '    (before BMS name/BOM tokens so Dynacast/PCS BOMs with stray "TCP" win).
+    ' 5) BOM that names several standard structural plates -> standard base.
     Dim i As Long, nStd As Long
     nStd = 0
     For i = 1 To BomCount
@@ -7994,31 +7986,10 @@ Private Function DetectBaseTypeIsStandard() As Boolean
         Exit Function
     End If
 
-    ' 3) BMS / Tempcraft / pot-block in folder or CAD file name.
-    If LooksLikeBmsJobFromName() Then
-        DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from job/folder/CAD file name (nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 4) Geometry: 3+ full-footprint plates = standard mold stack.
+    ' 6) Geometry: 3+ full-footprint plates = standard mold stack.
     If nFull >= 3 Then
         DetectBaseTypeIsStandard = True
         LogLine "Base type STANDARD from geometry (nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 5) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
-    If LooksLikeBmsJobFromBom() Then
-        DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 6) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
-    If LooksLikeBmsJobFromGeometry() Then
-        DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
         Exit Function
     End If
 
@@ -13019,13 +12990,6 @@ On Error GoTo ErrHandler
 
     Set holderIndexes = New Collection
     Set potIndexes = New Collection
-
-    ' Prefer geometry-classified BMS parts when available.
-    AddUniqueCadIndexToCollection holderIndexes, gIdxIDH
-    AddUniqueCadIndexToCollection holderIndexes, gIdxODH
-
-    AddUniqueCadIndexToCollection potIndexes, gIdxIDP
-    AddUniqueCadIndexToCollection potIndexes, gIdxODP
 
     AddUniqueCadIndexToCollection holderIndexes, _
         FindCadIndexForOrientationQuoteOrKeys("ID HOLDER", ID_HOLDER_KEYS)
