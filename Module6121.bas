@@ -2223,6 +2223,13 @@ On Error GoTo ErrHandler
     If model Is Nothing Then Exit Function
     If model.GetType <> swDocASSEMBLY Then Exit Function
 
+    ' Module6121 geometry-classified fallback.
+    If OrientFromPairIndices(model, gIdxTCP, gIdxBCP, "Geometry TCP/BCP fallback") Then
+        TryShowTcpTopViewFromComponentCenters = True
+        Exit Function
+    End If
+
+    ' Original name-based method.
     If TryOrientTcpUpByViewProjection(model) Then
         TryShowTcpTopViewFromComponentCenters = True
         Exit Function
@@ -2454,20 +2461,9 @@ On Error GoTo ErrHandler
     Dim oriented As Boolean
     oriented = False
 
-    ' gemini1 mass rule first: TCP is lighter, BCP is heavier. When both
-    ' clamps are known, orient from their centers so the light plate is on top.
-    ResolveTcpBcpIndicesByMass
-    If oriented = False And gIdxTCP > 0 And gIdxBCP > 0 Then
-        If parts(gIdxTCP).hasAsmCenter And parts(gIdxBCP).hasAsmCenter Then
-            LogLine "Orienting from mass-resolved TCP(light)/BCP(heavy) centers."
-            oriented = OrientTcpTopFromCenters(model, _
-                parts(gIdxTCP).AsmCenterX, parts(gIdxTCP).AsmCenterY, parts(gIdxTCP).AsmCenterZ, _
-                parts(gIdxBCP).AsmCenterX, parts(gIdxBCP).AsmCenterY, parts(gIdxBCP).AsmCenterZ, _
-                "Mass TCP(light)/BCP(heavy)")
-        End If
-    End If
+    ' More reliable than TCP/BCP when imported parts have generic names:
+    ' try top-side/bottom-side holder/pot/insert pairs first (gemini1 order).
 
-    ' Fallback: top-side/bottom-side holder/pot/insert pairs (gemini1 order).
     If oriented = False Then
         oriented = TryOrientFromMatchedQuotePair(model, _
                     "ID HOLDER", _
@@ -2494,6 +2490,30 @@ On Error GoTo ErrHandler
                     "TCP", _
                     "BCP", _
                     "Matched TCP/BCP")
+    End If
+
+    ' Geometry-classification fallback.
+    ' Module6121 scans/classifies TCP/BCP, holders, and pots before orientation.
+    ' Use those indexes when BOM/name matching is unavailable.
+    If oriented = False Then
+        oriented = OrientFromPairIndices(model, _
+                    gIdxIDH, _
+                    gIdxODH, _
+                    "Geometry TOP/BOTTOM HOLDER")
+    End If
+
+    If oriented = False Then
+        oriented = OrientFromPairIndices(model, _
+                    gIdxIDP, _
+                    gIdxODP, _
+                    "Geometry TOP/BOTTOM POT")
+    End If
+
+    If oriented = False Then
+        oriented = OrientFromPairIndices(model, _
+                    gIdxTCP, _
+                    gIdxBCP, _
+                    "Geometry TCP/BCP")
     End If
 
     If oriented = False Then
@@ -2538,204 +2558,17 @@ On Error GoTo ErrHandler
     model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     StabilizeActiveView model, 100
 
-    ' gemini1 mass rule: TCP is the lighter clamp, BCP the heavier.
-    ' After holder/pot orientation, force the lighter clamp toward the camera
-    ' so BCP never sits on top.
-    ResolveTcpBcpIndicesByMass
-    EnsureLighterClampTowardCamera model, persistAsStandardTop
+    ' IMPORTANT:
+    ' Do NOT run the extra TCP flat-face / mass-flip corrections here.
+    ' The first/gemini1 macro does not do this, and extra X/Y or 180° rotations
+    ' can destroy the already-correct CMS_TOP orientation.
+    'EnsureTcpLargeFlatFaceTowardCamera model, persistAsStandardTop
+    'EnsureLighterClampTowardCamera model, persistAsStandardTop
 
     Exit Sub
 
 ErrHandler:
     LogLine "EnsureCmsTopOrientationFromMatchedTcpBcp error: " & Err.Description
-End Sub
-
-
-' TCP = lighter clamp, BCP = heavier clamp (gemini1 same-size pair mass rule).
-' Fix gIdxTCP/gIdxBCP if they were swapped by Z-height or name matching.
-Private Sub ResolveTcpBcpIndicesByMass()
-On Error GoTo eh
-    Dim tcpIdx As Long, bcpIdx As Long
-    tcpIdx = gIdxTCP
-    bcpIdx = gIdxBCP
-
-    If tcpIdx <= 0 Then tcpIdx = FindCadIndexFromExportQuote("TCP")
-    If bcpIdx <= 0 Then bcpIdx = FindCadIndexFromExportQuote("BCP")
-
-    If tcpIdx > 0 And bcpIdx > 0 And tcpIdx <= PartCount And bcpIdx <= PartCount Then
-        Dim tcpMass As Double, bcpMass As Double
-        tcpMass = parts(tcpIdx).massValue
-        bcpMass = parts(bcpIdx).massValue
-        If tcpMass <= 0# Then tcpMass = parts(tcpIdx).BBoxVolume
-        If bcpMass <= 0# Then bcpMass = parts(bcpIdx).BBoxVolume
-
-        If tcpMass > bcpMass Then
-            LogLine "TCP/BCP mass swap: labeled TCP was heavier (" & _
-                    FormatNumberForCsv(tcpMass) & " > " & FormatNumberForCsv(bcpMass) & _
-                    ") — swapping so TCP=light, BCP=heavy."
-            Dim tmp As Long
-            tmp = tcpIdx: tcpIdx = bcpIdx: bcpIdx = tmp
-        Else
-            LogLine "TCP/BCP mass OK: TCP(light)=" & FormatNumberForCsv(tcpMass) & _
-                    " BCP(heavy)=" & FormatNumberForCsv(bcpMass)
-        End If
-        gIdxTCP = tcpIdx
-        gIdxBCP = bcpIdx
-        Exit Sub
-    End If
-
-    ' No export indices: pick two largest thin clamp-like plates by mass.
-    Dim i As Long, a As Long, b As Long
-    Dim bestVol1 As Double, bestVol2 As Double
-    a = 0: b = 0
-    bestVol1 = -1#: bestVol2 = -1#
-    For i = 1 To PartCount
-        If parts(i).Thickness > 0# And parts(i).Thickness <= 2.5 Then
-            If parts(i).Width * parts(i).Length >= 50# Then
-                If parts(i).BBoxVolume > bestVol1 Then
-                    bestVol2 = bestVol1: b = a
-                    bestVol1 = parts(i).BBoxVolume: a = i
-                ElseIf parts(i).BBoxVolume > bestVol2 Then
-                    bestVol2 = parts(i).BBoxVolume: b = i
-                End If
-            End If
-        End If
-    Next i
-    If a > 0 And b > 0 Then
-        Dim ma As Double, mb As Double
-        ma = parts(a).massValue: If ma <= 0# Then ma = parts(a).BBoxVolume
-        mb = parts(b).massValue: If mb <= 0# Then mb = parts(b).BBoxVolume
-        If ma <= mb Then
-            gIdxTCP = a: gIdxBCP = b
-        Else
-            gIdxTCP = b: gIdxBCP = a
-        End If
-        LogLine "TCP/BCP resolved from clamp geometry by mass: TCP=" & gIdxTCP & " BCP=" & gIdxBCP
-    End If
-    Exit Sub
-eh:
-    LogLine "ResolveTcpBcpIndicesByMass error: " & Err.Description
-End Sub
-
-' Flip 180° about view X if the heavier clamp (BCP) is closer to the camera
-' than the lighter clamp (TCP). This is the definitive top-side check.
-Private Sub EnsureLighterClampTowardCamera(ByVal model As Object, _
-                                           ByVal persistAsStandardTop As Boolean)
-On Error GoTo eh
-    If model Is Nothing Then Exit Sub
-
-    Dim tcpIdx As Long, bcpIdx As Long
-    tcpIdx = gIdxTCP
-    bcpIdx = gIdxBCP
-    If tcpIdx <= 0 Or bcpIdx <= 0 Then Exit Sub
-    If tcpIdx > PartCount Or bcpIdx > PartCount Then Exit Sub
-    If parts(tcpIdx).hasAsmCenter = False Or parts(bcpIdx).hasAsmCenter = False Then Exit Sub
-
-    ' Guarantee mass order before depth test.
-    Dim tcpMass As Double, bcpMass As Double
-    tcpMass = parts(tcpIdx).massValue
-    bcpMass = parts(bcpIdx).massValue
-    If tcpMass <= 0# Then tcpMass = parts(tcpIdx).BBoxVolume
-    If bcpMass <= 0# Then bcpMass = parts(bcpIdx).BBoxVolume
-    If tcpMass > bcpMass Then
-        Dim tmp As Long
-        tmp = tcpIdx: tcpIdx = bcpIdx: bcpIdx = tmp
-        gIdxTCP = tcpIdx: gIdxBCP = bcpIdx
-        tcpMass = parts(tcpIdx).massValue: If tcpMass <= 0# Then tcpMass = parts(tcpIdx).BBoxVolume
-        bcpMass = parts(bcpIdx).massValue: If bcpMass <= 0# Then bcpMass = parts(bcpIdx).BBoxVolume
-    End If
-
-    Dim swView As Object
-    Set swView = model.ActiveView
-    If swView Is Nothing Then Exit Sub
-
-    Dim mView As Variant
-    mView = swView.Orientation3.ArrayData
-    If IsEmpty(mView) Or IsArray(mView) = False Then Exit Sub
-    If UBound(mView) < 8 Then Exit Sub
-
-    ' View Z (into/toward camera axis). gemini1 pot-front: larger projected Z = closer.
-    Dim zx As Double, zy As Double, zz As Double
-    zx = CDbl(mView(2)): zy = CDbl(mView(5)): zz = CDbl(mView(8))
-
-    Dim tcpDepth As Double, bcpDepth As Double
-    tcpDepth = parts(tcpIdx).AsmCenterX * zx + parts(tcpIdx).AsmCenterY * zy + parts(tcpIdx).AsmCenterZ * zz
-    bcpDepth = parts(bcpIdx).AsmCenterX * zx + parts(bcpIdx).AsmCenterY * zy + parts(bcpIdx).AsmCenterZ * zz
-
-    LogLine "Clamp camera check: TCP(light mass=" & FormatNumberForCsv(tcpMass) & _
-            ") depth=" & FormatNumberForCsv(tcpDepth) & _
-            " BCP(heavy mass=" & FormatNumberForCsv(bcpMass) & _
-            ") depth=" & FormatNumberForCsv(bcpDepth)
-
-    If tcpDepth + 0.05 < bcpDepth Then
-        LogLine "BCP (heavier) is toward camera — flipping 180° so TCP (lighter) is on top."
-        swView.RotateAboutCenter 0#, PI_VALUE
-        StabilizeActiveView model, 80
-        PersistCmsTopFromCurrentView model, persistAsStandardTop
-
-        ' Re-read depth after flip to confirm.
-        Set swView = model.ActiveView
-        If Not swView Is Nothing Then
-            mView = swView.Orientation3.ArrayData
-            If IsArray(mView) Then
-                If UBound(mView) >= 8 Then
-                    zx = CDbl(mView(2)): zy = CDbl(mView(5)): zz = CDbl(mView(8))
-                    tcpDepth = parts(tcpIdx).AsmCenterX * zx + parts(tcpIdx).AsmCenterY * zy + parts(tcpIdx).AsmCenterZ * zz
-                    bcpDepth = parts(bcpIdx).AsmCenterX * zx + parts(bcpIdx).AsmCenterY * zy + parts(bcpIdx).AsmCenterZ * zz
-                    LogLine "After flip: TCP depth=" & FormatNumberForCsv(tcpDepth) & _
-                            " BCP depth=" & FormatNumberForCsv(bcpDepth)
-                End If
-            End If
-        End If
-    Else
-        LogLine "TCP (lighter) is already toward camera (correct top)."
-        PersistCmsTopFromCurrentView model, persistAsStandardTop
-    End If
-    Exit Sub
-eh:
-    LogLine "EnsureLighterClampTowardCamera error: " & Err.Description
-End Sub
-
-Private Sub PersistCmsTopFromCurrentView(ByVal model As Object, _
-                                         ByVal persistAsStandardTop As Boolean)
-On Error Resume Next
-    If model Is Nothing Then Exit Sub
-    If persistAsStandardTop Then PersistCurrentViewAsStandardTop model
-    model.DeleteNamedView CMS_TOP_VIEW_NAME
-    Err.Clear
-    model.NameView CMS_TOP_VIEW_NAME
-    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
-    StabilizeActiveView model, 50
-End Sub
-
-Private Sub RotateViewXSteps(ByVal model As Object, ByVal steps As Long)
-On Error Resume Next
-    Dim i As Long
-    If model Is Nothing Then Exit Sub
-    If steps < 0 Then
-        For i = 1 To Abs(steps)
-            model.ViewRotateminusx
-        Next i
-    Else
-        For i = 1 To steps
-            model.ViewRotateplusx
-        Next i
-    End If
-End Sub
-
-Private Sub RotateViewYSteps(ByVal model As Object, ByVal steps As Long)
-On Error Resume Next
-    Dim i As Long
-    If model Is Nothing Then Exit Sub
-    If steps < 0 Then
-        For i = 1 To Abs(steps)
-            model.ViewRotateminusy
-        Next i
-    Else
-        For i = 1 To steps
-            model.ViewRotateplusy
-        Next i
-    End If
 End Sub
 
 Private Sub SetStandardBaseOrientation(ByVal model As Object)
@@ -7196,16 +7029,12 @@ Private Sub ClassifyPotBlockPlatesFromCad()
         End If
 NextPart:
     Next i
-    AssignPairByMassLightIsTop cl, ncl, gIdxTCP, gIdxBCP   ' TCP lighter, BCP heavier
-    AssignPairByMassHeavyIsTop ho, nho, gIdxIDH, gIdxODH   ' ID holder heavier, OD lighter
-    AssignPairByMassLightIsTop po, npo, gIdxIDP, gIdxODP   ' ID pot lighter, OD heavier
+    AssignPairTopBottom cl, ncl, gIdxTCP, gIdxBCP
+    AssignPairTopBottom ho, nho, gIdxIDH, gIdxODH
+    AssignPairTopBottom po, npo, gIdxIDP, gIdxODP
     LogLine "Geometry plates: TCP=" & gIdxTCP & " BCP=" & gIdxBCP & _
             " IDholder=" & gIdxIDH & " ODholder=" & gIdxODH & _
             " IDpot=" & gIdxIDP & " ODpot=" & gIdxODP
-    If gIdxTCP > 0 And gIdxBCP > 0 Then
-        LogLine "Clamp mass rule: TCP(light) mass=" & FormatNumberForCsv(parts(gIdxTCP).massValue) & _
-                " BCP(heavy) mass=" & FormatNumberForCsv(parts(gIdxBCP).massValue)
-    End If
 End Sub
 
 ' Pots are easy to tell from mold plates:
@@ -7235,88 +7064,95 @@ Private Function IsPotBlockGeometry(ByVal t As Double, ByVal w As Double, ByVal 
     IsPotBlockGeometry = True
 End Function
 
-' Pair assignment by mass (gemini1 rule for same-size clamp/insert pairs):
-'   LightIsTop: lighter = top (TCP / ID pot), heavier = bottom (BCP / OD pot)
-'   HeavyIsTop: heavier = top (ID holder), lighter = bottom (OD holder)
-Private Sub AssignPairByMassLightIsTop(ByRef lst() As Long, ByVal n As Long, _
-                                       ByRef topIdx As Long, ByRef botIdx As Long)
-    AssignPairByMass lst, n, topIdx, botIdx, True
-End Sub
+' Assign ID/top vs OD/bottom using the dominant center-separation axis
+' (same idea as OrientTcpTopFromCenters). Do NOT assume Z is always top/bottom.
+Private Sub AssignPairTopBottom(ByRef lst() As Long, ByVal n As Long, ByRef topIdx As Long, ByRef botIdx As Long)
+On Error GoTo ErrHandler
 
-Private Sub AssignPairByMassHeavyIsTop(ByRef lst() As Long, ByVal n As Long, _
-                                       ByRef topIdx As Long, ByRef botIdx As Long)
-    AssignPairByMass lst, n, topIdx, botIdx, False
-End Sub
+    topIdx = 0
+    botIdx = 0
 
-Private Sub AssignPairByMass(ByRef lst() As Long, ByVal n As Long, _
-                             ByRef topIdx As Long, ByRef botIdx As Long, _
-                             ByVal lightIsTop As Boolean)
-    topIdx = 0: botIdx = 0
     If n < 1 Then Exit Sub
 
-    ' Prefer the two largest-volume candidates in the list (true plate pair).
-    Dim i As Long, j As Long, t As Long
+    Dim i As Long
+    Dim j As Long
+    Dim tmp As Long
+
+    ' Sort by volume descending so the two best candidates come first.
     For i = 1 To n - 1
         For j = i + 1 To n
             If parts(lst(j)).BBoxVolume > parts(lst(i)).BBoxVolume Then
-                t = lst(i): lst(i) = lst(j): lst(j) = t
+                tmp = lst(i)
+                lst(i) = lst(j)
+                lst(j) = tmp
             End If
         Next j
     Next i
 
-    Dim a As Long, b As Long
-    a = lst(1)
-    If n >= 2 Then b = lst(2) Else b = 0
-    If b = 0 Then topIdx = a: botIdx = 0: Exit Sub
+    Dim a As Long
+    Dim b As Long
 
-    Dim aMass As Double, bMass As Double
-    aMass = parts(a).massValue
-    bMass = parts(b).massValue
-    If aMass <= 0# Then aMass = parts(a).BBoxVolume
-    If bMass <= 0# Then bMass = parts(b).BBoxVolume
+    a = lst(1)
+
+    If n >= 2 Then
+        b = lst(2)
+    Else
+        topIdx = a
+        botIdx = 0
+        Exit Sub
+    End If
+
+    If a <= 0 Or b <= 0 Then Exit Sub
+    If a > PartCount Or b > PartCount Then Exit Sub
+
+    Dim dx As Double
+    Dim dy As Double
+    Dim dz As Double
+
+    dx = parts(a).AsmCenterX - parts(b).AsmCenterX
+    dy = parts(a).AsmCenterY - parts(b).AsmCenterY
+    dz = parts(a).AsmCenterZ - parts(b).AsmCenterZ
+
+    Dim ax As Double
+    Dim ay As Double
+    Dim az As Double
+
+    ax = Abs(dx)
+    ay = Abs(dy)
+    az = Abs(dz)
 
     Dim aIsTop As Boolean
-    If Abs(aMass - bMass) > 0.0001 Then
-        If lightIsTop Then
-            aIsTop = (aMass <= bMass)
-        Else
-            aIsTop = (aMass >= bMass)
-        End If
+
+    ' Use the dominant separation axis, same idea as OrientTcpTopFromCenters.
+    ' Do NOT assume Z is top/bottom.
+    If ay >= ax And ay >= az Then
+        aIsTop = (dy >= 0#)
+    ElseIf az >= ax And az >= ay Then
+        aIsTop = (dz >= 0#)
     Else
-        ' Mass tie: fall back to higher assembly Z = top.
-        If Abs(parts(a).AsmCenterZ - parts(b).AsmCenterZ) > 0.001 Then
-            aIsTop = (parts(a).AsmCenterZ > parts(b).AsmCenterZ)
-        Else
-            aIsTop = True
-        End If
+        aIsTop = (dx >= 0#)
     End If
 
     If Not ASSIGN_ID_AS_TOP Then aIsTop = Not aIsTop
-    If aIsTop Then topIdx = a: botIdx = b Else topIdx = b: botIdx = a
-End Sub
 
-' Legacy Z/volume pair assign (kept for any non-mass callers).
-Private Sub AssignPairTopBottom(ByRef lst() As Long, ByVal n As Long, ByRef topIdx As Long, ByRef botIdx As Long)
-    topIdx = 0: botIdx = 0
-    If n < 1 Then Exit Sub
-    Dim i As Long, j As Long, t As Long
-    For i = 1 To n - 1
-        For j = i + 1 To n
-            If parts(lst(j)).BBoxVolume > parts(lst(i)).BBoxVolume Then t = lst(i): lst(i) = lst(j): lst(j) = t
-        Next j
-    Next i
-    Dim a As Long, b As Long
-    a = lst(1)
-    If n >= 2 Then b = lst(2) Else b = 0
-    If b = 0 Then topIdx = a: botIdx = 0: Exit Sub
-    Dim aIsTop As Boolean
-    If Abs(parts(a).AsmCenterZ - parts(b).AsmCenterZ) > 0.001 Then
-        aIsTop = (parts(a).AsmCenterZ > parts(b).AsmCenterZ)
+    If aIsTop Then
+        topIdx = a
+        botIdx = b
     Else
-        aIsTop = True   ' tie on Z -> larger-volume one (a) is ID/top
+        topIdx = b
+        botIdx = a
     End If
-    If Not ASSIGN_ID_AS_TOP Then aIsTop = Not aIsTop
-    If aIsTop Then topIdx = a: botIdx = b Else topIdx = b: botIdx = a
+
+    LogLine "AssignPairTopBottom: top=" & topIdx & " bottom=" & botIdx & _
+            " sep X/Y/Z=" & FormatNumberForCsv(dx) & "/" & _
+            FormatNumberForCsv(dy) & "/" & FormatNumberForCsv(dz)
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "AssignPairTopBottom error: " & Err.Description
+    topIdx = 0
+    botIdx = 0
 End Sub
 
 Private Function GeometryIndexForStd(ByVal stdName As String) As Long
@@ -13062,6 +12898,13 @@ On Error GoTo ErrHandler
 
     Set holderIndexes = New Collection
     Set potIndexes = New Collection
+
+    ' Prefer geometry-classified BMS parts when available.
+    AddUniqueCadIndexToCollection holderIndexes, gIdxIDH
+    AddUniqueCadIndexToCollection holderIndexes, gIdxODH
+
+    AddUniqueCadIndexToCollection potIndexes, gIdxIDP
+    AddUniqueCadIndexToCollection potIndexes, gIdxODP
 
     AddUniqueCadIndexToCollection holderIndexes, _
         FindCadIndexForOrientationQuoteOrKeys("ID HOLDER", ID_HOLDER_KEYS)
