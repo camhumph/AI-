@@ -774,10 +774,8 @@ On Error GoTo ErrHandler
         EnsureCmsTopOrientationFromMatchedTcpBcp swModel, PERSIST_CMS_TOP_AS_STANDARD_VIEWS_BEFORE_BASE_SAVE
         LogDone "Set BMS pot-block TCP/top orientation (active CAD)"
     End If
+    ' STL matrix only here — L/W/T wait until after DXF locks the same views.
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
-    CaptureCmsViewFrameFromModel swModel
-    ApplyCmsViewDimsToAllParts
-    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
     If (Not FAST_QUOTE_MODE) Or (Not gJobIsStandardBase) Then
         UnsuppressAllAssemblyComponents swModel
         ShowAllAssemblyComponents swModel
@@ -814,12 +812,26 @@ On Error GoTo ErrHandler
             swModel.NameView CMS_TOP_VIEW_NAME
             On Error GoTo ErrHandler
             CaptureFinalStandardViewsForStlCoordinateSystem swModel
-            CaptureCmsViewFrameFromModel swModel
-            ApplyCmsViewDimsToAllParts
-            WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
         End If
         LogDone "Refine STANDARD *Front from rails/latch after classify"
     End If
+
+    ComputePullcoreQuote
+    ComputePurchasedQuote
+
+    ' Export FIRST so DXF EnsureNativeDxfSourceUsesCmsTop locks the view frame.
+    LogStart "Export base package (active CAD)"
+    ExportBasePackage CurrentJobFolder & "\base"
+    LogDone "Export base package (active CAD)"
+
+    ' Assign Width/Length/Thickness only AFTER DXF views match CMS_TOP / *Front / *Right.
+    LogStart "Assign CMS view-frame dims after DXF"
+    ApplyCmsTopView swModel
+    StabilizeActiveView swModel, 50
+    CaptureCmsViewFrameFromModel swModel
+    ApplyCmsViewDimsToAllParts
+    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    LogDone "Assign CMS view-frame dims after DXF"
 
     If FILL_QUOTE_WORKBOOK Then
         LogStart "Fill Quote workbook from active CAD"
@@ -832,14 +844,6 @@ On Error GoTo ErrHandler
         If isStd Then FillStandardBaseSteel Else FillJ000SteelSheet
         LogDone "Fill J000 steel sheet from active CAD"
     End If
-
-    ComputePullcoreQuote
-    ComputePurchasedQuote
-
-    ' Export deliverables (DXF/IGS/ISO/EASM/STL) for active-CAD quotes too.
-    LogStart "Export base package (active CAD)"
-    ExportBasePackage CurrentJobFolder & "\base"
-    LogDone "Export base package (active CAD)"
 
     AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
 
@@ -1448,14 +1452,10 @@ On Error GoTo ErrHandler
         LogDone "Set BMS pot-block TCP/top orientation from matched holder/pot/TCP"
     End If
 
-    ' gemini1: capture corrected *Front matrix so merged STL post-rotates correctly.
+    ' gemini1: capture corrected *Front for STL. Do NOT assign L/W/T yet —
+    ' wait until DXF has locked CMS_TOP / *Front / *Right (same frame as Width).
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
-    CaptureCmsViewFrameFromModel swModel
-    ApplyCmsViewDimsToAllParts
-    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
 
-    ' Quote/steel FIRST so the webapp has numbers even if export is still running.
-    ' (Previously export ran before ClassifyStandardBasePlates — quote waited on STL/DXF.)
     If isStd Then
         LogStart "Classify STANDARD mold base plates"
         ClassifyStandardBasePlates
@@ -1470,7 +1470,7 @@ On Error GoTo ErrHandler
     End If
 
     ' After standard stack/rails/latch roles are known, refine *Front and
-    ' re-capture the STL coordinate frame + CMS view L/W/T dims.
+    ' re-capture the STL coordinate frame (dims still deferred until after DXF).
     If isStd Then
         LogStart "Refine STANDARD *Front from rails/latch after classify"
         If DefineStandardFrontFromRailsAndFootprint(swModel) Then
@@ -1482,22 +1482,8 @@ On Error GoTo ErrHandler
             swModel.NameView CMS_TOP_VIEW_NAME
             On Error GoTo ErrHandler
             CaptureFinalStandardViewsForStlCoordinateSystem swModel
-            CaptureCmsViewFrameFromModel swModel
-            ApplyCmsViewDimsToAllParts
-            WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
         End If
         LogDone "Refine STANDARD *Front from rails/latch after classify"
-    End If
-
-    If FILL_QUOTE_WORKBOOK Then
-        LogStart "Fill Quote workbook"
-        If isStd Then FillStandardBaseQuote Else FillQuoteWorkbookFromBoundingBox
-        LogDone "Fill Quote workbook"
-    End If
-    If FILL_J000_STEEL_SHEET Then
-        LogStart "Fill J000 steel sheet"
-        If isStd Then FillStandardBaseSteel Else FillJ000SteelSheet
-        LogDone "Fill J000 steel sheet"
     End If
 
     ComputePullcoreQuote
@@ -1522,6 +1508,26 @@ On Error GoTo ErrHandler
     LogStart "Export base package"
     ExportBasePackage CurrentJobFolder & "\base"
     LogDone "Export base package"
+
+    ' Width/Length/Thickness from the same views DXF just used.
+    LogStart "Assign CMS view-frame dims after DXF"
+    ApplyCmsTopView swModel
+    StabilizeActiveView swModel, 50
+    CaptureCmsViewFrameFromModel swModel
+    ApplyCmsViewDimsToAllParts
+    WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
+    LogDone "Assign CMS view-frame dims after DXF"
+
+    If FILL_QUOTE_WORKBOOK Then
+        LogStart "Fill Quote workbook"
+        If isStd Then FillStandardBaseQuote Else FillQuoteWorkbookFromBoundingBox
+        LogDone "Fill Quote workbook"
+    End If
+    If FILL_J000_STEEL_SHEET Then
+        LogStart "Fill J000 steel sheet"
+        If isStd Then FillStandardBaseSteel Else FillJ000SteelSheet
+        LogDone "Fill J000 steel sheet"
+    End If
 
     If RUN_VISUAL_MOLD_INSPECTION And Not FAST_QUOTE_MODE Then
         LogStart "Visual mold inspection"
@@ -2447,8 +2453,23 @@ On Error GoTo ErrHandler
     Dim oriented As Boolean
     oriented = False
 
-    ' More reliable than TCP/BCP when imported parts have generic names:
-    ' try top-side/bottom-side holder/pot/insert pairs first.
+    ' TCP must end up on TOP. Prefer physical TCP/BCP (geometry indexes, then
+    ' named components, then quote pairs). Holders/pots are fallback only —
+    ' wrong ID/OD naming used to flip the stack.
+    If oriented = False And gIdxTCP > 0 And gIdxBCP > 0 Then
+        oriented = OrientFromPairIndices(model, gIdxTCP, gIdxBCP, "Geometry TCP/BCP")
+    End If
+
+    If oriented = False Then
+        oriented = TryOrientTcpUpByViewProjection(model)
+    End If
+
+    If oriented = False Then
+        oriented = TryOrientFromMatchedQuotePair(model, _
+                    "TCP", _
+                    "BCP", _
+                    "Matched TCP/BCP")
+    End If
 
     If oriented = False Then
         oriented = TryOrientFromMatchedQuotePair(model, _
@@ -2472,29 +2493,23 @@ On Error GoTo ErrHandler
     End If
 
     If oriented = False Then
-        oriented = TryOrientFromMatchedQuotePair(model, _
-                    "TCP", _
-                    "BCP", _
-                    "Matched TCP/BCP")
-    End If
-
-    If oriented = False Then
-        LogLine "Matched top-side orientation failed from holder/pot/ins/TCP pairs."
-        LogLine "Falling back to SetCmsTopOrientation."
+        LogLine "Matched top-side orientation failed from TCP/holder/pot/ins pairs."
+        LogLine "Falling back to SetCmsTopOrientation (still running pot-front after)."
         SetCmsTopOrientation model, persistAsStandardTop
-        Exit Sub
-    End If
-
-    ' First: save the currently matched top-side orientation as SolidWorks *Top.
-    If persistAsStandardTop Then
-
-        If PersistCurrentViewAsStandardTop(model) Then
-            LogLine "Matched top-side orientation persisted as SolidWorks *Top."
-        Else
-            LogLine "WARNING: Matched top-side orientation could not be persisted as standard top."
+        ' Do NOT Exit Sub — pots-in-front must still run.
+    Else
+        ' First: save the currently matched top-side orientation as SolidWorks *Top.
+        If persistAsStandardTop Then
+            If PersistCurrentViewAsStandardTop(model) Then
+                LogLine "Matched top-side orientation persisted as SolidWorks *Top."
+            Else
+                LogLine "WARNING: Matched top-side orientation could not be persisted as standard top."
+            End If
         End If
-
     End If
+
+    ' Verify TCP is closer to the camera than BCP in the active top view.
+    EnsureTcpAboveBcpInActiveTopView model, persistAsStandardTop
 
     ' Second: define the correct SolidWorks *Front from holder long side + pot/holder COM.
     If AUTO_DEFINE_FRONT_FROM_HOLDER_POT_COM Then
@@ -2520,11 +2535,76 @@ On Error GoTo ErrHandler
     model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     StabilizeActiveView model, 100
 
+    ' Final TCP-on-top check after front redefine (front persist can rotate stack).
+    EnsureTcpAboveBcpInActiveTopView model, True
+
     Exit Sub
 
 ErrHandler:
     LogLine "EnsureCmsTopOrientationFromMatchedTcpBcp error: " & Err.Description
 End Sub
+
+' In CMS_TOP / *Top, larger view-depth = closer to camera. TCP must be closer than BCP.
+Private Sub EnsureTcpAboveBcpInActiveTopView(ByVal model As Object, _
+                                             ByVal persistAsStandardTop As Boolean)
+On Error GoTo eh
+    If model Is Nothing Then Exit Sub
+
+    Dim tcpIdx As Long, bcpIdx As Long
+    tcpIdx = gIdxTCP
+    bcpIdx = gIdxBCP
+    If tcpIdx <= 0 Or bcpIdx <= 0 Then
+        ' Fall back to quote/key match indexes if geometry classify missed.
+        tcpIdx = FindCadIndexForOrientationQuoteOrKeys("TCP", TCP_TOP_ORIENTATION_KEYS)
+        bcpIdx = FindCadIndexForOrientationQuoteOrKeys("BCP", BCP_BOTTOM_ORIENTATION_KEYS)
+    End If
+    If tcpIdx <= 0 Or bcpIdx <= 0 Then Exit Sub
+    If Not parts(tcpIdx).hasAsmCenter Or Not parts(bcpIdx).hasAsmCenter Then Exit Sub
+
+    On Error Resume Next
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    If Err.Number <> 0 Then
+        Err.Clear
+        model.ShowNamedView2 "*Top", 5
+    End If
+    On Error GoTo eh
+    StabilizeActiveView model, 50
+
+    Dim tcpD As Double, bcpD As Double
+    If Not TryProjectPointToActiveViewDepth(model, _
+            parts(tcpIdx).AsmCenterX, parts(tcpIdx).AsmCenterY, parts(tcpIdx).AsmCenterZ, tcpD) Then Exit Sub
+    If Not TryProjectPointToActiveViewDepth(model, _
+            parts(bcpIdx).AsmCenterX, parts(bcpIdx).AsmCenterY, parts(bcpIdx).AsmCenterZ, bcpD) Then Exit Sub
+
+    LogLine "TCP/BCP top-view depth: TCP=" & FormatNumberForCsv(tcpD) & _
+            " BCP=" & FormatNumberForCsv(bcpD) & " delta=" & FormatNumberForCsv(tcpD - bcpD)
+
+    ' TCP should be closer to camera (larger depth) than BCP.
+    If tcpD >= bcpD - 0.02 Then
+        LogLine "TCP-on-top check OK."
+        Exit Sub
+    End If
+
+    LogLine "TCP-on-top FAILED (TCP farther than BCP). Flipping to *Bottom and redefining *Top."
+    model.ShowNamedView2 "*Bottom", 6
+    StabilizeActiveView model, 100
+    If persistAsStandardTop Then
+        If PersistCurrentViewAsStandardTop(model) Then
+            LogLine "Flipped stack persisted as SolidWorks *Top (TCP toward camera)."
+        End If
+    End If
+    On Error Resume Next
+    model.DeleteNamedView CMS_TOP_VIEW_NAME
+    Err.Clear
+    model.NameView CMS_TOP_VIEW_NAME
+    On Error GoTo eh
+    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+    StabilizeActiveView model, 50
+    Exit Sub
+eh:
+    LogLine "EnsureTcpAboveBcpInActiveTopView error: " & Err.Description
+End Sub
+
 Private Sub SetStandardBaseOrientation(ByVal model As Object)
 On Error GoTo ErrHandler
 
@@ -4841,7 +4921,20 @@ On Error GoTo eh
         End If
     End If
 
-    ' --- RIGHT of TOP: DXF X = Thickness, DXF Y = Length (shop DXF labels) ---
+    ' --- RIGHT of TOP: confirm Thickness = right X, Length = right Y ---
+    ' Only overwrite TOP-derived L/T when RIGHT axes agree with TOP (else RIGHT
+    ' from a sideways import swaps Thickness↔Length → TCP T≈18 L≈1.4).
+    Dim topTx As Double, topTy As Double, topTz As Double
+    Dim topLx As Double, topLy As Double, topLz As Double
+    Dim topWx As Double, topWy As Double, topWz As Double
+    Dim hadTopAxes As Boolean
+    hadTopAxes = gotTop
+    If hadTopAxes Then
+        topTx = tx: topTy = ty: topTz = tz
+        topLx = lx: topLy = ly: topLz = lz
+        topWx = wx: topWy = wy: topWz = wz
+    End If
+
     model.ShowNamedView2 "*Right", 4
     StabilizeActiveView model, 30
     Set swView = model.ActiveView
@@ -4854,26 +4947,49 @@ On Error GoTo eh
                 NormalizeAxis3 rx, ry, rz
                 NormalizeAxis3 rudx, rudy, rudz
                 If Abs(rx) + Abs(ry) + Abs(rz) > 0.1 Then
-                    tx = rx: ty = ry: tz = rz
-                    gotRight = True
-                    If Abs(rudx) + Abs(rudy) + Abs(rudz) > 0.1 Then
-                        lx = rudx: ly = rudy: lz = rudz
-                    End If
-                    ' Rebuild Width orthogonal to Length & Thickness (TOP X direction).
-                    wx = ly * tz - lz * ty
-                    wy = lz * tx - lx * tz
-                    wz = lx * ty - ly * tx
-                    NormalizeAxis3 wx, wy, wz
-                    ' Prefer front-X for Width sign/choice when available.
-                    If gotFront Then
-                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, -wx, -wy, -wz) Then
-                            wx = -wx: wy = -wy: wz = -wz
-                        End If
-                        If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < 0.5 Then
-                            wx = fx: wy = fy: wz = fz
+                    Dim rightAgrees As Boolean
+                    rightAgrees = True
+                    If hadTopAxes Then
+                        ' RIGHT X should align with TOP into-screen (Thickness).
+                        If AbsDotAxis3(rx, ry, rz, topTx, topTy, topTz) < 0.7 Then
+                            rightAgrees = False
+                            LogLine "CMS view frame: RIGHT X does not match TOP thickness — keeping TOP L/W/T axes."
                         End If
                     End If
-                    gotTop = True
+                    If rightAgrees Or (Not hadTopAxes) Then
+                        tx = rx: ty = ry: tz = rz
+                        gotRight = True
+                        If Abs(rudx) + Abs(rudy) + Abs(rudz) > 0.1 Then
+                            lx = rudx: ly = rudy: lz = rudz
+                        End If
+                        ' Rebuild Width orthogonal to Length & Thickness.
+                        wx = ly * tz - lz * ty
+                        wy = lz * tx - lx * tz
+                        wz = lx * ty - ly * tx
+                        NormalizeAxis3 wx, wy, wz
+                        If gotFront Then
+                            If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < AbsDotAxis3(fx, fy, fz, -wx, -wy, -wz) Then
+                                wx = -wx: wy = -wy: wz = -wz
+                            End If
+                            If AbsDotAxis3(fx, fy, fz, wx, wy, wz) < 0.5 Then
+                                wx = fx: wy = fy: wz = fz
+                            End If
+                        ElseIf hadTopAxes Then
+                            ' Prefer original TOP Width direction/sign.
+                            If AbsDotAxis3(topWx, topWy, topWz, wx, wy, wz) < AbsDotAxis3(topWx, topWy, topWz, -wx, -wy, -wz) Then
+                                wx = -wx: wy = -wy: wz = -wz
+                            End If
+                        End If
+                        gotTop = True
+                    Else
+                        ' Keep TOP axes; optionally flip thickness sign toward RIGHT X.
+                        tx = topTx: ty = topTy: tz = topTz
+                        lx = topLx: ly = topLy: lz = topLz
+                        wx = topWx: wy = topWy: wz = topWz
+                        If AbsDotAxis3(rx, ry, rz, tx, ty, tz) < AbsDotAxis3(rx, ry, rz, -tx, -ty, -tz) Then
+                            tx = -tx: ty = -ty: tz = -tz
+                        End If
+                    End If
                 End If
             End If
         End If
@@ -4887,6 +5003,28 @@ On Error GoTo eh
     If Not gotTop Then
         LogLine "CMS view frame: could not read TOP/RIGHT orientations; dims stay sort-based until frame is ready."
         Exit Function
+    End If
+
+    ' Thin-plate sanity (TCP/BCP): Thickness must be the smallest extent. If the
+    ' frame mapped T↔L (symptom T≈18 L≈1.4), swap Length and Thickness axes.
+    If gIdxTCP > 0 Then
+        If parts(gIdxTCP).BoxDx > 0 And parts(gIdxTCP).BoxDy > 0 And parts(gIdxTCP).BoxDz > 0 Then
+            Dim chkL As Double, chkW As Double, chkT As Double
+            gCmsLenAxisX = lx: gCmsLenAxisY = ly: gCmsLenAxisZ = lz
+            gCmsWidAxisX = wx: gCmsWidAxisY = wy: gCmsWidAxisZ = wz
+            gCmsThkAxisX = tx: gCmsThkAxisY = ty: gCmsThkAxisZ = tz
+            gCmsViewFrameReady = True
+            AssignLengthWidthThicknessFromAxes parts(gIdxTCP).BoxDx, parts(gIdxTCP).BoxDy, parts(gIdxTCP).BoxDz, chkL, chkW, chkT
+            If chkT > chkL + 0.05 And chkT > chkW + 0.05 Then
+                LogLine "CMS view frame: TCP T=" & FormatNumberForCsv(chkT) & _
+                        " looks like Length — swapping L/T axes."
+                Dim sx As Double, sy As Double, sz As Double
+                sx = lx: sy = ly: sz = lz
+                lx = tx: ly = ty: lz = tz
+                tx = sx: ty = sy: tz = sz
+            End If
+            gCmsViewFrameReady = False
+        End If
     End If
 
     gCmsLenAxisX = lx: gCmsLenAxisY = ly: gCmsLenAxisZ = lz
