@@ -164,7 +164,7 @@ public class OleMessageFilter : IOleMessageFilter {
 
 try {
     [OleMessageFilter]::Register()
-    Write-LauncherLog "starting; macro=$MacroPath procedure=$Procedure"
+    Write-LauncherLog "macro-runner-v3: starting; macro=$MacroPath procedure=$Procedure"
 
     if (-not (Test-Path -LiteralPath $MacroPath)) {
         Write-LauncherLog "macro file not found: $MacroPath"

@@ -335,16 +335,106 @@ def _find_python_script(name: str) -> Path | None:
     return None
 
 
-def _deploy_launcher_assets() -> None:
-    """Copy launcher scripts from the repo into C:\\CMS_Local_Workspace on Windows."""
+def _deploy_launcher_assets() -> dict:
+    """Copy launcher scripts from the repo into C:\\CMS_Local_Workspace on Windows.
+
+    Returns a small report so the UI/log can prove the new runners were installed.
+    """
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
-    for name in ("CMS_Launcher.vbs", "RunSolidWorksMacro.ps1", "RunTrainingXtLauncher.vbs"):
+    report: dict = {"deployed": [], "failed": [], "runners": {}}
+    for name in (
+        "CMS_Launcher.vbs",
+        "RunSolidWorksMacro.ps1",
+        "RunModule6121.vbs",
+        "RunTrainingXtLauncher.vbs",
+    ):
         src = REPO_ROOT / name
-        if src.exists():
+        dst = LOCAL_WORKSPACE / name
+        if not src.exists():
+            report["failed"].append(f"{name}: missing in repo")
+            continue
+        try:
+            shutil.copy2(src, dst)
+            report["deployed"].append(name)
             try:
-                shutil.copy2(src, LOCAL_WORKSPACE / name)
+                report["runners"][name] = {
+                    "path": str(dst),
+                    "bytes": dst.stat().st_size,
+                    "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(dst.stat().st_mtime)),
+                }
             except Exception:
                 pass
+        except Exception as e:
+            report["failed"].append(f"{name}: {e}")
+
+    # Append deploy proof into the shared quote log when possible.
+    try:
+        log = LOCAL_WORKSPACE / "CMS_Quote_Log.txt"
+        with log.open("a", encoding="utf-8") as f:
+            f.write(
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] webapp: deployed launchers "
+                f"{', '.join(report['deployed']) or '(none)'}\n"
+            )
+            if report["failed"]:
+                f.write(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] webapp: deploy failures "
+                    f"{'; '.join(report['failed'])}\n"
+                )
+    except Exception:
+        pass
+    return report
+
+
+def _launch_module6121_runner() -> tuple[subprocess.Popen | None, str]:
+    """Start Module6121 via VBS runner (preferred) or PowerShell fallback.
+
+    Returns (proc, how) where how describes which runner was used.
+    """
+    _deploy_launcher_assets()
+    swp = LOCAL_WORKSPACE / "Module6121.swp"
+    if not swp.exists():
+        return None, f"missing compiled macro: {swp}"
+
+    vbs = LOCAL_WORKSPACE / "RunModule6121.vbs"
+    if not vbs.exists():
+        vbs = REPO_ROOT / "RunModule6121.vbs"
+    if vbs.exists():
+        proc = subprocess.Popen(
+            ["wscript", "//nologo", str(vbs), str(swp)],
+            close_fds=True,
+        )
+        return proc, f"wscript {vbs} (macro-runner-v3)"
+
+    ps1 = LOCAL_WORKSPACE / "RunSolidWorksMacro.ps1"
+    if not ps1.exists():
+        ps1 = REPO_ROOT / "RunSolidWorksMacro.ps1"
+    if ps1.exists():
+        sw_exe = r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
+        progid = "SldWorks.Application.31"
+        proc = subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ps1),
+                "-MacroPath",
+                str(swp),
+                "-SwExe",
+                sw_exe,
+                "-ProgId",
+                progid,
+                "-Procedure",
+                "main",
+                "-TimeoutSeconds",
+                "120",
+            ],
+            close_fds=True,
+        )
+        return proc, f"powershell {ps1}"
+
+    return None, "no RunModule6121.vbs or RunSolidWorksMacro.ps1 found"
 
 
 def run_dme_price_lookup(wait: bool = False) -> bool:
@@ -639,51 +729,30 @@ def launch_batch_quotes(items: list[dict]) -> dict:
     for qid in quote_ids:
         set_status(qid, phase="launching", message=f"Launching batch of {len(batch_jobs)} quotes...")
 
-    # Prefer PowerShell runner (retry + STARTED ack). Fall back to VBS /usemail for single.
-    ps1 = LOCAL_WORKSPACE / "RunSolidWorksMacro.ps1"
-    if not ps1.exists():
-        ps1 = REPO_ROOT / "RunSolidWorksMacro.ps1"
-    swp = LOCAL_WORKSPACE / "Module6121.swp"
+    # Prefer VBS macro-runner-v3 (reliable COM). Fall back to PS1, then single VBS launcher.
     launched = False
     batch_id = f"BATCH-{quote_ids[0]}" if quote_ids else "BATCH"
+    how = ""
 
     try:
-        if ps1.exists() and swp.exists():
-            sw_exe = r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
-            progid = "SldWorks.Application.31"
-            proc = subprocess.Popen(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(ps1),
-                    "-MacroPath",
-                    str(swp),
-                    "-SwExe",
-                    sw_exe,
-                    "-ProgId",
-                    progid,
-                    "-Procedure",
-                    "main",
-                    "-TimeoutSeconds",
-                    "90",
-                ],
-                close_fds=True,
-            )
+        proc, how = _launch_module6121_runner()
+        if proc is not None:
             _active_launcher_procs[batch_id] = proc
             launched = True
+            for qid in quote_ids:
+                set_status(qid, phase="launching", message=f"Started {how}", runner=how)
         else:
             launcher = _find_launcher()
             if launcher and len(batch_jobs) == 1:
                 proc = subprocess.Popen(["wscript", str(launcher), "/usemail"], close_fds=True)
                 _active_launcher_procs[batch_id] = proc
                 launched = True
-            elif not swp.exists():
-                return {"launched": False, "error": f"Missing compiled macro: {swp}"}
+                how = f"wscript {launcher} /usemail"
             else:
-                return {"launched": False, "error": f"Missing macro runner: {ps1}"}
+                err = how or "Could not start Module6121 runner"
+                for qid in quote_ids:
+                    set_status(qid, phase="error", message=err)
+                return {"launched": False, "error": err}
     except Exception as e:
         for qid in quote_ids:
             set_status(qid, phase="error", message=str(e))
@@ -712,6 +781,7 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             batch_count=len(batch_jobs),
             batch_index=i + 1,
             macro_started=started and i == 0,
+            runner=how,
         )
 
     return {
@@ -722,6 +792,7 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         "c_numbers": [j["CNum"] for j in batch_jobs],
         "handoff_file": str(HANDOFF_FILE),
         "macro_started": started,
+        "runner": how,
     }
 
 
