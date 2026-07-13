@@ -61,9 +61,28 @@ Private Const EXPORT_PER_PLATE_STLS As Boolean = False
 Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
 ' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow);
-' still forces ComponentsIntoOneFile after showing all components.
+' still forces ComponentsIntoOneFile after showing all components. 0 = always fast path.
 Private Const STL_MERGE_MAX_PARTS As Long = 0
 Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
+
+' --- Deliverable safety ---
+Private Const CREATE_FULL_ASSEMBLY_STL As Boolean = True
+
+' If True, BMS ISO/DXF hides everything except TCP/BCP/holders/pots.
+' If the keep-list is incomplete, macro falls back to full visible assembly
+' instead of making a bad 2-part picture/DXF.
+Private Const BMS_ISO_DXF_HIDE_NON_BASE_WHEN_COMPLETE As Boolean = True
+
+' Require at least these BMS components before isolating for ISO/DXF.
+' 6 = TCP, BCP, ID Holder, OD Holder, ID Pot, OD Pot.
+Private Const BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF As Long = 6
+
+' Force SolidWorks STL export to binary when possible so post-rotation can read it.
+Private Const FORCE_BINARY_STL_EXPORT As Boolean = True
+
+' SolidWorks STL ASCII/Binary preference. Common SW value for STL output as binary.
+' If your SW version uses a different enum, this harmlessly no-ops under On Error Resume Next.
+Private Const swSTLBinaryFormat As Long = 69
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
 Private Const CMS_BASE_TOP_VIEW_NAME As String = "*Bottom"
@@ -646,6 +665,27 @@ On Error GoTo ErrHandler
     modelTitle = swModel.GetTitle
     On Error GoTo ErrHandler
     If modelTitle = "" Then modelTitle = "ActiveCad"
+
+    ' Do not quote from a previously exported base assembly.
+    ' Those files live in \base\ and can have moved/broken component references,
+    ' changed standard views, and already-processed orientation.
+    If modelPath <> "" Then
+        If InStr(1, UCase(modelPath), "\BASE\", vbTextCompare) > 0 Then
+            LogErrorText "Active CAD is a generated base output assembly. Open the original customer XT/STEP instead."
+            LogLine "  Active CAD: " & modelTitle
+            LogLine "  Active path: " & modelPath
+
+            If Not SUPPRESS_USER_PROMPTS Then
+                MsgBox "This is a generated output assembly in the \base\ folder." & vbCrLf & vbCrLf & _
+                       "Do not run the quote macro on:" & vbCrLf & _
+                       modelPath & vbCrLf & vbCrLf & _
+                       "Open the original customer XT/STEP file instead.", _
+                       vbCritical, "Wrong CAD source"
+            End If
+
+            Exit Sub
+        End If
+    End If
 
     JobBaseName = CleanFileName(GetFileBaseName(modelTitle))
     If JobBaseName = "" Then JobBaseName = CleanFileName(modelTitle)
@@ -2087,18 +2127,34 @@ End Function
 
 Private Sub CollectCadModelsInFolder(ByVal folder As Object, ByVal paths As Collection, ByVal scores As Collection)
 On Error Resume Next
+
+    Dim folderName As String
+    folderName = UCase(folder.Name)
+
+    ' Never use generated output folders as source CAD.
+    If folderName = "BASE" Then Exit Sub
+    If InStr(folderName, " BASE") > 0 Then Exit Sub
+    If InStr(folderName, " PRINT") > 0 Then Exit Sub
+    If folderName = UCase(EXTRACT_FOLDER_NAME) Then Exit Sub
+
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
     Dim file As Object
     Dim ext As String
     Dim score As Long
     For Each file In folder.Files
+
+        If Left(file.Name, 2) = "~$" Then GoTo NextCadFile
+
         ext = LCase(fso.GetExtensionName(file.path))
         score = CadFilePriority(ext, file.Name)
+
         If score > 0 Then
             paths.Add file.path
             scores.Add score
         End If
+
+NextCadFile:
     Next file
     Dim subFolder As Object
     For Each subFolder In folder.SubFolders
@@ -2881,6 +2937,119 @@ End Function
 ' ============================================================
 ' BASE PACKAGE EXPORT  (whole base only)
 ' ============================================================
+Private Sub PrepareAssemblyForFullStlExport(ByVal model As Object)
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+
+    model.ClearSelection2 True
+
+    If model.GetType = swDocASSEMBLY Then
+        If Not FAST_QUOTE_MODE Then
+            model.ResolveAllLightWeightComponents True
+        Else
+            LogLine "FAST STL: skipped ResolveAllLightWeight before full STL."
+        End If
+
+        UnsuppressAllAssemblyComponents model
+        ShowAllAssemblyComponents model
+    End If
+
+    ApplyCmsTopView model
+    model.EditRebuild3
+    model.GraphicsRedraw2
+    DoEvents
+End Sub
+
+Private Sub SaveAssemblyStlSingleFileBinary(ByVal assyModel As Object, ByVal stlPath As String)
+On Error GoTo ErrHandler
+
+    Dim priorOneFile As Boolean
+    Dim oneFileSet As Boolean
+
+    Dim priorBinary As Long
+    Dim binarySet As Boolean
+
+    oneFileSet = False
+    binarySet = False
+
+    If Not swApp Is Nothing Then
+
+        On Error Resume Next
+
+        priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
+        swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
+        oneFileSet = True
+
+        If FORCE_BINARY_STL_EXPORT Then
+            Err.Clear
+            priorBinary = swApp.GetUserPreferenceIntegerValue(swSTLBinaryFormat)
+            If Err.Number = 0 Then
+                swApp.SetUserPreferenceIntegerValue swSTLBinaryFormat, 1
+                binarySet = True
+                LogLine "STL: binary STL preference forced."
+            Else
+                Err.Clear
+                LogLine "STL: binary STL preference could not be set; continuing."
+            End If
+        End If
+
+        On Error GoTo ErrHandler
+
+    End If
+
+    LogLine "STL: swSTLComponentsIntoOneFile=True. Exporting all visible components as one file."
+    SaveStlWithMainBaseOrientation assyModel, stlPath, "FULL ASSEMBLY"
+
+CleanExit:
+    On Error Resume Next
+
+    If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
+    If binarySet Then swApp.SetUserPreferenceIntegerValue swSTLBinaryFormat, priorBinary
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "SaveAssemblyStlSingleFileBinary error: " & Err.Description
+    Resume CleanExit
+End Sub
+
+Private Sub ForceViewRedrawForImage(ByVal model As Object)
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+
+    If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
+
+    model.ViewZoomtofit2
+    model.GraphicsRedraw2
+    DoEvents
+    WaitMilliseconds 250
+    model.GraphicsRedraw2
+    DoEvents
+End Sub
+
+Private Sub LogFileExistsAndSize(ByVal label As String, ByVal filePath As String)
+On Error Resume Next
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If filePath = "" Then
+        LogLine label & " missing path."
+        Exit Sub
+    End If
+
+    If fso.FileExists(filePath) Then
+        LogLine label & " OK: " & filePath & " size=" & CStr(fso.GetFile(filePath).Size) & " bytes"
+    Else
+        LogLine "WARNING: " & label & " was not created: " & filePath
+    End If
+End Sub
+
 Private Sub ExportBasePackage(ByVal outputFolder As String)
 On Error GoTo ErrHandler
 
@@ -2919,48 +3088,53 @@ On Error GoTo ErrHandler
     SaveModelAs swModel, xtPath
 
     ' ============================================================
-    ' STL FIRST (gemini1): everything visible, combined one-file mesh.
-    ' ISO/DXF hide-lists must NOT run before this or only one part exports.
+    ' STL FIRST:
+    ' Must happen BEFORE ISO/DXF hide-lists.
+    ' This guarantees the STL contains the full visible assembly, not only
+    ' the isolated BMS keep-list.
     ' ============================================================
-    LogStart "Export full-assembly STL"
-    On Error Resume Next
-    swModel.ClearSelection2 True
+    If CREATE_FULL_ASSEMBLY_STL Then
 
-    If Not FAST_QUOTE_MODE Then
-        swModel.ResolveAllLightWeightComponents True
-    Else
-        LogLine "FAST QUOTE: skipped ResolveAllLightWeight before STL."
-    End If
+        LogStart "Export full-assembly STL"
 
-    UnsuppressAllAssemblyComponents swModel
-    ShowAllAssemblyComponents swModel
-    On Error GoTo ErrHandler
-    ApplyCmsTopView swModel
-    If swModel.GetType = swDocASSEMBLY Then
+        PrepareAssemblyForFullStlExport swModel
 
-        If PartCount > STL_MERGE_MAX_PARTS Then
-            LogLine "FAST STL: PartCount=" & PartCount & _
-                    " > STL_MERGE_MAX_PARTS=" & STL_MERGE_MAX_PARTS & _
-                    ". Skipping assembly->temp-part merge; exporting assembly STL as one file."
-            SaveFullAssemblyStlFromAssembly swModel, stlPath
+        If swModel.GetType = swDocASSEMBLY Then
+
+            If PartCount > STL_MERGE_MAX_PARTS Then
+                LogLine "FAST STL: PartCount=" & PartCount & _
+                        " > STL_MERGE_MAX_PARTS=" & STL_MERGE_MAX_PARTS & _
+                        ". Skipping temp-part merge; exporting assembly STL as one file."
+                SaveFullAssemblyStlFromAssembly swModel, stlPath
+            Else
+                SaveAssemblyAsMergedPartStl swModel, stlPath
+            End If
+
         Else
-            SaveAssemblyAsMergedPartStl swModel, stlPath
+            SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
         End If
 
+        LogLine "Whole-assembly STL written: " & stlPath
+        LogFileExistsAndSize "FULL ASSEMBLY STL", stlPath
+
+        On Error Resume Next
+        If LCase(stlPath) <> LCase(stlBasePath) Then
+            Dim fsoStl As Object
+            Set fsoStl = CreateObject("Scripting.FileSystemObject")
+            If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
+        End If
+        On Error GoTo ErrHandler
+
+        LogDone "Export full-assembly STL"
+
+        ' Restore all components after STL before ISO/DXF.
+        PrepareAssemblyForFullStlExport swModel
+
     Else
-        SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
+
+        LogLine "FAST QUOTE: skipped full-assembly STL."
+
     End If
-    LogLine "Whole-assembly STL written: " & stlPath
-    On Error Resume Next
-    UnsuppressAllAssemblyComponents swModel
-    ShowAllAssemblyComponents swModel
-    If LCase(stlPath) <> LCase(stlBasePath) Then
-        Dim fsoStl As Object
-        Set fsoStl = CreateObject("Scripting.FileSystemObject")
-        If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
-    End If
-    On Error GoTo ErrHandler
-    LogDone "Export full-assembly STL"
 
     If CREATE_ISO_JPEGS Then
         If gJobIsStandardBase Then
@@ -2980,6 +3154,7 @@ On Error GoTo ErrHandler
             CreateBaseDxfWithoutPyropel sldPath, dxfPath
         End If
         LogLine "DXF written: " & dxfPath
+        LogFileExistsAndSize "BASE DXF", dxfPath
     End If
 
     If EXPORT_HEAVY_NEUTRALS And Not FAST_QUOTE_MODE Then
@@ -3029,9 +3204,16 @@ On Error GoTo ErrHandler
     Dim keepNames As Collection
     Set keepNames = BuildBaseDxfKeepComponentNames()
 
-    If keepNames Is Nothing Or keepNames.Count = 0 Then
-        LogLine "BASE DXF Pyropel isolation skipped: no base component keep-list; falling back to full native DXF."
-        CreateProjectedDxfFromNativePath nativeSourcePath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
+    If keepNames Is Nothing Or keepNames.Count < BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF Then
+        LogLine "BASE DXF isolation skipped: BMS keep-list incomplete. " & _
+                "Found " & IIf(keepNames Is Nothing, 0, keepNames.Count) & _
+                " of " & BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF & _
+                ". Falling back to full visible native DXF."
+
+        PrepareAssemblyForFullStlExport swModel
+
+        CreateProjectedDxfFromNativePath nativeSourcePath, dxfPath, "BASE", _
+                                         CMS_TOP_VIEW_NAME, "*Top", False, True
         Exit Sub
     End If
 
@@ -3049,6 +3231,8 @@ On Error GoTo ErrHandler
     ShowAllAssemblyComponents swModel
 
     LogLine "Creating BASE DXF without Pyropel. Selected base component count=" & keepNames.Count
+
+    PrepareAssemblyForFullStlExport swModel
 
     If HideAllExceptComponentNamesOnce(swModel, keepNames, hiddenNames) = False Then
         LogLine "WARNING: Could not isolate base components for no-Pyropel DXF; falling back to full native DXF."
@@ -3102,7 +3286,15 @@ On Error GoTo ErrHandler
     AddBaseDxfKeepComponentFromQuote keepNames, "ID POT", gIdxIDP, "ID POT BLOCK", KEYS_ID_POT
     AddBaseDxfKeepComponentFromQuote keepNames, "OD POT", gIdxODP, "OD POT BLOCK", KEYS_OD_POT
 
-    Set BuildBaseDxfKeepComponentNames = keepNames
+    If keepNames.Count < BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF Then
+        LogLine "BMS keep-list incomplete: found " & keepNames.Count & _
+                " of " & BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF & _
+                ". Will not isolate for ISO/DXF."
+        Set BuildBaseDxfKeepComponentNames = New Collection
+    Else
+        Set BuildBaseDxfKeepComponentNames = keepNames
+    End If
+
     Exit Function
 ErrHandler:
     LogLine "BuildBaseDxfKeepComponentNames error: " & Err.Description
@@ -3282,20 +3474,20 @@ On Error GoTo ErrHandler
     backIsoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " BACK ISO.jpg")
 
     swModel.ShowNamedView2 "*Isometric", 7
-    swModel.ViewZoomtofit2
-    swModel.GraphicsRedraw2
+    ForceViewRedrawForImage swModel
     SaveViewAsImage swModel, isoPath
     LogLine "Saved front ISO jpg (STANDARD full assembly): " & isoPath
+    LogFileExistsAndSize "ISO JPG", isoPath
 
     ' BACK ISO = spin 180 about VERTICAL axis (top plate stays up).
     swModel.ShowNamedView2 "*Isometric", 7
     Dim swView As Object
     Set swView = swModel.ActiveView
     If Not swView Is Nothing Then swView.RotateAboutCenter 0#, PI_VALUE
-    swModel.ViewZoomtofit2
-    swModel.GraphicsRedraw2
+    ForceViewRedrawForImage swModel
     SaveViewAsImage swModel, backIsoPath
     LogLine "Saved back ISO jpg (STANDARD full assembly): " & backIsoPath
+    LogFileExistsAndSize "BACK ISO JPG", backIsoPath
 
     swModel.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     ApplyCmsTopView swModel
@@ -3326,18 +3518,41 @@ On Error GoTo ErrHandler
     Set keepNames = Nothing
 
     If swModel.GetType = swDocASSEMBLY Then
+
+        PrepareAssemblyForFullStlExport swModel
+
         Set keepNames = BuildBaseDxfKeepComponentNames()
+
         If Not keepNames Is Nothing Then
-            If keepNames.Count > 0 Then
+
+            If keepNames.Count >= BMS_MIN_KEEP_COMPONENTS_FOR_ISO_DXF And _
+               BMS_ISO_DXF_HIDE_NON_BASE_WHEN_COMPLETE Then
+
                 Set hiddenNames = New Collection
+
                 If HideAllExceptComponentNamesOnce(swModel, keepNames, hiddenNames) Then
-                    LogLine "ISO JPG: Pyropel/non-base components hidden (keep=" & keepNames.Count & ")"
+                    LogLine "ISO JPG: BMS base components isolated. keep=" & keepNames.Count
                 Else
-                    LogLine "ISO JPG: could not isolate base components; capturing with all visible."
+                    LogLine "ISO JPG: could not isolate BMS base components; capturing full visible assembly."
                     Set hiddenNames = Nothing
+                    PrepareAssemblyForFullStlExport swModel
                 End If
+
+            Else
+
+                LogLine "ISO JPG: BMS keep-list incomplete or isolation disabled; capturing full visible assembly."
+                Set hiddenNames = Nothing
+                PrepareAssemblyForFullStlExport swModel
+
             End If
+
+        Else
+
+            LogLine "ISO JPG: BMS keep-list unavailable; capturing full visible assembly."
+            PrepareAssemblyForFullStlExport swModel
+
         End If
+
     End If
 
     On Error Resume Next
@@ -3352,20 +3567,20 @@ On Error GoTo ErrHandler
     backIsoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " BACK ISO.jpg")
 
     swModel.ShowNamedView2 "*Isometric", 7
-    swModel.ViewZoomtofit2
-    swModel.GraphicsRedraw2
+    ForceViewRedrawForImage swModel
     SaveViewAsImage swModel, isoPath
     LogLine "Saved front ISO jpg (no Pyropel): " & isoPath
+    LogFileExistsAndSize "ISO JPG", isoPath
 
     ' BACK ISO = spin 180 about VERTICAL axis (top plate stays up).
     swModel.ShowNamedView2 "*Isometric", 7
     Dim swView As Object
     Set swView = swModel.ActiveView
     If Not swView Is Nothing Then swView.RotateAboutCenter 0#, PI_VALUE
-    swModel.ViewZoomtofit2
-    swModel.GraphicsRedraw2
+    ForceViewRedrawForImage swModel
     SaveViewAsImage swModel, backIsoPath
     LogLine "Saved back ISO jpg (no Pyropel): " & backIsoPath
+    LogFileExistsAndSize "BACK ISO JPG", backIsoPath
 
 CleanExit:
     On Error Resume Next
@@ -3536,37 +3751,16 @@ End Function
 
 Private Sub SaveFullAssemblyStlFromAssembly(ByVal assyModel As Object, ByVal stlPath As String)
 On Error GoTo ErrHandler
-    If Not assyModel Is Nothing Then
-        On Error Resume Next
-        assyModel.ClearSelection2 True
 
-        If Not FAST_QUOTE_MODE Then
-            assyModel.ResolveAllLightWeightComponents True
-        Else
-            LogLine "FAST STL: skipped ResolveAllLightWeight inside assembly STL fallback."
-        End If
+    If assyModel Is Nothing Then Exit Sub
 
-        UnsuppressAllAssemblyComponents assyModel
-        ShowAllAssemblyComponents assyModel
-        assyModel.EditRebuild3
-        On Error GoTo ErrHandler
-    End If
-    Dim priorOneFile As Boolean
-    Dim oneFileSet As Boolean
-    oneFileSet = False
-    If Not swApp Is Nothing Then
-        priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
-        swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
-        oneFileSet = True
-        LogLine "STL: swSTLComponentsIntoOneFile=True (combined single-file assembly export, all components)"
-    End If
-    SaveStlWithMainBaseOrientation assyModel, stlPath, "FULL ASSEMBLY"
-    If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
+    PrepareAssemblyForFullStlExport assyModel
+    SaveAssemblyStlSingleFileBinary assyModel, stlPath
+
     Exit Sub
+
 ErrHandler:
     LogLine "SaveFullAssemblyStlFromAssembly error: " & Err.Description
-    On Error Resume Next
-    If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
 End Sub
 
 Private Sub MergeAllPartBodies(ByVal partModel As Object)
@@ -7392,14 +7586,16 @@ Private Function IsHolderBlockGeometry(ByVal t As Double, _
     Dim fp As Double
     fp = w * l
 
+    ' Holders are thick blocks.
     If t < 3# Then Exit Function
 
     ' Holders can be much smaller than TCP/BCP footprint.
+    ' Example: 6.5 x 12.875 compared with 15.875 x 16.
     If maxFp > 0# Then
         If fp < 0.20 * maxFp Then Exit Function
     End If
 
-    ' Holders are elongated.
+    ' Holders are elongated, not compact pots.
     If l / w < 1.15 Then Exit Function
 
     ' Avoid full clamp plates.
