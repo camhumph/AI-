@@ -352,6 +352,20 @@ def api_import_folder(body: ImportFolderBody):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class ImportFoldersBatchBody(BaseModel):
+    folder_paths: list[str]
+    run_quote: bool = True
+
+
+@app.post("/api/jobs/import-folders-batch")
+def api_import_folders_batch(body: ImportFoldersBatchBody):
+    """Quote multiple C-number folders as one sequential SolidWorks batch."""
+    try:
+        return jobs.import_folders_batch(body.folder_paths, run_quote=body.run_quote)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class JobCompleteBody(BaseModel):
     job_id: str
     folder_path: str

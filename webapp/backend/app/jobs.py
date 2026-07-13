@@ -620,7 +620,9 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
             {
                 "subject": src.name,
                 "cust_job": meta.get("customer", ""),
-                "attachments": sum(1 for _ in src.rglob("*") if _.is_file()),
+                "c_number": c_num or qid,
+                "job_folder": src.name,
+                "attachments": 0,
             },
         )
         return {
@@ -632,6 +634,82 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
         }
 
     return job
+
+
+def import_folders_batch(folder_paths: list[str], run_quote: bool = True) -> dict:
+    """Register multiple C-number folders and launch them as one SolidWorks batch."""
+    if not folder_paths:
+        return {"launched": False, "error": "No folders selected", "quote_ids": [], "jobs": []}
+
+    from . import quote_pipeline
+
+    items: list[dict] = []
+    jobs_out: list[dict] = []
+    errors: list[str] = []
+
+    for raw in folder_paths:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        try:
+            job = import_from_folder(path, run_quote=False)
+            src = Path(path)
+            c_num = _extract_c_number(src.name) or str(job.get("job_id") or "")
+            cust = ""
+            m = re.search(r"\d{6,}", src.name)
+            if m:
+                cust = m.group(0)
+            qid = (c_num or job.get("job_id") or src.name).upper()
+            create_job(qid, display_name=src.name, customer=cust)
+            items.append(
+                {
+                    "quote_id": qid,
+                    "attach_dir": str(src),
+                    "c_number": c_num or qid,
+                    "email_info": {
+                        "subject": src.name,
+                        "cust_job": cust,
+                        "c_number": c_num or qid,
+                        "job_folder": src.name,
+                        "attachments": 0,
+                    },
+                }
+            )
+            jobs_out.append(
+                {
+                    "job_id": qid,
+                    "quote_id": qid,
+                    "folder_path": str(src),
+                    "display_name": src.name,
+                }
+            )
+        except Exception as e:
+            errors.append(f"{path}: {e}")
+
+    if not items:
+        return {
+            "launched": False,
+            "error": "; ".join(errors) if errors else "No valid folders",
+            "quote_ids": [],
+            "jobs": [],
+            "errors": errors,
+        }
+
+    launch: dict = {"launched": False}
+    if run_quote:
+        launch = quote_pipeline.launch_batch_quotes(items)
+
+    return {
+        "launched": bool(launch.get("launched")),
+        "batch": True,
+        "batch_count": len(items),
+        "quote_ids": launch.get("quote_ids") or [i["quote_id"] for i in items],
+        "c_numbers": launch.get("c_numbers") or [i["c_number"] for i in items],
+        "jobs": jobs_out,
+        "errors": errors,
+        "poll_urls": [f"/api/quote/status/{i['quote_id']}" for i in items],
+        "error": launch.get("error") or ("; ".join(errors) if errors and not launch.get("launched") else None),
+    }
 
 
 def save_upload(job_id: str, subfolder: str, filename: str, data: bytes) -> dict:

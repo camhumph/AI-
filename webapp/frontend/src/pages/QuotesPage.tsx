@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { FileStack, Image as ImageIcon, Box, Plus, Search, FolderOpen, ChevronRight, ChevronUp, Trash2 } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, EmptyState, Spinner } from "../components/ui";
-import { api, type JobSummary, type WorkspaceBrowse } from "../api/client";
+import { api, type JobSummary, type WorkspaceBrowse, type WorkspaceEntry } from "../api/client";
 import { useQuoteJobs } from "../context/QuoteJobsContext";
 
 export default function QuotesPage() {
@@ -43,7 +43,7 @@ export default function QuotesPage() {
   return (
     <Layout
       title="Quotes"
-      subtitle="Select a C-number folder from your workspace or open an existing quote."
+      subtitle="Select one or more C-number folders from your workspace, or open an existing quote."
       actions={
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4" /> New Quote
@@ -66,7 +66,7 @@ export default function QuotesPage() {
         <EmptyState
           icon={<FileStack className="h-8 w-8" />}
           title="No quotes yet"
-          description="Click New Quote and browse to a C-number folder on your machine."
+          description="Click New Quote, check one or more C-number folders, then Quote selected."
           action={<Button onClick={() => setShowCreate(true)}><Plus className="h-4 w-4" /> New Quote</Button>}
         />
       ) : (
@@ -106,26 +106,68 @@ export default function QuotesPage() {
       {showCreate && (
         <FolderPickerModal
           onClose={() => setShowCreate(false)}
+          onImported={refresh}
         />
       )}
     </Layout>
   );
 }
 
-function FolderPickerModal({ onClose }: { onClose: () => void }) {
+function isQuoteable(entry: WorkspaceEntry): boolean {
+  return Boolean(
+    entry.quote_ready ||
+      entry.has_xt_csv ||
+      entry.c_number ||
+      entry.has_quote_sheet ||
+      entry.has_steel_sheet
+  );
+}
+
+function FolderPickerModal({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported?: () => void;
+}) {
   const [browse, setBrowse] = useState<WorkspaceBrowse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const { startQuote } = useQuoteJobs();
 
   const load = (path = "") => {
     setError("");
+    setChecked(new Set());
     api.browseWorkspace(path).then(setBrowse).catch((e) => setError(e.message));
   };
 
   useEffect(() => {
     load();
   }, []);
+
+  const dirs = useMemo(
+    () => (browse?.entries || []).filter((e) => e.is_dir),
+    [browse]
+  );
+  const quoteable = useMemo(() => dirs.filter(isQuoteable), [dirs]);
+
+  const toggleChecked = (path: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleAllQuoteable = () => {
+    if (checked.size > 0 && quoteable.every((e) => checked.has(e.path))) {
+      setChecked(new Set());
+      return;
+    }
+    setChecked(new Set(quoteable.map((e) => e.path)));
+  };
 
   const importFolder = async (folderPath: string) => {
     setBusy(true);
@@ -139,7 +181,49 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
         message: "Running in background — SolidWorks + Module6121",
         job_id: result.job_id,
       });
+      onImported?.();
       onClose();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const quoteSelected = async () => {
+    const paths = Array.from(checked);
+    if (paths.length === 0) return;
+    if (paths.length === 1) {
+      await importFolder(paths[0]);
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.importFoldersBatch(paths, true);
+      if (!result.launched && result.error) {
+        throw new Error(result.error);
+      }
+      const jobs = result.jobs || [];
+      const qids = result.quote_ids || jobs.map((j) => j.quote_id);
+      qids.forEach((qid, i) => {
+        const job = jobs[i];
+        const label =
+          job?.display_name ||
+          paths[i]?.split(/[/\\]/).pop() ||
+          qid;
+        startQuote(qid, label, {
+          phase: "running",
+          message: `Batch ${i + 1}/${qids.length} — sequential SolidWorks quotes`,
+          job_id: job?.job_id || qid,
+        });
+      });
+      if (result.errors && result.errors.length > 0) {
+        setError(result.errors.join("; "));
+      } else {
+        onImported?.();
+        onClose();
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -154,7 +238,8 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
           <div>
             <h3 className="text-sm font-semibold uppercase tracking-widest text-ink-100">Select Quote Folder</h3>
             <p className="mt-1 text-xs text-ink-400">
-              Browse month folders under <code className="text-ink-300">\\Mycloudex2ultra\mexico\Downloads</code>
+              Check one or more C-number jobs, then Quote selected. Browse under{" "}
+              <code className="text-ink-300">\\Mycloudex2ultra\mexico\Downloads</code>
             </p>
           </div>
           <button onClick={onClose} className="text-ink-400 hover:text-ink-100 text-xs uppercase tracking-widest">Close</button>
@@ -184,6 +269,29 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
               </button>
             )}
           </div>
+          {quoteable.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleAllQuoteable}
+                className="rounded-full border border-white/10 px-3 py-1 text-[10px] uppercase tracking-wider text-ink-300 hover:border-white/20 hover:text-ink-100"
+              >
+                {checked.size > 0 && quoteable.every((e) => checked.has(e.path))
+                  ? "Clear selection"
+                  : `Select all quoteable (${quoteable.length})`}
+              </button>
+              {checked.size > 0 && (
+                <Button
+                  variant="primary"
+                  className="px-3 py-1.5 text-[10px]"
+                  disabled={busy}
+                  onClick={quoteSelected}
+                >
+                  {busy ? "Starting..." : `Quote selected (${checked.size})`}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="scrollbar-thin flex-1 overflow-y-auto px-2 py-2">
@@ -193,16 +301,28 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
             <div className="p-6 text-xs text-ink-400">
               Workspace folder not found on this machine. Set <code className="text-ink-200">CMS_WORKSPACE_ROOT</code> in the start script.
             </div>
-          ) : browse.entries.length === 0 ? (
+          ) : dirs.length === 0 ? (
             <div className="p-6 text-xs text-ink-400">No folders here.</div>
           ) : (
-            browse.entries
-              .filter((e) => e.is_dir)
-              .map((entry) => (
+            dirs.map((entry) => {
+              const canQuote = isQuoteable(entry);
+              return (
                 <div
                   key={entry.path}
                   className="flex items-center gap-3 border-b border-ink-800 px-4 py-3 hover:bg-ink-900"
                 >
+                  {canQuote ? (
+                    <input
+                      type="checkbox"
+                      checked={checked.has(entry.path)}
+                      onChange={() => toggleChecked(entry.path)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="h-4 w-4 shrink-0 accent-brand-400"
+                      title="Select for batch quote"
+                    />
+                  ) : (
+                    <span className="inline-block h-4 w-4 shrink-0" />
+                  )}
                   <button
                     onClick={() => load(entry.path)}
                     className="flex min-w-0 flex-1 items-center gap-2 text-left"
@@ -219,7 +339,7 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
                     </div>
                     <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-ink-600" />
                   </button>
-                  {(entry.has_xt_csv || entry.c_number || entry.has_quote_sheet || entry.has_steel_sheet) && (
+                  {canQuote && (
                     <Button
                       variant="primary"
                       className="shrink-0 px-3 py-1.5 text-[10px]"
@@ -230,7 +350,8 @@ function FolderPickerModal({ onClose }: { onClose: () => void }) {
                     </Button>
                   )}
                 </div>
-              ))
+              );
+            })
           )}
         </div>
 

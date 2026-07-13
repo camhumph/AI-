@@ -113,6 +113,8 @@ def _find_best_xt(
     folder: Path,
     c_number: str = "",
     cust_job: str = "",
+    *,
+    max_depth: int = 4,
 ) -> Path | None:
     """Prefer Parasolid XT (then STEP/IGES) under a staged job folder; never \\base\\."""
     if not folder or not folder.is_dir():
@@ -122,9 +124,13 @@ def _find_best_xt(
     if want_c and not want_c.startswith("C"):
         want_c = "C" + want_c
     want_job = _digits_only(cust_job)
+    root_depth = len(folder.parts)
 
     for p in folder.rglob("*"):
         if not p.is_file():
+            continue
+        # Cap depth so network Browse/AttachDir scans stay responsive.
+        if len(p.parts) - root_depth > max_depth:
             continue
         if _is_generated_base_path(p):
             continue
@@ -149,6 +155,29 @@ def _find_best_xt(
     return scored[0][1]
 
 
+def _cad_hint_from_sources(
+    c_number: str,
+    source_dirs: list[str | Path],
+    cust_job: str = "",
+) -> dict:
+    """Find XT on the network/job folder without copying (launcher stages locally)."""
+    want_job = _digits_only(cust_job)
+    folder_hint = " ".join(str(s) for s in source_dirs if s)
+    best: Path | None = None
+    for raw in source_dirs:
+        src = Path(str(raw or "").strip())
+        if not src.is_dir():
+            continue
+        # Shallow scan only — deep network rglob made the webapp feel stuck.
+        hit = _find_best_xt(src, c_number=c_number, cust_job=want_job, max_depth=3)
+        if hit:
+            best = hit
+            break
+    cad_path = str(best) if best else ""
+    warning = _cad_folder_job_mismatch_warning(cad_path, cust_job=want_job, folder_hint=folder_hint)
+    return {"cad_path": cad_path, "warning": warning}
+
+
 def stage_job_to_local_workspace(
     c_number: str,
     source_dirs: list[str | Path] | None = None,
@@ -156,7 +185,8 @@ def stage_job_to_local_workspace(
 ) -> dict:
     """Copy job/attach files into C:\\CMS_Local_Workspace\\C##### and return local XT path.
 
-    Used so SolidWorks opens the XT from the local workspace, not the network share.
+    Prefer the launcher's StageJobToLocalWorkspace for live quotes (one copy).
+    This helper remains for callers that need an explicit local mirror.
     """
     c = (c_number or "").strip().upper().replace("-", "")
     if c and not c.startswith("C"):
@@ -170,7 +200,6 @@ def stage_job_to_local_workspace(
     want_job = _digits_only(cust_job)
     folder_hint = " ".join(str(s) for s in (source_dirs or []) if s)
 
-    # Fresh stage each launch so we don't mix old BASE exports with new files.
     if dest.exists():
         try:
             shutil.rmtree(dest, ignore_errors=True)
@@ -373,29 +402,20 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         if m:
             c_number = "C" + m.group(1)
 
-    # Pull attach/job files into C:\CMS_Local_Workspace\C##### and prefer local XT.
+    # Hint CadPath from AttachDir (no Python copy — launcher stages once to local).
     stage_sources = [
         attach_dir,
         info.get("job_folder") or "",
         info.get("root_path") or "",
     ]
-    staged = stage_job_to_local_workspace(
+    hinted = _cad_hint_from_sources(
         c_number,
         stage_sources,
         cust_job=str(info.get("cust_job") or ""),
     ) if c_number else {}
-    local_cad = str(staged.get("cad_path") or "")
-    local_folder = str(staged.get("local_folder") or "")
-    cad_warning = str(staged.get("warning") or "")
-    if not cad_warning and local_cad:
-        cad_warning = _cad_folder_job_mismatch_warning(
-            local_cad,
-            cust_job=str(info.get("cust_job") or ""),
-            folder_hint=attach_dir,
-        )
-    # Only advertise local stage when we actually found CAD or copied files.
-    if not local_cad and int(staged.get("copied") or 0) <= 0:
-        local_folder = ""
+    local_cad = str(hinted.get("cad_path") or "")
+    cad_warning = str(hinted.get("warning") or "")
+    local_folder = ""
 
     lines = {
         "Found": "1",
@@ -416,8 +436,8 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     )
 
     start_msg = (
-        f"Staged to {local_folder}; opening local XT..."
-        if local_cad
+        "Launcher will stage to CMS_Local_Workspace and open XT..."
+        if attach_dir
         else "Opening CAD in SolidWorks, then running Module6121.swp..."
     )
     if cad_warning:
@@ -429,18 +449,13 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         message=start_msg,
         attach_dir=attach_dir,
         c_number=c_number or None,
-        local_job_folder=local_folder or None,
         cad_path=local_cad or None,
         warning=cad_warning or None,
     )
 
     run_dme_price_lookup(wait=False)
 
-    launch_msg = (
-        f"Opening local XT then Module6121.swp..."
-        if local_cad
-        else "Opening CAD in SolidWorks first, then Module6121.swp..."
-    )
+    launch_msg = "Starting SolidWorks + Module6121..."
     if cad_warning:
         launch_msg = f"{cad_warning} {launch_msg}"
 
@@ -462,22 +477,18 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             set_status(quote_id, phase="error", message=str(e))
             return {"launched": False, "error": str(e)}
 
-    # Give launcher a moment to write cms_handoff.txt with assigned C-number,
-    # and preferably wait until VBA acknowledges STARTED.
+    # Brief handoff peek only — do not block the UI for 30s.
     c_num = c_number
     handoff: dict = {}
-    for _ in range(60):
-        time.sleep(0.5)
+    for _ in range(6):
+        time.sleep(0.25)
         if quote_id in _cancelled_quotes:
             set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
             return {"launched": False, "cancelled": True, "quote_id": quote_id}
         handoff = _read_handoff()
         c_num = handoff.get("CNum", "") or handoff.get("QuoteNum", "").replace("-", "") or c_num
-        if MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
+        if c_num or MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
             break
-        if c_num and handoff.get("JobFolder"):
-            # Handoff ready; keep waiting briefly for STARTED acknowledgment.
-            continue
 
     if c_num:
         jobs.create_job(c_num, display_name=info.get("subject", c_num)[:80], customer=info.get("cust_job", ""))
@@ -506,6 +517,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             phase="running",
             message="SolidWorks opening CAD, then Module6121.swp...",
             job_id=quote_id,
+            warning=cad_warning or None,
         )
 
     return {
@@ -515,6 +527,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         "c_number": c_num,
         "handoff_file": str(HANDOFF_FILE),
         "macro_started": MACRO_STARTED_FILE.exists(),
+        "warning": cad_warning or None,
     }
 
 
@@ -559,7 +572,8 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         _clear_quote_cancel(quote_id)
         _clear_quote_cancel(c_number)
 
-        staged = stage_job_to_local_workspace(
+        # Launcher/macro stages locally — do not full-copy here (was making the UI slow).
+        hinted = _cad_hint_from_sources(
             c_number,
             [
                 attach_dir,
@@ -568,15 +582,8 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             ],
             cust_job=str(info.get("cust_job") or ""),
         )
-        cad_path = str(staged.get("cad_path") or "")
-        if not cad_path:
-            cad_path = str(info.get("cad_path") or item.get("cad_path") or "")
-        local_folder = str(staged.get("local_folder") or "")
-        cad_warning = str(staged.get("warning") or "") or _cad_folder_job_mismatch_warning(
-            cad_path,
-            cust_job=str(info.get("cust_job") or ""),
-            folder_hint=attach_dir,
-        )
+        cad_path = str(hinted.get("cad_path") or info.get("cad_path") or item.get("cad_path") or "")
+        cad_warning = str(hinted.get("warning") or "")
 
         job = {
             "CNum": c_number,
@@ -585,10 +592,10 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             "SimilarTo": str(info.get("similar_to") or ""),
             "ShipDate": str(info.get("ship_date") or ""),
             "RootPath": str(info.get("root_path") or item.get("root_path") or ""),
-            "JobFolder": str(info.get("job_folder") or item.get("job_folder") or local_folder or ""),
+            "JobFolder": str(info.get("job_folder") or item.get("job_folder") or ""),
             "CustomerPrefix": str(info.get("customer_prefix") or ""),
             "CustomerName": str(info.get("customer_name") or ""),
-            "AttachDir": attach_dir or local_folder,
+            "AttachDir": attach_dir,
             "CadPath": cad_path,
         }
         batch_jobs.append(job)
@@ -682,9 +689,9 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             set_status(qid, phase="error", message=str(e))
         return {"launched": False, "error": str(e)}
 
-    # Wait briefly for STARTED acknowledgment.
-    for _ in range(60):
-        time.sleep(0.5)
+    # Brief STARTED peek — do not block the UI for 30s.
+    for _ in range(6):
+        time.sleep(0.25)
         if MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
             break
 
@@ -696,15 +703,15 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             phase="running",
             message=(
                 f"Batch {i + 1}/{len(batch_jobs)}: Module6121 started ({c_num})"
-                if started
-                else f"Batch {i + 1}/{len(batch_jobs)}: waiting for Module6121 ({c_num})"
+                if started and i == 0
+                else f"Batch {i + 1}/{len(batch_jobs)}: queued for Module6121 ({c_num})"
             ),
             c_number=c_num,
             job_id=c_num,
             batch=True,
             batch_count=len(batch_jobs),
             batch_index=i + 1,
-            macro_started=started,
+            macro_started=started and i == 0,
         )
 
     return {

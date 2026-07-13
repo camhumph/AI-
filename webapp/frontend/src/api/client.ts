@@ -306,6 +306,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ folder_path, run_quote }),
     }),
+  importFoldersBatch: (folder_paths: string[], run_quote = true) =>
+    req<{
+      launched: boolean;
+      batch?: boolean;
+      batch_count?: number;
+      quote_ids: string[];
+      c_numbers?: string[];
+      jobs?: { job_id: string; quote_id: string; folder_path: string; display_name: string }[];
+      errors?: string[];
+      error?: string | null;
+    }>("/jobs/import-folders-batch", {
+      method: "POST",
+      body: JSON.stringify({ folder_paths, run_quote }),
+    }),
   quoteStatus: (quoteId: string) => req<QuoteRunStatus>(`/quote/status/${encodeURIComponent(quoteId)}`),
   cancelQuote: (quoteId: string) =>
     req<QuoteRunStatus>(`/quote/cancel/${encodeURIComponent(quoteId)}`, { method: "POST", body: "{}" }),
