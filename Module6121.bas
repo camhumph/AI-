@@ -2725,15 +2725,19 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
     ' Deprioritize obvious leftovers / other jobs
     If InStr(nameUpper, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
     If InStr(nameUpper, "_EXTRACT") > 0 Or InStr(nameUpper, "OLD_") > 0 Then bonus = bonus - 80
+    ' Unzipped mold-base packages (may use an older BMS id in the name).
+    If InStr(nameUpper, "MOLD_BASE") > 0 Or InStr(nameUpper, "MOLDBASE") > 0 Or InStr(nameUpper, "OUTSOURCE") > 0 Then
+        bonus = bonus + 60
+    End If
     Select Case ext
-        ' Prefer customer XT/STEP over exported SLDASM when quoting from staged local files.
+        ' Prefer customer XT/STEP; native SW assemblies in unzipped mold folders are fine too.
         Case "x_t", "x_b": CadFilePriority = 120 + bonus
         Case "step", "stp": CadFilePriority = 110 + bonus
-        Case "sldasm": CadFilePriority = 100 + bonus
+        Case "sldasm": CadFilePriority = 105 + bonus
         Case "easm": CadFilePriority = 90 + bonus
         Case "asm": CadFilePriority = 85 + bonus
         Case "igs", "iges": CadFilePriority = 80 + bonus
-        Case "sldprt": CadFilePriority = 50 + bonus
+        Case "sldprt": CadFilePriority = 55 + bonus
         Case "prt": CadFilePriority = 45 + bonus
         Case Else: CadFilePriority = 0
     End Select
