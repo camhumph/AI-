@@ -48,10 +48,10 @@ Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
 
 ' Deliverable exports: always write STL + DXF + ISO JPGs.
 ' FAST_QUOTE_MODE skips the slowest steps on large assemblies:
-'   - ResolveAllLightWeight / Unsuppress-all before export
-'   - assembly->temp-part STL merge (uses direct one-file STL instead)
+'   - ResolveAllLightWeight / Unsuppress-all before export (except STL, which always shows all)
 '   - EASM + IGS (heavy neutrals)
 '   - visual inspection / PCS naming analysis
+' STL always exports a combined one-file mesh (merge when PartCount allows).
 Private Const FAST_QUOTE_MODE As Boolean = True
 Private Const CREATE_ISO_JPEGS As Boolean = True
 Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = False
@@ -60,8 +60,9 @@ Private Const EXPORT_PER_PLATE_STLS As Boolean = False
 ' Heavy neutrals are slow on 200+ part STEP imports; off in fast mode.
 Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
-' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow).
-Private Const STL_MERGE_MAX_PARTS As Long = 40
+' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow);
+' still forces ComponentsIntoOneFile after showing all components.
+Private Const STL_MERGE_MAX_PARTS As Long = 60
 Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
@@ -2453,23 +2454,8 @@ On Error GoTo ErrHandler
     Dim oriented As Boolean
     oriented = False
 
-    ' TCP must end up on TOP. Prefer physical TCP/BCP (geometry indexes, then
-    ' named components, then quote pairs). Holders/pots are fallback only —
-    ' wrong ID/OD naming used to flip the stack.
-    If oriented = False And gIdxTCP > 0 And gIdxBCP > 0 Then
-        oriented = OrientFromPairIndices(model, gIdxTCP, gIdxBCP, "Geometry TCP/BCP")
-    End If
-
-    If oriented = False Then
-        oriented = TryOrientTcpUpByViewProjection(model)
-    End If
-
-    If oriented = False Then
-        oriented = TryOrientFromMatchedQuotePair(model, _
-                    "TCP", _
-                    "BCP", _
-                    "Matched TCP/BCP")
-    End If
+    ' More reliable than TCP/BCP when imported parts have generic names:
+    ' try top-side/bottom-side holder/pot/insert pairs first.
 
     If oriented = False Then
         oriented = TryOrientFromMatchedQuotePair(model, _
@@ -2493,23 +2479,29 @@ On Error GoTo ErrHandler
     End If
 
     If oriented = False Then
-        LogLine "Matched top-side orientation failed from TCP/holder/pot/ins pairs."
-        LogLine "Falling back to SetCmsTopOrientation (still running pot-front after)."
-        SetCmsTopOrientation model, persistAsStandardTop
-        ' Do NOT Exit Sub — pots-in-front must still run.
-    Else
-        ' First: save the currently matched top-side orientation as SolidWorks *Top.
-        If persistAsStandardTop Then
-            If PersistCurrentViewAsStandardTop(model) Then
-                LogLine "Matched top-side orientation persisted as SolidWorks *Top."
-            Else
-                LogLine "WARNING: Matched top-side orientation could not be persisted as standard top."
-            End If
-        End If
+        oriented = TryOrientFromMatchedQuotePair(model, _
+                    "TCP", _
+                    "BCP", _
+                    "Matched TCP/BCP")
     End If
 
-    ' Verify TCP is closer to the camera than BCP in the active top view.
-    EnsureTcpAboveBcpInActiveTopView model, persistAsStandardTop
+    If oriented = False Then
+        LogLine "Matched top-side orientation failed from holder/pot/ins/TCP pairs."
+        LogLine "Falling back to SetCmsTopOrientation."
+        SetCmsTopOrientation model, persistAsStandardTop
+        Exit Sub
+    End If
+
+    ' First: save the currently matched top-side orientation as SolidWorks *Top.
+    If persistAsStandardTop Then
+
+        If PersistCurrentViewAsStandardTop(model) Then
+            LogLine "Matched top-side orientation persisted as SolidWorks *Top."
+        Else
+            LogLine "WARNING: Matched top-side orientation could not be persisted as standard top."
+        End If
+
+    End If
 
     ' Second: define the correct SolidWorks *Front from holder long side + pot/holder COM.
     If AUTO_DEFINE_FRONT_FROM_HOLDER_POT_COM Then
@@ -2535,8 +2527,10 @@ On Error GoTo ErrHandler
     model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     StabilizeActiveView model, 100
 
-    ' Final TCP-on-top check after front redefine (front persist can rotate stack).
-    EnsureTcpAboveBcpInActiveTopView model, True
+    ' Ensure we are looking at the TCP large flat face (W x L), not a chamfer/edge.
+    ' Thickness (~1") must be into the screen — gemini1 relies on holder-first stack
+    ' axis; this guards when a standard view still lands edge-on.
+    EnsureTcpLargeFlatFaceTowardCamera model, persistAsStandardTop
 
     Exit Sub
 
@@ -2544,65 +2538,71 @@ ErrHandler:
     LogLine "EnsureCmsTopOrientationFromMatchedTcpBcp error: " & Err.Description
 End Sub
 
-' In CMS_TOP / *Top, larger view-depth = closer to camera. TCP must be closer than BCP.
-Private Sub EnsureTcpAboveBcpInActiveTopView(ByVal model As Object, _
-                                             ByVal persistAsStandardTop As Boolean)
+
+' After CMS_TOP is set, verify TCP's large flat face (W x L) faces the camera —
+' not a chamfer or the ~1" thick edge. Thickness must be the into-screen size.
+Private Sub EnsureTcpLargeFlatFaceTowardCamera(ByVal model As Object, _
+                                               ByVal persistAsStandardTop As Boolean)
 On Error GoTo eh
     If model Is Nothing Then Exit Sub
 
-    Dim tcpIdx As Long, bcpIdx As Long
+    Dim tcpIdx As Long
     tcpIdx = gIdxTCP
-    bcpIdx = gIdxBCP
-    If tcpIdx <= 0 Or bcpIdx <= 0 Then
-        ' Fall back to quote/key match indexes if geometry classify missed.
-        tcpIdx = FindCadIndexForOrientationQuoteOrKeys("TCP", TCP_TOP_ORIENTATION_KEYS)
-        bcpIdx = FindCadIndexForOrientationQuoteOrKeys("BCP", BCP_BOTTOM_ORIENTATION_KEYS)
-    End If
-    If tcpIdx <= 0 Or bcpIdx <= 0 Then Exit Sub
-    If Not parts(tcpIdx).hasAsmCenter Or Not parts(bcpIdx).hasAsmCenter Then Exit Sub
+    If tcpIdx <= 0 Then tcpIdx = FindCadIndexForOrientationQuoteOrKeys("TCP", TCP_TOP_ORIENTATION_KEYS)
+    If tcpIdx <= 0 Then tcpIdx = FindCadIndexFromExportQuote("TCP")
+    If tcpIdx <= 0 Or tcpIdx > PartCount Then Exit Sub
 
-    On Error Resume Next
-    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
-    If Err.Number <> 0 Then
-        Err.Clear
-        model.ShowNamedView2 "*Top", 5
-    End If
-    On Error GoTo eh
-    StabilizeActiveView model, 50
+    Dim swComp As Object
+    Set swComp = FindAssemblyComponentByName(model, parts(tcpIdx).componentName)
+    If swComp Is Nothing Then Exit Sub
 
-    Dim tcpD As Double, bcpD As Double
-    If Not TryProjectPointToActiveViewDepth(model, _
-            parts(tcpIdx).AsmCenterX, parts(tcpIdx).AsmCenterY, parts(tcpIdx).AsmCenterZ, tcpD) Then Exit Sub
-    If Not TryProjectPointToActiveViewDepth(model, _
-            parts(bcpIdx).AsmCenterX, parts(bcpIdx).AsmCenterY, parts(bcpIdx).AsmCenterZ, bcpD) Then Exit Sub
+    Dim thick As Double
+    thick = parts(tcpIdx).BoxDx
+    If parts(tcpIdx).BoxDy < thick Then thick = parts(tcpIdx).BoxDy
+    If parts(tcpIdx).BoxDz < thick Then thick = parts(tcpIdx).BoxDz
+    If thick <= 0# Then thick = parts(tcpIdx).Thickness
+    If thick <= 0# Then thick = 1#
 
-    LogLine "TCP/BCP top-view depth: TCP=" & FormatNumberForCsv(tcpD) & _
-            " BCP=" & FormatNumberForCsv(bcpD) & " delta=" & FormatNumberForCsv(tcpD - bcpD)
+    Dim attempt As Long
+    For attempt = 1 To 4
+        Dim viewW As Double, viewH As Double
+        If TryGetComponentViewWidthHeightInches(model, swComp, viewW, viewH) = False Then Exit Sub
 
-    ' TCP should be closer to camera (larger depth) than BCP.
-    If tcpD >= bcpD - 0.02 Then
-        LogLine "TCP-on-top check OK."
-        Exit Sub
-    End If
+        Dim faceMin As Double, faceMax As Double
+        faceMin = viewW
+        If viewH < faceMin Then faceMin = viewH
+        faceMax = viewW
+        If viewH > faceMax Then faceMax = viewH
 
-    LogLine "TCP-on-top FAILED (TCP farther than BCP). Flipping to *Bottom and redefining *Top."
-    model.ShowNamedView2 "*Bottom", 6
-    StabilizeActiveView model, 100
-    If persistAsStandardTop Then
-        If PersistCurrentViewAsStandardTop(model) Then
-            LogLine "Flipped stack persisted as SolidWorks *Top (TCP toward camera)."
+        LogLine "TCP large-face check attempt " & attempt & ": projected=" & _
+                FormatNumberForCsv(viewW) & "x" & FormatNumberForCsv(viewH) & _
+                " thick~" & FormatNumberForCsv(thick)
+
+        ' Good: both on-screen sides clearly larger than plate thickness (flat face,
+        ' not edge/chamfer). Chamfer/edge views show one side ≈ thickness.
+        If faceMin > (thick * 1.75) And faceMax > (thick * 3#) Then
+            LogLine "TCP large flat face OK (not edge/chamfer)."
+            Exit Sub
         End If
-    End If
-    On Error Resume Next
-    model.DeleteNamedView CMS_TOP_VIEW_NAME
-    Err.Clear
-    model.NameView CMS_TOP_VIEW_NAME
-    On Error GoTo eh
-    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
-    StabilizeActiveView model, 50
+
+        ' Edge-on or chamfer-dominant: rotate 90° about view Z and re-persist *Top.
+        LogLine "TCP view looks edge/chamfer — rotating +Z and redefining *Top."
+        RotateViewZSteps model, 1
+        StabilizeActiveView model, 80
+        If persistAsStandardTop Then PersistCurrentViewAsStandardTop model
+        On Error Resume Next
+        model.DeleteNamedView CMS_TOP_VIEW_NAME
+        Err.Clear
+        model.NameView CMS_TOP_VIEW_NAME
+        On Error GoTo eh
+        model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
+        StabilizeActiveView model, 50
+    Next attempt
+
+    LogLine "WARNING: TCP large-face check could not confirm flat face after rotations."
     Exit Sub
 eh:
-    LogLine "EnsureTcpAboveBcpInActiveTopView error: " & Err.Description
+    LogLine "EnsureTcpLargeFlatFaceTowardCamera error: " & Err.Description
 End Sub
 
 Private Sub SetStandardBaseOrientation(ByVal model As Object)
@@ -2967,7 +2967,36 @@ On Error GoTo ErrHandler
     SaveModelAs swModel, sldPath
     SaveModelAs swModel, xtPath
 
-    ' Fast path: ISO + DXF before STL so the job folder fills quickly.
+    ' ============================================================
+    ' STL FIRST (gemini1): everything visible, combined one-file mesh.
+    ' ISO/DXF hide-lists must NOT run before this or only one part exports.
+    ' ============================================================
+    LogStart "Export full-assembly STL"
+    On Error Resume Next
+    swModel.ClearSelection2 True
+    swModel.ResolveAllLightWeightComponents True
+    UnsuppressAllAssemblyComponents swModel
+    ShowAllAssemblyComponents swModel
+    On Error GoTo ErrHandler
+    ApplyCmsTopView swModel
+    If swModel.GetType = swDocASSEMBLY Then
+        ' Always try gemini1 merge path first (all components → one combined STL).
+        SaveAssemblyAsMergedPartStl swModel, stlPath
+    Else
+        SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
+    End If
+    LogLine "Whole-assembly STL written: " & stlPath
+    On Error Resume Next
+    UnsuppressAllAssemblyComponents swModel
+    ShowAllAssemblyComponents swModel
+    If LCase(stlPath) <> LCase(stlBasePath) Then
+        Dim fsoStl As Object
+        Set fsoStl = CreateObject("Scripting.FileSystemObject")
+        If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
+    End If
+    On Error GoTo ErrHandler
+    LogDone "Export full-assembly STL"
+
     If CREATE_ISO_JPEGS Then
         If gJobIsStandardBase Then
             ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
@@ -2988,37 +3017,6 @@ On Error GoTo ErrHandler
         LogLine "DXF written: " & dxfPath
     End If
 
-    ' STL last — always full-assembly combined one-file (gemini1).
-    ' Show everything first: DXF keep-list may have left components hidden.
-    LogStart "Export full-assembly STL"
-    On Error Resume Next
-    UnsuppressAllAssemblyComponents swModel
-    ShowAllAssemblyComponents swModel
-    On Error GoTo ErrHandler
-    ApplyCmsTopView swModel
-    If swModel.GetType = swDocASSEMBLY Then
-        ' Prefer temp-part merge so every body lands in one combined mesh.
-        ' Fall back to assembly STL with ComponentsIntoOneFile if merge fails.
-        If PartCount > STL_MERGE_MAX_PARTS Then
-            LogLine "STL: PartCount=" & PartCount & " > " & STL_MERGE_MAX_PARTS & _
-                    " — using direct one-file assembly export (all components visible)."
-            SaveFullAssemblyStlFromAssembly swModel, stlPath
-        Else
-            SaveAssemblyAsMergedPartStl swModel, stlPath
-        End If
-    Else
-        SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
-    End If
-    LogLine "Whole-assembly STL written: " & stlPath
-    On Error Resume Next
-    If LCase(stlPath) <> LCase(stlBasePath) Then
-        Dim fsoStl As Object
-        Set fsoStl = CreateObject("Scripting.FileSystemObject")
-        If fsoStl.FileExists(stlPath) Then fsoStl.CopyFile stlPath, stlBasePath, True
-    End If
-    On Error GoTo ErrHandler
-    LogDone "Export full-assembly STL"
-
     If EXPORT_HEAVY_NEUTRALS And Not FAST_QUOTE_MODE Then
         If swModel.GetType = swDocASSEMBLY Then
             SaveModelAs swModel, easmPath
@@ -3035,6 +3033,9 @@ On Error GoTo ErrHandler
         ExportPlateStlsForComparison CurrentJobFolder & "\stl"
     End If
 
+    On Error Resume Next
+    UnsuppressAllAssemblyComponents swModel
+    ShowAllAssemblyComponents swModel
     ApplyCmsTopView swModel
     Exit Sub
 
@@ -3438,6 +3439,12 @@ On Error GoTo ErrHandler
     If assyModel Is Nothing Then Exit Sub
     If stlPath = "" Then Exit Sub
 
+    On Error Resume Next
+    assyModel.ResolveAllLightWeightComponents True
+    UnsuppressAllAssemblyComponents assyModel
+    ShowAllAssemblyComponents assyModel
+    On Error GoTo ErrHandler
+
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
 
@@ -3459,7 +3466,7 @@ On Error GoTo ErrHandler
     End If
 
     Dim errs As Long, warns As Long
-    LogLine "FULL ASSEMBLY: saving assembly as temp multibody part:"
+    LogLine "FULL ASSEMBLY: saving assembly as temp multibody part (all components visible):"
     LogLine "  " & partPath
 
     assyModel.Extension.SaveAs3 partPath, swSaveAsCurrentVersion, _
@@ -7759,21 +7766,24 @@ Private Function DetectBaseTypeIsStandard() As Boolean
     Dim nFull As Long
     nFull = CountFullFootprintPlates()
 
-    ' 1) BMS / Tempcraft / pot-block in folder or CAD file name — strongest signal.
+    ' 0) Strong PCS / DME plate tokens in CAD names beat BMS BOM leftovers.
+    Dim nPcs As Long
+    nPcs = CountPcsStandardPlateNameHits()
+    If nPcs >= 3 Then
+        DetectBaseTypeIsStandard = True
+        LogLine "Base type STANDARD from PCS/DME plate tokens in CAD names (nPcs=" & nPcs & ", nFull=" & nFull & ")"
+        Exit Function
+    End If
+
+    ' 1) BMS / Tempcraft / pot-block in folder or CAD file name — strongest BMS signal.
     If LooksLikeBmsJobFromName() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from job/folder/CAD file name (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 2) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
-    If LooksLikeBmsJobFromBom() Then
-        DetectBaseTypeIsStandard = False
-        LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
-        Exit Function
-    End If
-
-    ' 3) BOM that names several standard structural plates -> standard base.
+    ' 2) BOM that names several standard structural plates -> standard base
+    '    (checked BEFORE BMS BOM tokens so Dynacast/PCS BOMs with stray "TCP" win).
     Dim i As Long, nStd As Long
     nStd = 0
     For i = 1 To BomCount
@@ -7785,24 +7795,51 @@ Private Function DetectBaseTypeIsStandard() As Boolean
         Exit Function
     End If
 
-    ' 4) Geometry: 3+ full-footprint plates = standard mold stack.
+    ' 3) Geometry: 3+ full-footprint plates = standard mold stack.
     If nFull >= 3 Then
         DetectBaseTypeIsStandard = True
         LogLine "Base type STANDARD from geometry (nFull=" & nFull & ")"
         Exit Function
     End If
 
+    ' 4) BOM pot-block plate names (holders / pots / SMED) — not TCP/BCP alone.
+    If LooksLikeBmsJobFromBom() Then
+        DetectBaseTypeIsStandard = False
+        LogLine "Base type forced POT/BMS from BOM holder/pot/SMED names (nFull=" & nFull & ")"
+        Exit Function
+    End If
+
     ' 5) Geometry-only pot-block (generic asm_objects, no BMS in name / BOM).
-    '    Requires distinguishable pots (thick + small footprint), not A/B plates.
     If LooksLikeBmsJobFromGeometry() Then
         DetectBaseTypeIsStandard = False
         LogLine "Base type forced POT/BMS from pot-block geometry heuristic (nFull=" & nFull & ")"
         Exit Function
     End If
 
-    ' 6) No BMS name and no pot-block geometry -> default STANDARD (Dynacast/DME).
+    ' 6) No BMS name and no pot-block geometry -> default STANDARD (Dynacast/DME/PCS).
     DetectBaseTypeIsStandard = True
     LogLine "Base type default STANDARD (no BMS name / pot-block signal; nFull=" & nFull & ")"
+End Function
+
+' Count CAD components whose names look like PCS/DME structural plates.
+Private Function CountPcsStandardPlateNameHits() As Long
+    Dim i As Long, n As Long, s As String, u As String
+    n = 0
+    For i = 1 To PartCount
+        s = " " & NormalizeText(parts(i).componentName) & " "
+        u = UCase$(parts(i).componentName)
+        If InStr(u, "A-PLATE") > 0 Or InStr(u, "A_PLATE") > 0 Or InStr(s, " A PLATE ") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "B-PLATE") > 0 Or InStr(u, "B_PLATE") > 0 Or InStr(s, " B PLATE ") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "EJ-RET") > 0 Or InStr(u, "EJ_RET") > 0 Or InStr(u, "EJECTOR") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "EJ-BACKUP") > 0 Or InStr(u, "EJ_BACKUP") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "SC-RETAINER") > 0 Or InStr(u, "SC-BACKUP") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "CLAMP") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "SUPPORT") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
+        If InStr(u, "RAIL") > 0 Then n = n + 1: GoTo NextPcsHit
+        If StandardPlateNameStd(parts(i).componentName) <> "" Then n = n + 1
+NextPcsHit:
+    Next i
+    CountPcsStandardPlateNameHits = n
 End Function
 
 ' Folder / customer / CAD-file BMS markers. Most BMS jobs have "BMS" in the name.
@@ -13199,14 +13236,11 @@ On Error GoTo ErrHandler
     If viewH > projectedLong Then projectedLong = viewH
 
     Dim actualLong As Double
-    ' Use raw bbox (not view-frame Length) — frame dims are assigned after DXF.
-    actualLong = parts(holderIdx).BoxDx
-    If parts(holderIdx).BoxDy > actualLong Then actualLong = parts(holderIdx).BoxDy
-    If parts(holderIdx).BoxDz > actualLong Then actualLong = parts(holderIdx).BoxDz
+    actualLong = parts(holderIdx).Length
     If actualLong <= 0# Then
-        actualLong = parts(holderIdx).Length
-        If parts(holderIdx).Width > actualLong Then actualLong = parts(holderIdx).Width
-        If parts(holderIdx).Thickness > actualLong Then actualLong = parts(holderIdx).Thickness
+        actualLong = parts(holderIdx).BoxDx
+        If parts(holderIdx).BoxDy > actualLong Then actualLong = parts(holderIdx).BoxDy
+        If parts(holderIdx).BoxDz > actualLong Then actualLong = parts(holderIdx).BoxDz
     End If
 
     If actualLong <= 0# Then Exit Function
