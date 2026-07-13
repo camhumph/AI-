@@ -76,11 +76,45 @@ def _is_generated_base_path(path: Path | str) -> bool:
     return "\\BASE\\" in u or u.endswith("\\BASE")
 
 
-def _find_best_xt(folder: Path) -> Path | None:
+def _digits_only(s: str) -> str:
+    return "".join(ch for ch in (s or "") if ch.isdigit())
+
+
+def _is_foreign_job_cad(path: Path | str, c_number: str = "", cust_job: str = "") -> bool:
+    """Reject CAD that clearly belongs to another C##### or BMS job id."""
+    text = str(path).replace("/", "\\").upper()
+    want_c = (c_number or "").strip().upper().replace("-", "")
+    if want_c and not want_c.startswith("C"):
+        want_c = "C" + want_c
+    want_job = _digits_only(cust_job)
+
+    c_tokens = re.findall(r"(?<![A-Z0-9])C(\d{4,6})(?!\d)", text)
+    if want_c and c_tokens:
+        want_digits = want_c[1:] if want_c.startswith("C") else want_c
+        if want_digits not in c_tokens and any(t != want_digits for t in c_tokens):
+            return True
+
+    job_tokens = re.findall(r"\d{8,}", text)
+    if want_job and job_tokens:
+        if want_job not in job_tokens and any(t != want_job for t in job_tokens):
+            return True
+    return False
+
+
+def _find_best_xt(
+    folder: Path,
+    c_number: str = "",
+    cust_job: str = "",
+) -> Path | None:
     """Prefer Parasolid XT (then STEP/IGES) under a staged job folder; never \\base\\."""
     if not folder or not folder.is_dir():
         return None
     scored: list[tuple[int, Path]] = []
+    want_c = (c_number or "").strip().upper().replace("-", "")
+    if want_c and not want_c.startswith("C"):
+        want_c = "C" + want_c
+    want_job = _digits_only(cust_job)
+
     for p in folder.rglob("*"):
         if not p.is_file():
             continue
@@ -88,13 +122,22 @@ def _find_best_xt(folder: Path) -> Path | None:
             continue
         if any(part.upper() == "BASE" for part in p.parts):
             continue
+        if _is_foreign_job_cad(p, want_c, want_job):
+            continue
         ext = p.suffix.lower()
         if ext not in _XT_EXTS:
             continue
         score = 120 if ext in {".x_t", ".x_b"} else 110 if ext in {".step", ".stp"} else 100
         name_u = p.name.upper()
-        if "RFQ" in name_u:
+        path_u = str(p).upper()
+        if want_c and want_c in path_u:
+            score += 500
+        if want_job and want_job in path_u:
+            score += 500
+        if "RFQ" in name_u and score < 400:
             score -= 40
+        if score < 400 and ("MOLD_BASE" in name_u or "OUTSOURCE" in name_u):
+            score -= 20
         scored.append((score, p))
     if not scored:
         return None
@@ -105,6 +148,7 @@ def _find_best_xt(folder: Path) -> Path | None:
 def stage_job_to_local_workspace(
     c_number: str,
     source_dirs: list[str | Path] | None = None,
+    cust_job: str = "",
 ) -> dict:
     """Copy job/attach files into C:\\CMS_Local_Workspace\\C##### and return local XT path.
 
@@ -119,6 +163,7 @@ def stage_job_to_local_workspace(
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     dest = LOCAL_WORKSPACE / c
     copied = 0
+    want_job = _digits_only(cust_job)
 
     # Fresh stage each launch so we don't mix old BASE exports with new files.
     if dest.exists():
@@ -140,17 +185,29 @@ def stage_job_to_local_workspace(
                     continue
                 if item.is_dir() and item.name.upper() == "BASE":
                     continue
+                if _is_foreign_job_cad(item, c, want_job):
+                    continue
                 target = dest / item.name
                 if item.is_file():
                     shutil.copy2(item, target)
                     copied += 1
                 elif item.is_dir():
-                    shutil.copytree(item, target, dirs_exist_ok=True)
+                    shutil.copytree(
+                        item,
+                        target,
+                        dirs_exist_ok=True,
+                        ignore=lambda _dir, names: [
+                            n
+                            for n in names
+                            if n.upper() == "BASE"
+                            or _is_foreign_job_cad(Path(_dir) / n, c, want_job)
+                        ],
+                    )
                     copied += sum(1 for _ in target.rglob("*") if _.is_file())
         except Exception:
             continue
 
-    xt = _find_best_xt(dest)
+    xt = _find_best_xt(dest, c_number=c, cust_job=want_job)
     return {
         "local_folder": str(dest),
         "cad_path": str(xt) if xt else "",
@@ -326,7 +383,11 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         info.get("job_folder") or "",
         info.get("root_path") or "",
     ]
-    staged = stage_job_to_local_workspace(c_number, stage_sources) if c_number else {}
+    staged = stage_job_to_local_workspace(
+        c_number,
+        stage_sources,
+        cust_job=str(info.get("cust_job") or ""),
+    ) if c_number else {}
     local_cad = str(staged.get("cad_path") or "")
     local_folder = str(staged.get("local_folder") or "")
     # Only advertise local stage when we actually found CAD or copied files.
@@ -487,8 +548,13 @@ def launch_batch_quotes(items: list[dict]) -> dict:
                 info.get("job_folder") or item.get("job_folder") or "",
                 info.get("root_path") or item.get("root_path") or "",
             ],
+            cust_job=str(info.get("cust_job") or ""),
         )
-        cad_path = str(staged.get("cad_path") or info.get("cad_path") or item.get("cad_path") or "")
+        cad_path = str(staged.get("cad_path") or "")
+        if not cad_path:
+            raw_cad = str(info.get("cad_path") or item.get("cad_path") or "")
+            if raw_cad and not _is_foreign_job_cad(raw_cad, c_number, str(info.get("cust_job") or "")):
+                cad_path = raw_cad
         local_folder = str(staged.get("local_folder") or "")
 
         job = {

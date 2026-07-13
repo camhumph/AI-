@@ -184,8 +184,13 @@ End If
 gCadPath = ""
 If gEmailCadPath <> "" Then
     If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
-        gCadPath = gEmailCadPath
-        LogStep "using CadPath from cms_email.txt: " & gCadPath
+        If IsForeignJobCad(gEmailCadPath) Then
+            LogStep "WARNING: ignoring foreign-job CadPath from cms_email.txt: " & gEmailCadPath
+            gEmailCadPath = ""
+        Else
+            gCadPath = gEmailCadPath
+            LogStep "using CadPath from cms_email.txt: " & gCadPath
+        End If
     End If
 End If
 If gCadPath = "" And gLocalJobFolder <> "" Then
@@ -539,6 +544,86 @@ Function IsGeneratedBaseCadPath(ByVal p)
     If InStr(u, "/BASE/") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
 End Function
 
+' True when path/name clearly belongs to a DIFFERENT C-number or BMS job id.
+' Example: reject 851100021_MOLD_BASE....x_t when quoting 851100043-C18606.
+Function IsForeignJobCad(ByVal pathOrName)
+    IsForeignJobCad = False
+    Dim u, wantC, wantJob, tok, digits, i, ch, p, foundOtherC, foundWantC, foundOtherJob, foundWantJob
+    Dim atC, digStart
+    u = UCase(CStr(pathOrName))
+    If u = "" Then Exit Function
+    wantC = UCase(Trim(CStr(cNum)))
+    If wantC = "" Then wantC = UCase(Trim(CStr(quoteNoHyphen)))
+    wantJob = UCase(Trim(CStr(custJobNum)))
+    If wantJob <> "" Then
+        digits = ""
+        For i = 1 To Len(wantJob)
+            ch = Mid(wantJob, i, 1)
+            If ch >= "0" And ch <= "9" Then digits = digits & ch
+        Next
+        wantJob = digits
+    End If
+
+    foundOtherC = False: foundWantC = False
+    foundOtherJob = False: foundWantJob = False
+
+    ' Scan for C##### tokens
+    p = 1
+    Do While p <= Len(u)
+        atC = False
+        If Mid(u, p, 1) = "C" And p < Len(u) Then
+            If Mid(u, p + 1, 1) >= "0" And Mid(u, p + 1, 1) <= "9" Then
+                If p = 1 Or Not ((Mid(u, p - 1, 1) >= "A" And Mid(u, p - 1, 1) <= "Z") Or (Mid(u, p - 1, 1) >= "0" And Mid(u, p - 1, 1) <= "9")) Then
+                    digStart = p + 1
+                    digits = ""
+                    i = digStart
+                    Do While i <= Len(u)
+                        ch = Mid(u, i, 1)
+                        If ch >= "0" And ch <= "9" Then
+                            digits = digits & ch
+                        Else
+                            Exit Do
+                        End If
+                        i = i + 1
+                    Loop
+                    If Len(digits) >= 4 And Len(digits) <= 6 Then
+                        tok = "C" & digits
+                        If wantC <> "" And tok = wantC Then
+                            foundWantC = True
+                        ElseIf wantC <> "" Then
+                            foundOtherC = True
+                        End If
+                        p = i
+                        atC = True
+                    End If
+                End If
+            End If
+        End If
+        If Not atC Then p = p + 1
+    Loop
+
+    ' Scan for 8+ digit BMS-style job numbers (851100021 vs 851100043)
+    digits = ""
+    For i = 1 To Len(u) + 1
+        If i <= Len(u) Then ch = Mid(u, i, 1) Else ch = ""
+        If ch >= "0" And ch <= "9" Then
+            digits = digits & ch
+        Else
+            If Len(digits) >= 8 Then
+                If wantJob <> "" And digits = wantJob Then
+                    foundWantJob = True
+                ElseIf wantJob <> "" Then
+                    foundOtherJob = True
+                End If
+            End If
+            digits = ""
+        End If
+    Next
+
+    If foundOtherC And Not foundWantC Then IsForeignJobCad = True: Exit Function
+    If foundOtherJob And Not foundWantJob Then IsForeignJobCad = True: Exit Function
+End Function
+
 ' Rank CAD files: strongly prefer the assembly that matches this job's C-number.
 ' Example: 863700126-C18614.sldasm beats 863700102_RFQ_MB_ASM_....sldasm
 ' Never prefer previously exported \base\*.SLDASM outputs.
@@ -546,12 +631,16 @@ Function CadPriority(ext, fileName)
     Dim e, bonus, u
     e = LCase(ext)
     u = UCase(fileName)
+    If IsForeignJobCad(u) Then CadPriority = 0: Exit Function
     bonus = 0
     If cNum <> "" Then
         If InStr(u, UCase(cNum)) > 0 Then bonus = bonus + 500
     End If
     If quoteNoHyphen <> "" Then
         If InStr(u, UCase(quoteNoHyphen)) > 0 Then bonus = bonus + 400
+    End If
+    If custJobNum <> "" Then
+        If InStr(u, UCase(custJobNum)) > 0 Then bonus = bonus + 500
     End If
     If jobFolderName <> "" Then
         If InStr(u, UCase(jobFolderName)) > 0 Then bonus = bonus + 200
@@ -562,6 +651,10 @@ Function CadPriority(ext, fileName)
         bonus = bonus + 10
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
+    ' Generic mold-base XT with no job tokens loses to job-matched files.
+    If bonus = 0 And (InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0) Then
+        bonus = bonus - 20
+    End If
     Select Case e
         ' Prefer customer Parasolid XT / STEP for open-first quoting (not exported SLDASM).
         Case "x_t", "x_b": CadPriority = 120 + bonus
@@ -599,23 +692,27 @@ Function FindBestXtInFolder(folderPath)
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
         If Not IsGeneratedBaseCadPath(f.Path) Then
-            score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name)
-            If score > bestScore Then
-                bestScore = score
-                bestPath = f.Path
+            If Not IsForeignJobCad(f.Path) Then
+                score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name)
+                If score > bestScore Then
+                    bestScore = score
+                    bestPath = f.Path
+                End If
             End If
         End If
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
             If UCase(sub1.Name) <> "BASE" Then
-                hit = FindBestXtInFolder(sub1.Path)
-                If hit <> "" Then
-                    If Not IsGeneratedBaseCadPath(hit) Then
-                        score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
-                        If score > bestScore Then
-                            bestScore = score
-                            bestPath = hit
+                If Not IsForeignJobCad(sub1.Path) Then
+                    hit = FindBestXtInFolder(sub1.Path)
+                    If hit <> "" Then
+                        If Not IsGeneratedBaseCadPath(hit) And Not IsForeignJobCad(hit) Then
+                            score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                            If score > bestScore Then
+                                bestScore = score
+                                bestPath = hit
+                            End If
                         End If
                     End If
                 End If
@@ -663,13 +760,42 @@ Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
         If UCase(attachDir) <> UCase(dest) Then src = attachDir
     End If
     If src <> "" Then
-        n = CopyDirContents(src, dest)
+        n = CopyDirContentsSkippingForeignJobs(src, dest)
         LogStep "staged " & n & " file(s) from " & src & " -> " & dest
     Else
         LogStep "stage skipped — no source folder for " & dest
     End If
     On Error GoTo 0
     If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
+End Function
+
+' Like CopyDirContents, but skip subfolders/files that belong to another BMS/C job.
+Function CopyDirContentsSkippingForeignJobs(src, dst)
+    Dim n, f, sub1, d2
+    n = 0
+    On Error Resume Next
+    For Each f In fso.GetFolder(src).Files
+        If Not IsForeignJobCad(f.Path) Then
+            fso.CopyFile f.Path, dst & "\" & f.Name, True
+            If Err.Number = 0 Then n = n + 1
+            Err.Clear
+        Else
+            LogStep "stage skip foreign CAD file: " & f.Name
+            Err.Clear
+        End If
+    Next
+    For Each sub1 In fso.GetFolder(src).SubFolders
+        If UCase(sub1.Name) = "BASE" Then
+            ' skip generated outputs
+        ElseIf IsForeignJobCad(sub1.Path) Then
+            LogStep "stage skip foreign job folder: " & sub1.Name
+        Else
+            d2 = dst & "\" & sub1.Name
+            If Not fso.FolderExists(d2) Then fso.CreateFolder d2
+            n = n + CopyDirContentsSkippingForeignJobs(sub1.Path, d2)
+        End If
+    Next
+    CopyDirContentsSkippingForeignJobs = n
 End Function
 
 Function FindBestCadInFolder(folderPath)
@@ -686,23 +812,27 @@ Function FindBestCadInFolder(folderPath)
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
         If Not IsGeneratedBaseCadPath(f.Path) Then
-            score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
-            If score > bestScore Then
-                bestScore = score
-                bestPath = f.Path
+            If Not IsForeignJobCad(f.Path) Then
+                score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
+                If score > bestScore Then
+                    bestScore = score
+                    bestPath = f.Path
+                End If
             End If
         End If
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
             If UCase(sub1.Name) <> "BASE" Then
-                hit = FindBestCadInFolder(sub1.Path)
-                If hit <> "" Then
-                    If Not IsGeneratedBaseCadPath(hit) Then
-                        score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
-                        If score > bestScore Then
-                            bestScore = score
-                            bestPath = hit
+                If Not IsForeignJobCad(sub1.Path) Then
+                    hit = FindBestCadInFolder(sub1.Path)
+                    If hit <> "" Then
+                        If Not IsGeneratedBaseCadPath(hit) And Not IsForeignJobCad(hit) Then
+                            score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
+                            If score > bestScore Then
+                                bestScore = score
+                                bestPath = hit
+                            End If
                         End If
                     End If
                 End If

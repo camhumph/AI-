@@ -1888,6 +1888,9 @@ On Error GoTo ErrHandler
         If IsGeneratedBaseCadPath(gHandoffCadPath) Then
             LogLine "WARNING: ignoring handoff CadPath under \base\: " & gHandoffCadPath
             gHandoffCadPath = ""
+        ElseIf IsForeignJobCadName(gHandoffCadPath) Then
+            LogLine "WARNING: ignoring foreign-job handoff CadPath: " & gHandoffCadPath
+            gHandoffCadPath = ""
         ElseIf fsoCad.FileExists(gHandoffCadPath) Then
             cadCandidates.Add gHandoffCadPath
             LogLine "Using CadPath from handoff first: " & gHandoffCadPath
@@ -2696,12 +2699,16 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
     Dim nameUpper As String
     nameUpper = UCase(fileName)
     If Left(fileName, 2) = "~$" Then CadFilePriority = 0: Exit Function
+    If IsForeignJobCadName(nameUpper) Then CadFilePriority = 0: Exit Function
     Dim bonus As Long
     bonus = 0
     ' Strongly prefer the assembly that belongs to THIS C-number / job folder.
     ' Example: 863700126-C18614.sldasm beats 863700102_RFQ_MB_ASM_....sldasm
     If CurrentJobNumber <> "" Then
         If InStr(nameUpper, UCase(CurrentJobNumber)) > 0 Then bonus = bonus + 500
+    End If
+    If CustomerJobNumber <> "" Then
+        If InStr(nameUpper, UCase(CustomerJobNumber)) > 0 Then bonus = bonus + 500
     End If
     If gExactJobFolderName <> "" Then
         If InStr(nameUpper, UCase(CleanFileName(gExactJobFolderName))) > 0 Then bonus = bonus + 200
@@ -2719,6 +2726,9 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
     ' Deprioritize obvious leftovers / other jobs
     If InStr(nameUpper, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
     If InStr(nameUpper, "_EXTRACT") > 0 Or InStr(nameUpper, "OLD_") > 0 Then bonus = bonus - 80
+    If bonus = 0 And (InStr(nameUpper, "MOLD_BASE") > 0 Or InStr(nameUpper, "OUTSOURCE") > 0) Then
+        bonus = bonus - 20
+    End If
     Select Case ext
         ' Prefer customer XT/STEP over exported SLDASM when quoting from staged local files.
         Case "x_t", "x_b": CadFilePriority = 120 + bonus
@@ -2732,6 +2742,85 @@ Private Function CadFilePriority(ByVal ext As String, ByVal fileName As String) 
         Case Else: CadFilePriority = 0
     End Select
     If CadFilePriority < 0 Then CadFilePriority = 0
+End Function
+
+' Reject CAD whose name carries a different C##### or BMS job id than this quote.
+Private Function IsForeignJobCadName(ByVal pathOrName As String) As Boolean
+    IsForeignJobCadName = False
+    Dim u As String
+    u = UCase$(Trim$(pathOrName))
+    If u = "" Then Exit Function
+
+    Dim wantC As String, wantJob As String, digits As String
+    Dim i As Long, ch As String, p As Long, tok As String
+    Dim foundOtherC As Boolean, foundWantC As Boolean
+    Dim foundOtherJob As Boolean, foundWantJob As Boolean
+    Dim atC As Boolean
+
+    wantC = UCase$(Trim$(CurrentJobNumber))
+    wantJob = ""
+    digits = ""
+    For i = 1 To Len(CustomerJobNumber)
+        ch = Mid$(CustomerJobNumber, i, 1)
+        If ch >= "0" And ch <= "9" Then digits = digits & ch
+    Next i
+    wantJob = digits
+
+    foundOtherC = False: foundWantC = False
+    foundOtherJob = False: foundWantJob = False
+
+    p = 1
+    Do While p <= Len(u)
+        atC = False
+        If Mid$(u, p, 1) = "C" And p < Len(u) Then
+            If Mid$(u, p + 1, 1) >= "0" And Mid$(u, p + 1, 1) <= "9" Then
+                If p = 1 Or Not ((Mid$(u, p - 1, 1) >= "A" And Mid$(u, p - 1, 1) <= "Z") Or (Mid$(u, p - 1, 1) >= "0" And Mid$(u, p - 1, 1) <= "9")) Then
+                    digits = ""
+                    i = p + 1
+                    Do While i <= Len(u)
+                        ch = Mid$(u, i, 1)
+                        If ch >= "0" And ch <= "9" Then
+                            digits = digits & ch
+                        Else
+                            Exit Do
+                        End If
+                        i = i + 1
+                    Loop
+                    If Len(digits) >= 4 And Len(digits) <= 6 Then
+                        tok = "C" & digits
+                        If wantC <> "" And tok = wantC Then
+                            foundWantC = True
+                        ElseIf wantC <> "" Then
+                            foundOtherC = True
+                        End If
+                        p = i
+                        atC = True
+                    End If
+                End If
+            End If
+        End If
+        If Not atC Then p = p + 1
+    Loop
+
+    digits = ""
+    For i = 1 To Len(u) + 1
+        If i <= Len(u) Then ch = Mid$(u, i, 1) Else ch = ""
+        If ch >= "0" And ch <= "9" Then
+            digits = digits & ch
+        Else
+            If Len(digits) >= 8 Then
+                If wantJob <> "" And digits = wantJob Then
+                    foundWantJob = True
+                ElseIf wantJob <> "" Then
+                    foundOtherJob = True
+                End If
+            End If
+            digits = ""
+        End If
+    Next i
+
+    If foundOtherC And Not foundWantC Then IsForeignJobCadName = True: Exit Function
+    If foundOtherJob And Not foundWantJob Then IsForeignJobCadName = True: Exit Function
 End Function
 
 Private Function IsGeneratedBaseCadPath(ByVal cadPath As String) As Boolean
