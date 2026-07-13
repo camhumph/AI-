@@ -10,7 +10,7 @@ Option Explicit
 '   3. Orients to CMS_TOP (gemini1 holder/pot/ins/TCP -> *Top/*Front) and saves
 '      the WHOLE BASE into the job folder:
 '        base\<job> .sldasm / .easm / .igs / .x_t
-'        <job> .stl               (one-file STL, post-rotated to CMS_TOP like DXF/ISO)
+'        <job> .stl               (gemini1 merged one-file STL, oriented from corrected *Front)
 '        <job> .dxf               (4 views, Pyropel hidden)
 '        <job> ISO.jpg / BACK ISO.jpg  (Pyropel hidden)
 '   4. Scans CAD parts and writes XT_Export_CAD_Dimensions.csv + BOM match report.
@@ -113,7 +113,8 @@ Private Const swSaveAssemblyAsPartOptions As Long = 201
 Private Const swSaveAsmAsPart_AllComponents As Long = 1
 ' swBodyOperationType_e.SWBODYADD = Combine -> Add (union of bodies).
 Private Const SWBODYADD As Long = 15903
-' After STL export, rotate mesh into CMS_TOP frame (same as DXF / ISO / L-W-T).
+' After merge-STL export, rotate mesh into corrected *Front/*Top frame (gemini1).
+Private Const MATCH_STUDIO_STL_MATCH_MAIN_BASE_ORIENTATION As Boolean = True
 Private Const POST_ROTATE_STL_TO_CORRECTED_FRONT As Boolean = True
 Private Const swSolidBody As Long = 0
 Private Const swComponentHidden As Long = 0
@@ -167,7 +168,7 @@ Private LastJobFailReason As String
 Private DxfFreezeDoc As Object
 Private CurrentDxfForce1to1 As Boolean
 
-' Final CMS_TOP orientation matrix for STL post-rotate (same frame as DXF/ISO).
+' Final corrected *Front orientation matrix for STL post-rotate (gemini1).
 Private FinalStlCoordFrameReady As Boolean
 Private FinalStlCoordM(0 To 8) As Double
 
@@ -1447,7 +1448,7 @@ On Error GoTo ErrHandler
         LogDone "Set BMS pot-block TCP/top orientation from matched holder/pot/TCP"
     End If
 
-    ' gemini1: capture CMS_TOP matrix so merged STL post-rotates to the same frame as DXF/ISO.
+    ' gemini1: capture corrected *Front matrix so merged STL post-rotates correctly.
     CaptureFinalStandardViewsForStlCoordinateSystem swModel
     CaptureCmsViewFrameFromModel swModel
     ApplyCmsViewDimsToAllParts
@@ -3487,49 +3488,90 @@ End Sub
 
 Private Sub SaveStlWithMainBaseOrientation(ByVal model As Object, _
                                            ByVal stlPath As String, _
-                                           Optional ByVal label As String = "")
+                                           Optional ByVal label As String = "", _
+                                           Optional ByVal sourceComponentName As String = "")
 On Error GoTo ErrHandler
+
     If model Is Nothing Then Exit Sub
     If stlPath = "" Then Exit Sub
 
     Dim orientM(0 To 8) As Double
     Dim gotOrient As Boolean
     Dim i As Long
+
     gotOrient = False
 
-    If POST_ROTATE_STL_TO_CORRECTED_FRONT Then
+    If MATCH_STUDIO_STL_MATCH_MAIN_BASE_ORIENTATION And POST_ROTATE_STL_TO_CORRECTED_FRONT Then
+
+        ' Use the one final coordinate frame captured after *Top and *Front were corrected.
+        ' Do NOT use the component's original axes.
+        ' Do NOT use the orientation of the isolated component state.
         If FinalStlCoordFrameReady Then
-            For i = 0 To 8: orientM(i) = FinalStlCoordM(i): Next i
+
+            For i = 0 To 8
+                orientM(i) = FinalStlCoordM(i)
+            Next i
+
             gotOrient = True
-            LogLine "STL using CMS_TOP coordinate system (same as DXF/ISO): " & label
+
+            LogLine "STL using FINAL corrected standard-view coordinate system:"
+            LogLine "  Label=" & label
+            LogLine "  Path=" & stlPath
+
         Else
-            LogLine "WARNING: Final STL coordinate system not captured; attempting now."
+
+            LogLine "WARNING: Final STL coordinate system was not captured before STL save."
+            LogLine "Attempting to capture it now from main model/current model."
+
             If Not swModel Is Nothing Then
                 gotOrient = CaptureFinalStandardViewsForStlCoordinateSystem(swModel)
             Else
                 gotOrient = CaptureFinalStandardViewsForStlCoordinateSystem(model)
             End If
+
             If gotOrient Then
-                For i = 0 To 8: orientM(i) = FinalStlCoordM(i): Next i
+                For i = 0 To 8
+                    orientM(i) = FinalStlCoordM(i)
+                Next i
+            Else
+                LogLine "WARNING: Could not capture final STL coordinate system. STL may stay in original imported axes."
             End If
+
         End If
+
     End If
 
+    ' SolidWorks STL export ignores named views and standard views.
+    ' It writes mesh coordinates in model/original coordinate space.
     SaveModelAs model, stlPath
 
+    ' Convert exported STL mesh from original model coordinates into your corrected
+    ' Top/Front standard-view coordinate system.
     If gotOrient Then
+
         If ReorientStlFileToMatrix(stlPath, orientM) Then
-            LogLine "STL post-rotated into CMS_TOP frame (matches DXF parent / view L-W-T): " & stlPath
+
+            LogLine "STL post-rotated into FINAL corrected Top/Front coordinate system:"
+            LogLine "  " & stlPath
+
         Else
-            LogLine "WARNING: STL post-rotation failed: " & stlPath
+
+            LogLine "WARNING: STL post-rotation failed:"
+            LogLine "  " & stlPath
+
         End If
+
     End If
 
     On Error Resume Next
     ApplyCmsTopView model
+    On Error GoTo 0
+
     Exit Sub
+
 ErrHandler:
     LogLine "SaveStlWithMainBaseOrientation error (" & label & "): " & Err.Description
+
     On Error Resume Next
     SaveModelAs model, stlPath
     ApplyCmsTopView model
@@ -3537,39 +3579,28 @@ End Sub
 
 Private Function CaptureFinalStandardViewsForStlCoordinateSystem(ByVal model As Object) As Boolean
 On Error GoTo ErrHandler
+
     CaptureFinalStandardViewsForStlCoordinateSystem = False
     FinalStlCoordFrameReady = False
+
     If model Is Nothing Then Exit Function
 
     Dim errs As Long
     swApp.ActivateDoc3 model.GetTitle, False, 0, errs
     EnsureSwHidden
 
+    ' Make sure viewport orientation actually updates even when graphics are frozen/hidden.
     Dim swView As Object
     Set swView = model.ActiveView
+
     On Error Resume Next
     If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
     On Error GoTo ErrHandler
 
-    ' Use CMS_TOP (fallback *Top) so the STL mesh matches DXF parent / ISO / L-W-T axes.
-    ' Previously captured *Front, which left the mesh rotated vs the rest of the package.
-    Dim usedView As String
-    usedView = ""
-    On Error Resume Next
-    model.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
-    If Err.Number = 0 Then
-        usedView = CMS_TOP_VIEW_NAME
-    Else
-        Err.Clear
-        model.ShowNamedView2 "*Top", 5
-        If Err.Number = 0 Then usedView = "*Top"
-        Err.Clear
-    End If
-    On Error GoTo ErrHandler
-    If usedView = "" Then
-        LogLine "STL coordinate capture failed: CMS_TOP/*Top view unavailable."
-        Exit Function
-    End If
+    ' Use final corrected SolidWorks *Front.
+    ' Because your macro has already redefined *Top and *Front, this view contains
+    ' the full corrected coordinate frame.
+    model.ShowNamedView2 "*Front", 1
 
     On Error Resume Next
     model.ViewZoomtofit2
@@ -3581,6 +3612,7 @@ On Error GoTo ErrHandler
     On Error GoTo ErrHandler
 
     Set swView = model.ActiveView
+
     If swView Is Nothing Then
         LogLine "STL coordinate capture failed: ActiveView is Nothing."
         Exit Function
@@ -3588,23 +3620,43 @@ On Error GoTo ErrHandler
 
     Dim v As Variant
     v = swView.Orientation3.ArrayData
-    If IsEmpty(v) Or IsArray(v) = False Then
-        LogLine "STL coordinate capture failed: Orientation3.ArrayData missing."
+
+    If IsEmpty(v) Then
+        LogLine "STL coordinate capture failed: Orientation3.ArrayData is empty."
         Exit Function
     End If
+
+    If IsArray(v) = False Then
+        LogLine "STL coordinate capture failed: Orientation3.ArrayData is not an array."
+        Exit Function
+    End If
+
     If UBound(v) < 8 Then
-        LogLine "STL coordinate capture failed: orientation matrix too short."
+        LogLine "STL coordinate capture failed: Orientation matrix has fewer than 9 values."
         Exit Function
     End If
 
     Dim i As Long
+
     For i = 0 To 8
         FinalStlCoordM(i) = CDbl(v(i))
     Next i
+
     FinalStlCoordFrameReady = True
     CaptureFinalStandardViewsForStlCoordinateSystem = True
-    LogLine "FINAL STL coordinate system captured from " & usedView & _
-            " (TOP X=Width, TOP Y=Length — same frame as DXF/ISO)."
+
+    LogLine "FINAL STL coordinate system captured from corrected SolidWorks *Front."
+    LogLine "This is the only orientation matrix that will be used for Match Studio STLs."
+    LogLine "  Matrix=[" & _
+            FormatNumberForCsv(FinalStlCoordM(0)) & "," & _
+            FormatNumberForCsv(FinalStlCoordM(1)) & "," & _
+            FormatNumberForCsv(FinalStlCoordM(2)) & "; " & _
+            FormatNumberForCsv(FinalStlCoordM(3)) & "," & _
+            FormatNumberForCsv(FinalStlCoordM(4)) & "," & _
+            FormatNumberForCsv(FinalStlCoordM(5)) & "; " & _
+            FormatNumberForCsv(FinalStlCoordM(6)) & "," & _
+            FormatNumberForCsv(FinalStlCoordM(7)) & "," & _
+            FormatNumberForCsv(FinalStlCoordM(8)) & "]"
 
 CleanExit:
     On Error Resume Next
@@ -3614,6 +3666,7 @@ CleanExit:
         model.ShowNamedView2 "*Top", 5
     End If
     Exit Function
+
 ErrHandler:
     LogLine "CaptureFinalStandardViewsForStlCoordinateSystem error: " & Err.Description
     FinalStlCoordFrameReady = False
@@ -3621,21 +3674,29 @@ ErrHandler:
     Resume CleanExit
 End Function
 
-Private Function ReorientStlFileToMatrix(ByVal stlPath As String, ByRef m() As Double) As Boolean
+Private Function ReorientStlFileToMatrix(ByVal stlPath As String, _
+                                         ByRef m() As Double) As Boolean
 On Error GoTo ErrHandler
+
     ReorientStlFileToMatrix = False
+
+    ' Try binary STL first.
     If ReorientBinaryStlFileToMatrix(stlPath, m) Then
         LogLine "STL reorient: binary STL rotated."
         ReorientStlFileToMatrix = True
         Exit Function
     End If
+
+    ' If SolidWorks exported ASCII STL, rotate that too.
     If ReorientAsciiStlFileToMatrix(stlPath, m) Then
         LogLine "STL reorient: ASCII STL rotated."
         ReorientStlFileToMatrix = True
         Exit Function
     End If
-    LogLine "STL reorient failed: not binary or ASCII STL."
+
+    LogLine "STL reorient failed: file was not successfully processed as binary or ASCII STL."
     Exit Function
+
 ErrHandler:
     LogLine "ReorientStlFileToMatrix error: " & Err.Description
     ReorientStlFileToMatrix = False
@@ -3692,29 +3753,52 @@ ErrHandler:
     ReorientBinaryStlFileToMatrix = False
 End Function
 
-Private Sub TransformStlTriangleByMatrix(ByRef tri As BinaryStlTriangle, ByRef m() As Double)
+Private Sub TransformStlTriangleByMatrix(ByRef tri As BinaryStlTriangle, _
+                                         ByRef m() As Double)
 On Error Resume Next
+
     TransformStlVectorByMatrix tri.nx, tri.ny, tri.nz, m
     NormalizeStlVector tri.nx, tri.ny, tri.nz
+
     TransformStlVectorByMatrix tri.x1, tri.y1, tri.z1, m
     TransformStlVectorByMatrix tri.x2, tri.y2, tri.z2, m
     TransformStlVectorByMatrix tri.x3, tri.y3, tri.z3, m
 End Sub
 
-Private Sub TransformStlVectorByMatrix(ByRef x As Single, ByRef y As Single, ByRef z As Single, ByRef m() As Double)
+Private Sub TransformStlVectorByMatrix(ByRef x As Single, _
+                                       ByRef y As Single, _
+                                       ByRef z As Single, _
+                                       ByRef m() As Double)
 On Error Resume Next
-    Dim ox As Double, oy As Double, oz As Double
-    ox = CDbl(x): oy = CDbl(y): oz = CDbl(z)
+
+    Dim ox As Double
+    Dim oy As Double
+    Dim oz As Double
+
+    ox = CDbl(x)
+    oy = CDbl(y)
+    oz = CDbl(z)
+
+    ' Same projection convention already used elsewhere in your macro:
+    ' view X = m(0), m(3), m(6)
+    ' view Y = m(1), m(4), m(7)
+    ' view Z = m(2), m(5), m(8)
     x = CSng((ox * m(0)) + (oy * m(3)) + (oz * m(6)))
     y = CSng((ox * m(1)) + (oy * m(4)) + (oz * m(7)))
     z = CSng((ox * m(2)) + (oy * m(5)) + (oz * m(8)))
 End Sub
 
-Private Sub NormalizeStlVector(ByRef x As Single, ByRef y As Single, ByRef z As Single)
+Private Sub NormalizeStlVector(ByRef x As Single, _
+                               ByRef y As Single, _
+                               ByRef z As Single)
 On Error Resume Next
+
     Dim L As Double
+
     L = Sqr(CDbl(x) * CDbl(x) + CDbl(y) * CDbl(y) + CDbl(z) * CDbl(z))
+
     If L <= 0.0000001 Then Exit Sub
+
     x = CSng(CDbl(x) / L)
     y = CSng(CDbl(y) / L)
     z = CSng(CDbl(z) / L)
