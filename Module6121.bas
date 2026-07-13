@@ -62,7 +62,7 @@ Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
 ' Above this part count, skip assembly->temp-part STL merge (Combine fails / is slow);
 ' still forces ComponentsIntoOneFile after showing all components.
-Private Const STL_MERGE_MAX_PARTS As Long = 60
+Private Const STL_MERGE_MAX_PARTS As Long = 0
 Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely exceed 10 ft on one axis
 
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
@@ -2925,14 +2925,28 @@ On Error GoTo ErrHandler
     LogStart "Export full-assembly STL"
     On Error Resume Next
     swModel.ClearSelection2 True
-    swModel.ResolveAllLightWeightComponents True
+
+    If Not FAST_QUOTE_MODE Then
+        swModel.ResolveAllLightWeightComponents True
+    Else
+        LogLine "FAST QUOTE: skipped ResolveAllLightWeight before STL."
+    End If
+
     UnsuppressAllAssemblyComponents swModel
     ShowAllAssemblyComponents swModel
     On Error GoTo ErrHandler
     ApplyCmsTopView swModel
     If swModel.GetType = swDocASSEMBLY Then
-        ' Always try gemini1 merge path first (all components → one combined STL).
-        SaveAssemblyAsMergedPartStl swModel, stlPath
+
+        If PartCount > STL_MERGE_MAX_PARTS Then
+            LogLine "FAST STL: PartCount=" & PartCount & _
+                    " > STL_MERGE_MAX_PARTS=" & STL_MERGE_MAX_PARTS & _
+                    ". Skipping assembly->temp-part merge; exporting assembly STL as one file."
+            SaveFullAssemblyStlFromAssembly swModel, stlPath
+        Else
+            SaveAssemblyAsMergedPartStl swModel, stlPath
+        End If
+
     Else
         SaveStlWithMainBaseOrientation swModel, stlPath, "PART"
     End If
@@ -3525,7 +3539,13 @@ On Error GoTo ErrHandler
     If Not assyModel Is Nothing Then
         On Error Resume Next
         assyModel.ClearSelection2 True
-        assyModel.ResolveAllLightWeightComponents True
+
+        If Not FAST_QUOTE_MODE Then
+            assyModel.ResolveAllLightWeightComponents True
+        Else
+            LogLine "FAST STL: skipped ResolveAllLightWeight inside assembly STL fallback."
+        End If
+
         UnsuppressAllAssemblyComponents assyModel
         ShowAllAssemblyComponents assyModel
         assyModel.EditRebuild3
@@ -6058,11 +6078,266 @@ End Sub
 
 Private Sub ParseBomPdfTextLine(ByVal lineText As String)
 On Error Resume Next
+
     Dim raw As String
     raw = Trim(lineText)
+
     If raw = "" Then Exit Sub
+
+    ' Purchase / hardware rows often do NOT have 3 decimal dimensions.
+    ' Capture them before the material-line parser rejects them.
+    If TryCapturePurchasedPdfLine(raw) Then Exit Sub
+
+    ' Material / steel rows with dimensions.
     TryParseTempcraftBasePdfMaterialLine raw
 End Sub
+
+Private Function TryCapturePurchasedPdfLine(ByVal raw As String) As Boolean
+On Error GoTo ErrHandler
+
+    TryCapturePurchasedPdfLine = False
+
+    Dim u As String
+    u = UCase(raw)
+
+    If InStr(u, " PURCHASE ") = 0 And InStr(u, " PURCHASE") = 0 Then Exit Function
+
+    Dim desc As String
+    Dim qty As Long
+    Dim vendor As String
+    Dim partNo As String
+    Dim detNo As String
+
+    desc = ExtractPdfPurchaseDescription(raw)
+    If desc = "" Then Exit Function
+
+    qty = ExtractPdfPurchaseQty(raw)
+    If qty <= 0 Then qty = 1
+
+    vendor = ExtractPdfPurchaseVendor(raw)
+    partNo = ExtractPdfPurchasePartNo(raw)
+    detNo = ExtractLeadingDetailNumber(raw)
+
+    Dim nums() As Double
+    Dim nCount As Long
+    Dim tt As Double
+    Dim ww As Double
+    Dim ll As Double
+
+    tt = 0#
+    ww = 0#
+    ll = 0#
+
+    nCount = ExtractDecimalNumbers(raw, nums)
+
+    ' Optional dimensions for insulation / spacers.
+    If nCount >= 3 Then
+        PickThreeFinishedSizeDims nums, nCount, tt, ww, ll
+    End If
+
+    If FILL_PURCHASED_COMPONENTS Then
+        CapturePurchased desc, qty, "", tt, ww, ll, partNo, vendor, detNo, "Purchase"
+    End If
+
+    LogLine "PDF purchase captured: det=" & detNo & _
+            " desc='" & desc & "'" & _
+            " qty=" & CStr(qty) & _
+            " vendor='" & vendor & "'" & _
+            " part='" & partNo & "'"
+
+    TryCapturePurchasedPdfLine = True
+    Exit Function
+
+ErrHandler:
+    LogLine "TryCapturePurchasedPdfLine error: " & Err.Description & " | " & raw
+    TryCapturePurchasedPdfLine = False
+End Function
+
+Private Function ExtractPdfPurchaseDescription(ByVal raw As String) As String
+On Error GoTo ErrHandler
+
+    Dim s As String
+    s = RemoveLeadingItemNumber(raw)
+
+    Dim p As Long
+    p = InStr(1, UCase(s), " PURCHASE", vbTextCompare)
+
+    If p > 1 Then
+        ExtractPdfPurchaseDescription = ProperCaseText(Trim(Left(s, p - 1)))
+    Else
+        ExtractPdfPurchaseDescription = ProperCaseText(Trim(s))
+    End If
+
+    Exit Function
+
+ErrHandler:
+    ExtractPdfPurchaseDescription = ""
+End Function
+
+Private Function ExtractPdfPurchaseQty(ByVal raw As String) As Long
+On Error GoTo ErrHandler
+
+    ExtractPdfPurchaseQty = 1
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = "\bPURCHASE\s+(\d+)\b"
+
+    Dim m As Object
+    Set m = re.Execute(raw)
+
+    If m.Count > 0 Then
+        ExtractPdfPurchaseQty = CLng(Val(m(0).SubMatches(0)))
+    End If
+
+    If ExtractPdfPurchaseQty <= 0 Then ExtractPdfPurchaseQty = 1
+    Exit Function
+
+ErrHandler:
+    ExtractPdfPurchaseQty = 1
+End Function
+
+Private Function ExtractPdfPurchaseVendor(ByVal raw As String) As String
+    Dim u As String
+    u = UCase(raw)
+
+    If InStr(u, "MCMASTER") > 0 Or InStr(u, "MCMASTER CARR") > 0 Then
+        ExtractPdfPurchaseVendor = "McMaster-Carr"
+        Exit Function
+    End If
+
+    If InStr(u, "D.M.E") > 0 Or InStr(u, "DME") > 0 Then
+        ExtractPdfPurchaseVendor = "DME"
+        Exit Function
+    End If
+
+    If InStr(u, "JACO") > 0 Then
+        ExtractPdfPurchaseVendor = "JACO"
+        Exit Function
+    End If
+
+    If InStr(u, "PCS") > 0 Then
+        ExtractPdfPurchaseVendor = "PCS"
+        Exit Function
+    End If
+
+    If InStr(u, "PYROPEL") > 0 Then
+        ExtractPdfPurchaseVendor = "Pyropel"
+        Exit Function
+    End If
+
+    ExtractPdfPurchaseVendor = ""
+End Function
+
+Private Function ExtractLeadingDetailNumber(ByVal raw As String) As String
+On Error Resume Next
+
+    Dim s As String
+    s = Trim(raw)
+
+    Dim i As Long
+    Dim ch As String
+    Dim token As String
+
+    token = ""
+
+    For i = 1 To Len(s)
+        ch = Mid(s, i, 1)
+
+        If ch >= "0" And ch <= "9" Then
+            token = token & ch
+        Else
+            Exit For
+        End If
+    Next i
+
+    ExtractLeadingDetailNumber = token
+End Function
+
+Private Function ExtractPdfPurchasePartNo(ByVal raw As String) As String
+On Error GoTo ErrHandler
+
+    ExtractPdfPurchasePartNo = ""
+
+    Dim u As String
+    u = UCase(raw)
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "[A-Z0-9][A-Z0-9\-]*"
+
+    Dim matches As Object
+    Set matches = re.Execute(u)
+
+    Dim i As Long
+    Dim tok As String
+
+    For i = 0 To matches.Count - 1
+
+        tok = Trim(CStr(matches(i).Value))
+
+        If IsUsefulPurchasePartToken(tok) Then
+            ExtractPdfPurchasePartNo = tok
+            Exit Function
+        End If
+
+    Next i
+
+    Exit Function
+
+ErrHandler:
+    ExtractPdfPurchasePartNo = ""
+End Function
+
+Private Function IsUsefulPurchasePartToken(ByVal tok As String) As Boolean
+    IsUsefulPurchasePartToken = False
+
+    tok = UCase(Trim(tok))
+    If tok = "" Then Exit Function
+
+    Select Case tok
+        Case "PURCHASE", "MATERIAL", "DME", "D", "M", "E", "CO", "CARR", _
+             "MCMASTER", "JACO", "MANUFACTURING", "MANUFACTURIN", "PCS", _
+             "PYROPEL", "EA", "LBS", "LB", "SQ", "IN", "CU", "HOLDER", _
+             "INSULATION", "EXTERNAL", "GUIDE", "BUSHING", "LEADER", _
+             "PIN", "PINS", "SAFETY", "STRAP", "SPRING", "DOWN", "HOLD"
+            Exit Function
+    End Select
+
+    If Left(tok, 3) = "G1C" Then Exit Function
+    If Left(tok, 3) = "500" Then Exit Function
+    If Len(tok) < 3 Then Exit Function
+
+    Dim hasLetter As Boolean
+    Dim hasDigit As Boolean
+    Dim hasHyphen As Boolean
+    Dim i As Long
+    Dim ch As String
+
+    For i = 1 To Len(tok)
+        ch = Mid(tok, i, 1)
+
+        If ch >= "A" And ch <= "Z" Then hasLetter = True
+        If ch >= "0" And ch <= "9" Then hasDigit = True
+        If ch = "-" Then hasHyphen = True
+    Next i
+
+    If hasLetter And hasDigit Then
+        IsUsefulPurchasePartToken = True
+        Exit Function
+    End If
+
+    If hasHyphen And hasDigit And Len(tok) >= 5 Then
+        IsUsefulPurchasePartToken = True
+        Exit Function
+    End If
+End Function
 
 Private Function TryParseTempcraftBasePdfMaterialLine(ByVal raw As String) As Boolean
 On Error GoTo ErrHandler
@@ -7117,16 +7392,20 @@ Private Function IsHolderBlockGeometry(ByVal t As Double, _
     Dim fp As Double
     fp = w * l
 
-    ' Holders are larger than pots, often near the mold footprint, and thick.
     If t < 3# Then Exit Function
 
-    ' Do not call very small/chunky pot blocks holders.
+    ' Holders can be much smaller than TCP/BCP footprint.
     If maxFp > 0# Then
-        If fp < 0.5 * maxFp Then Exit Function
+        If fp < 0.20 * maxFp Then Exit Function
     End If
 
-    ' Holders are usually longer/plate-like, not compact cubes.
+    ' Holders are elongated.
     If l / w < 1.15 Then Exit Function
+
+    ' Avoid full clamp plates.
+    If maxFp > 0# Then
+        If fp > 0.75 * maxFp Then Exit Function
+    End If
 
     IsHolderBlockGeometry = True
 End Function
@@ -10922,10 +11201,12 @@ On Error GoTo eh
     n = 0
     ReDim paths(0 To 0)
     For Each f In fso.GetFolder(CurrentJobFolder).Files
-        If LCase(fso.GetExtensionName(f.path)) = "sldprt" Then
-            ReDim Preserve paths(0 To n)
-            paths(n) = f.path
-            n = n + 1
+        If Left(f.Name, 2) <> "~$" Then
+            If LCase(fso.GetExtensionName(f.path)) = "sldprt" Then
+                ReDim Preserve paths(0 To n)
+                paths(n) = f.path
+                n = n + 1
+            End If
         End If
     Next f
 
@@ -10972,14 +11253,20 @@ Private Sub OrganizeJobFiles()
     Next f
     Dim idx As Long, nm As String, ext As String, dest As String, src As String, target As String
     For idx = 1 To names.Count
+
         nm = names(idx)
+
+        If Left(nm, 2) = "~$" Then GoTo NextOrganizeFile
+
         ext = UCase$(GetFileExtension(nm))
         dest = ""
+
         If ext = "SLDPRT" Or ext = "SLDASM" Then
             dest = baseDir
         ElseIf ext = "PDF" Then
             dest = pdfDir
         End If
+
         If dest <> "" Then
             src = CurrentJobFolder & "\" & nm
             target = dest & "\" & nm
@@ -10989,6 +11276,8 @@ Private Sub OrganizeJobFiles()
             On Error GoTo eh
             LogLine "Organized: " & nm & " -> " & dest
         End If
+
+NextOrganizeFile:
     Next idx
     Exit Sub
 eh:
