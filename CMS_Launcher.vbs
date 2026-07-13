@@ -1120,9 +1120,10 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
 
     ' Always append preferred guesses after discovered names.
     If pairs <> "" Then pairs = pairs & "|"
-    pairs = pairs & "Module6121" & Chr(1) & "main" & "|" & _
+    pairs = pairs & "Module61211" & Chr(1) & "main" & "|" & _
+            "Module61211" & Chr(1) & "RunFromLauncher" & "|" & _
+            "Module6121" & Chr(1) & "main" & "|" & _
             "Module6121" & Chr(1) & "RunFromLauncher" & "|" & _
-            "Module61211" & Chr(1) & "main" & "|" & _
             "Module1" & Chr(1) & "main"
 
     Dim pairArr, pairParts

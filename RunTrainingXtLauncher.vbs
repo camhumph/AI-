@@ -161,7 +161,7 @@ Function LaunchSolidWorksTrainingMacro()
     On Error GoTo 0
 
     Dim modNames, mi, okRun, ran, procNames, pi, macroErr
-    modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
+    modNames = Array("Module61211", "Module6121", "Module612111", "Module1", "main", "Module2", "Module3")
     procNames = Array("main", "RunFromLauncher", "RunTrainingXtExport")
     ran = False
 

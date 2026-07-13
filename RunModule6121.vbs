@@ -105,9 +105,10 @@ Else
 End If
 
 If pairList <> "" Then pairList = pairList & "|"
-pairList = pairList & "Module6121" & Chr(1) & "main" & "|" & _
+pairList = pairList & "Module61211" & Chr(1) & "main" & "|" & _
+           "Module61211" & Chr(1) & "RunFromLauncher" & "|" & _
+           "Module6121" & Chr(1) & "main" & "|" & _
            "Module6121" & Chr(1) & "RunFromLauncher" & "|" & _
-           "Module61211" & Chr(1) & "main" & "|" & _
            "Module1" & Chr(1) & "main"
 
 Dim arr, pi, moduleName, procName, runOk, runErr, vbaErr, waited

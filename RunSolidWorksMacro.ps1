@@ -246,7 +246,7 @@ try {
     }
     # Prefer main / RunFromLauncher from discovered list first, then guesses.
     foreach ($procName in @($Procedure, "main", "RunFromLauncher") | Select-Object -Unique) {
-        foreach ($moduleName in @("Module6121", "Module61211", "Module1")) {
+        foreach ($moduleName in @("Module61211", "Module6121", "Module1")) {
             $pairs.Add([pscustomobject]@{ Module = $moduleName; Proc = $procName }) | Out-Null
         }
     }
