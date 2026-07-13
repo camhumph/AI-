@@ -18,12 +18,22 @@ $HandoffFile = "C:\CMS_Local_Workspace\cms_handoff.txt"
 
 function Write-LauncherLog {
     param([string]$Message)
-    try {
-        $folder = Split-Path -Parent $LogFile
-        if ($folder -and -not (Test-Path -LiteralPath $folder)) {
-            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    $line = ("[{0}] macro-runner: {1}" -f (Get-Date), $Message)
+    foreach ($target in @(
+        $LogFile,
+        "C:\CMS_Local_Workspace\CMS_Quote_Log.txt"
+    )) {
+        try {
+            $folder = Split-Path -Parent $target
+            if ($folder -and -not (Test-Path -LiteralPath $folder)) {
+                New-Item -ItemType Directory -Force -Path $folder | Out-Null
+            }
+            Add-Content -LiteralPath $target -Value $line
+        } catch {
         }
-        Add-Content -LiteralPath $LogFile -Value ("[{0}] macro-runner: {1}" -f (Get-Date), $Message)
+    }
+    try {
+        Set-Content -LiteralPath "C:\CMS_Local_Workspace\cms_launcher_status.txt" -Value $line -Encoding UTF8
     } catch {
     }
 }
