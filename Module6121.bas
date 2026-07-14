@@ -118,7 +118,7 @@ Private Const PROMPT_FOR_TOP_ORIENTATION As Boolean = False
 Private Const SUPPRESS_USER_PROMPTS As Boolean = True
 ' Front-orientation tuning (ported from gemini1).
 Private Const POT_BLOCKS_MUST_BE_FRONT_OF_HOLDERS As Boolean = True
-Private Const POT_FRONT_REQUIRE_EVERY_POT_AHEAD_OF_EVERY_HOLDER As Boolean = False
+Private Const POT_FRONT_REQUIRE_EVERY_POT_AHEAD_OF_EVERY_HOLDER As Boolean = True
 Private Const POT_FRONT_DEPTH_MIN_DELTA_IN As Double = 0.03
 Private Const HOLDER_LONG_SIDE_VISIBLE_RATIO As Double = 0.8
 Private Const AUTO_DEFINE_FRONT_FROM_HOLDER_POT_COM As Boolean = True
@@ -891,6 +891,11 @@ On Error GoTo ErrHandler
     isStd = DetectBaseTypeIsStandard()
     gJobIsStandardBase = isStd
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK (BOM-driven)")
+    LogLine "Orientation route selected: " & IIf(isStd, "STANDARD orientation", "BMS holder/pot/TCP orientation")
+    LogLine "Orientation naming signals: JobBaseName=" & JobBaseName & _
+            " CurrentJobFolder=" & CurrentJobFolder & _
+            " NetworkJobFolder=" & NetworkJobFolder & _
+            " AttachDir=" & gHandoffAttachDir
     DoEvents
 
     ' AI bridge: classify through the LOCAL AI service (standard bases only;
@@ -1783,6 +1788,7 @@ On Error GoTo ErrHandler
     MainCadOpenedByMacro = False
     MainCadTitleForClose = ""
     MainViewportGraphicsDisabled = False
+    gSourceCadPath = ""
     Set swModel = Nothing
 
     CurrentJobNumber = UCase(Trim(jobSearchText))
@@ -2047,6 +2053,11 @@ On Error GoTo ErrHandler
     isStd = DetectBaseTypeIsStandard()
     gJobIsStandardBase = isStd
     LogLine "Base type: " & IIf(isStd, "STANDARD MOLD BASE", "POT / HOLDER BLOCK")
+    LogLine "Orientation route selected: " & IIf(isStd, "STANDARD orientation", "BMS holder/pot/TCP orientation")
+    LogLine "Orientation naming signals: JobBaseName=" & JobBaseName & _
+            " CurrentJobFolder=" & CurrentJobFolder & _
+            " NetworkJobFolder=" & NetworkJobFolder & _
+            " AttachDir=" & gHandoffAttachDir
 
     ' AI bridge: classify through the LOCAL AI service (standard bases only;
     ' BMS/pot-block jobs are guarded inside and keep the BOM-driven flow).
@@ -17023,15 +17034,53 @@ On Error GoTo ErrHandler
     Set holderIndexes = New Collection
     Set potIndexes = New Collection
 
-    ' First use geometry classification.
-    ' This is essential for generic imported XT files where components are named
-    ' Part-1, Part-2, etc. and BOM matching cannot find ID HOLDER / OD HOLDER.
+    Dim matchedHolders As Collection
+    Dim matchedPots As Collection
+
+    Set matchedHolders = New Collection
+    Set matchedPots = New Collection
+
+    ' ============================================================
+    ' 1. Prefer BOM/export-matched parts.
+    ' This matches the older XT Export macro behavior and avoids bad
+    ' geometry-classification candidates contaminating the front check.
+    ' ============================================================
+    AddUniqueCadIndexToCollection matchedHolders, _
+        FindCadIndexForOrientationQuoteOrKeys("ID HOLDER", ID_HOLDER_KEYS)
+
+    AddUniqueCadIndexToCollection matchedHolders, _
+        FindCadIndexForOrientationQuoteOrKeys("OD HOLDER", OD_HOLDER_KEYS)
+
+    AddUniqueCadIndexToCollection matchedPots, _
+        FindCadIndexForOrientationQuoteOrKeys("ID POT BLOCK", _
+            "ID POT BLOCK|ID POT|TOP POT BLOCK|TOP POT|TCP POT BLOCK|TCP POT")
+
+    AddUniqueCadIndexToCollection matchedPots, _
+        FindCadIndexForOrientationQuoteOrKeys("OD POT BLOCK", _
+            "OD POT BLOCK|OD POT|BOTTOM POT BLOCK|BOT POT BLOCK|BOTTOM POT|BOT POT|BCP POT BLOCK|BCP POT")
+
+    ' If we have enough matched info, use ONLY matched info.
+    If matchedHolders.Count > 0 And matchedPots.Count > 0 Then
+
+        Set holderIndexes = matchedHolders
+        Set potIndexes = matchedPots
+
+        LogLine "Front orientation collections using BOM/export-matched indexes only: holders=" & _
+                holderIndexes.Count & " pots=" & potIndexes.Count
+
+        Exit Sub
+    End If
+
+    ' ============================================================
+    ' 2. Fallback to geometry-classified indexes only when matched
+    ' holder/pot data is missing.
+    ' ============================================================
     AddUniqueCadIndexToCollection holderIndexes, gIdxIDH
     AddUniqueCadIndexToCollection holderIndexes, gIdxODH
     AddUniqueCadIndexToCollection potIndexes, gIdxIDP
     AddUniqueCadIndexToCollection potIndexes, gIdxODP
 
-    ' Then add BOM/name-based matches if available.
+    ' Add whatever matched indexes exist too, but after geometry fallback.
     AddUniqueCadIndexToCollection holderIndexes, _
         FindCadIndexForOrientationQuoteOrKeys("ID HOLDER", ID_HOLDER_KEYS)
 
@@ -17046,8 +17095,8 @@ On Error GoTo ErrHandler
         FindCadIndexForOrientationQuoteOrKeys("OD POT BLOCK", _
             "OD POT BLOCK|OD POT|BOTTOM POT BLOCK|BOT POT BLOCK|BOTTOM POT|BOT POT|BCP POT BLOCK|BCP POT")
 
-    LogLine "Front orientation index collections: holders=" & holderIndexes.Count & _
-            " pots=" & potIndexes.Count
+    LogLine "Front orientation collections using geometry fallback: holders=" & _
+            holderIndexes.Count & " pots=" & potIndexes.Count
 
     Exit Sub
 
