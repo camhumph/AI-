@@ -195,12 +195,9 @@ If customerSourceFolder <> "" Then
     localStagePath = StageJobToLocalWorkspace(cNum, "", customerSourceFolder)
 Else
     If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
-        If FindBestXtInFolder(gLocalJobFolder) <> "" Then
-            localStagePath = gLocalJobFolder
-            LogStep "using webapp-staged local folder: " & localStagePath
-        Else
-            LogStep "webapp local folder has no XT — restaging from job/attach"
-        End If
+        ' Do NOT call FindBestXtInFolder here — recursive XT search hangs on ZIP/SLDASM jobs.
+        localStagePath = gLocalJobFolder
+        LogStep "using existing local folder (Module6121 will find CAD): " & localStagePath
     End If
 
     If localStagePath = "" Then
@@ -215,37 +212,35 @@ Else
     LogStep "ERROR: could not stage customer files into local workspace for " & cNum
 End If
 
-' 6. Find the XT in the staged local folder (after unzip), then open it.
+' 6. FAST PATH:
+' Do NOT recursively search/open CAD in the launcher.
+' The launcher was hanging here on ZIP jobs that contain SLDASM/SLDPRT instead of X_T.
+' Module6121 already knows how to unzip/find/open CAD from AttachDir/JobFolder.
 gCadPath = ""
-If gLocalJobFolder <> "" Then
-    gCadPath = FindBestXtInFolder(gLocalJobFolder)
-End If
-If gCadPath = "" And gAttachDir <> "" Then
-    gCadPath = FindBestXtInFolder(gAttachDir)
-End If
-If gCadPath <> "" Then
-    If IsGeneratedBaseCadPath(gCadPath) Then
-        LogStep "WARNING: ignoring generated base CAD path: " & gCadPath
-        gCadPath = ""
+
+' Only use CadPath if the webapp/email explicitly gave one and it exists.
+If gEmailCadPath <> "" Then
+    If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
+        If gLocalJobFolder <> "" Then
+            gCadPath = FindLocalCopyOfFile(gLocalJobFolder, gEmailCadPath)
+        End If
+
+        If gCadPath = "" Then gCadPath = gEmailCadPath
+
+        If gCadPath <> "" Then
+            gCadPath = EnsureCadIsLocal(gCadPath, cNum)
+            LogStep "using explicit email/webapp CadPath: " & gCadPath
+        End If
+    Else
+        LogStep "explicit email/webapp CadPath missing or generated; ignoring: " & gEmailCadPath
     End If
 End If
-If gCadPath <> "" Then
-    gCadPath = EnsureCadIsLocal(gCadPath, cNum)
-End If
-If gCadPath <> "" Then
-    If IsForeignJobCad(gCadPath) Then
-        LogStep "NOTE: CAD job # differs from folder job # — continuing: " & gCadPath
-    End If
-    LogStep "XT to open: " & gCadPath
-Else
-    LogStep "WARNING: no XT found after staging/unzip"
-    LogStep "XT search paths: local=" & gLocalJobFolder & " attach=" & gAttachDir
-    If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
-        LogStep "local folder sample: " & SampleFolderFiles(gLocalJobFolder)
-    End If
-    If gAttachDir <> "" And fso.FolderExists(gAttachDir) Then
-        LogStep "attach folder sample: " & SampleFolderFiles(gAttachDir)
-    End If
+
+If gCadPath = "" Then
+    LogStep "FAST: skipping launcher recursive CAD search. Module6121 will find/open CAD from handoff folders."
+    LogStep "FAST: AttachDir=" & gAttachDir
+    LogStep "FAST: LocalJobFolder=" & gLocalJobFolder
+    LogStep "FAST: JobFolderPath=" & jobFolderPath
 End If
 
 ' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
@@ -1303,14 +1298,23 @@ Function LaunchSolidWorksOpenCadThenMacro()
     sw.CommandInProgress = False
     On Error GoTo 0
 
-    ' ---- OPEN THE XT FIRST ----
+    ' ---- OPEN THE CAD FIRST, IF THE LAUNCHER HAS AN EXPLICIT CAD PATH ----
     opened = False
+
+    If gCadPath = "" Then
+        LogStep "FAST: no launcher CadPath; closing any existing SolidWorks documents so Module6121 opens the handoff job itself."
+        On Error Resume Next
+        sw.CloseAllDocuments True
+        Err.Clear
+        On Error GoTo 0
+    End If
+
     If gCadPath <> "" And IsGeneratedBaseCadPath(gCadPath) Then
         LogStep "WARNING: refusing to open generated \base\ assembly before macro: " & gCadPath
         gCadPath = ""
     End If
     If gCadPath <> "" And fso.FileExists(gCadPath) Then
-        LogStep "opening XT before macro: " & gCadPath
+        LogStep "opening CAD before macro: " & gCadPath
         opened = OpenCadInSolidWorks(sw, gCadPath)
         If opened Then
             WScript.Sleep 3000
@@ -1328,7 +1332,7 @@ Function LaunchSolidWorksOpenCadThenMacro()
             On Error GoTo 0
         End If
     Else
-        LogStep "WARNING: no XT path to open first — macro will search job folder"
+        LogStep "FAST: no launcher CadPath to open — Module6121 will search handoff folders"
     End If
 
     ' ---- THEN RUN THE .SWP MACRO WITH STARTED ACKNOWLEDGEMENT ----
