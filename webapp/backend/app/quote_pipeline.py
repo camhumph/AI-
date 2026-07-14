@@ -119,6 +119,32 @@ def _digits_only(s: str) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
 
+def _is_month_folder_job_token(digits: str) -> bool:
+    """True for Ron month-folder ids like 000000007 (July), not real BMS job #s."""
+    d = (digits or "").strip()
+    if not d.isdigit():
+        return False
+    # Month folders are zero-padded to 9 digits: 000000001 .. 000000012
+    if len(d) == 9 and d.startswith("000000") and 1 <= int(d) <= 12:
+        return True
+    # Also ignore any long all-zero / leading-zero pad that isn't a shop job id.
+    if len(d) >= 8 and d.startswith("00000"):
+        return True
+    return False
+
+
+def _cad_mismatch_scan_text(cad_path: str) -> str:
+    """Filename + parent folder only — ignore month folders higher in the path."""
+    raw = (cad_path or "").replace("/", "\\").strip()
+    if not raw:
+        return ""
+    parts = [p for p in raw.split("\\") if p]
+    if not parts:
+        return raw
+    # e.g. ...\BMS-863700114-C18611\863700102_RFQ....x_t
+    return "\\".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+
+
 def _cad_folder_job_mismatch_warning(
     cad_path: str,
     cust_job: str = "",
@@ -135,11 +161,16 @@ def _cad_folder_job_mismatch_warning(
     want = _digits_only(cust_job)
     if not want:
         m = re.search(r"(?<!\d)(\d{8,})(?!\d)", folder_hint or "")
-        if m:
+        if m and not _is_month_folder_job_token(m.group(1)):
             want = m.group(1)
-    if not want:
+    if not want or _is_month_folder_job_token(want):
         return ""
-    tokens = re.findall(r"\d{8,}", cad.replace("/", "\\"))
+    scan = _cad_mismatch_scan_text(cad)
+    tokens = [
+        t
+        for t in re.findall(r"\d{8,}", scan)
+        if not _is_month_folder_job_token(t)
+    ]
     others = [t for t in tokens if t != want]
     if not others:
         return ""
@@ -1128,8 +1159,14 @@ def _collect_launch_diagnostics(status: dict) -> dict:
                 )
             elif "did not start" in low or "could not connect" in low:
                 diag["stuck_reason"] = "SolidWorks did not start or connect. Check CMS_SOLIDWORKS_EXE / SW 2023 install."
-            elif "opendoc/loadfile failed" in low:
+            elif "opendoc/loadfile failed" in low and "macro acknowledged started" not in low and "running macro with retry" not in low:
                 diag["stuck_reason"] = "SolidWorks could not open the CAD/XT. Check CadPath in cms_handoff.txt."
+            elif "opendoc/loadfile failed" in low and "running macro with retry" in low:
+                # Network OpenDoc often fails; launcher continues and macro opens local CAD.
+                diag["stuck_reason"] = (
+                    "Waiting for macro STARTED after OpenDoc warning (network CAD often fails; "
+                    "macro should open the staged local copy)."
+                )
             elif "no cad" in low or "cad: (none)" in low or "cad=no" in low:
                 diag["stuck_reason"] = (
                     "No CAD/XT found before macro run (often still inside a ZIP). "

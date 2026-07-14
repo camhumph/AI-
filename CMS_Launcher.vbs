@@ -182,22 +182,30 @@ If localStagePath <> "" Then
     LogStep "local CMS workspace ready: " & gLocalJobFolder
 End If
 
-' 6. Prefer local CAD: XT/STEP if present, else SolidWorks .sldasm/.sldprt
-'    inside an unzipped mold-base subfolder (when that folder exists).
+' 6. Prefer LOCAL staged CAD first (network OpenDoc/LoadFile often fails).
+'    Remap cms_email CadPath to the staged copy by filename when possible.
 gCadPath = ""
-If gEmailCadPath <> "" Then
-    If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
-        gCadPath = gEmailCadPath
-        If IsForeignJobCad(gEmailCadPath) Then
-            LogStep "NOTE: CAD job # differs from folder job # — continuing: " & gCadPath
-        Else
-            LogStep "using CadPath from cms_email.txt: " & gCadPath
-        End If
-    End If
-End If
-If gCadPath = "" And gLocalJobFolder <> "" Then
+If gLocalJobFolder <> "" Then
     gCadPath = FindBestXtInFolder(gLocalJobFolder)
     If gCadPath = "" Then gCadPath = FindBestCadInFolder(gLocalJobFolder)
+End If
+If gEmailCadPath <> "" Then
+    If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
+        localSameAsEmail = ""
+        If gLocalJobFolder <> "" Then
+            localSameAsEmail = FindLocalCopyOfFile(gLocalJobFolder, gEmailCadPath)
+        End If
+        If localSameAsEmail <> "" Then
+            gCadPath = localSameAsEmail
+            LogStep "using staged local copy of cms_email CadPath: " & gCadPath
+        ElseIf gCadPath = "" Then
+            gCadPath = gEmailCadPath
+            LogStep "using CadPath from cms_email.txt (network): " & gCadPath
+        End If
+        If IsForeignJobCad(gCadPath) Then
+            LogStep "NOTE: CAD job # differs from folder job # — continuing: " & gCadPath
+        End If
+    End If
 End If
 If gCadPath = "" Then
     ' AttachDir (Downloads BMS-... folder) often has the unzipped mold package.
@@ -211,6 +219,10 @@ If gCadPath <> "" Then
         LogStep "WARNING: ignoring generated base CAD path: " & gCadPath
         gCadPath = ""
     End If
+End If
+' Last chance: if still on UNC/network, copy just the CAD file into local workspace.
+If gCadPath <> "" Then
+    gCadPath = EnsureCadIsLocal(gCadPath, cNum)
 End If
 If gCadPath <> "" Then
     LogStep "CAD to open first (nested unzipped folder OK): " & gCadPath
@@ -665,11 +677,49 @@ End Function
 
 ' True when path/name clearly belongs to a DIFFERENT C-number or BMS job id.
 ' Example: reject 851100021_MOLD_BASE....x_t when quoting 851100043-C18606.
+' Ignores Ron month-folder ids like 000000007.July 2026 in the UNC path.
+Function IsMonthFolderJobToken(ByVal digits)
+    IsMonthFolderJobToken = False
+    Dim d, n
+    d = Trim(CStr(digits))
+    If d = "" Then Exit Function
+    If Not IsNumeric(d) Then Exit Function
+    ' Month folders: 000000001 .. 000000012 (9-digit zero pad)
+    If Len(d) = 9 And Left(d, 6) = "000000" Then
+        n = CLng(d)
+        If n >= 1 And n <= 12 Then IsMonthFolderJobToken = True: Exit Function
+    End If
+    If Len(d) >= 8 And Left(d, 5) = "00000" Then IsMonthFolderJobToken = True
+End Function
+
+Function CadMismatchScanText(ByVal pathOrName)
+    ' Filename + parent folder only (skip month folders higher in the path).
+    Dim u, parts, i, n, a, b
+    CadMismatchScanText = ""
+    u = Replace(CStr(pathOrName), "/", "\")
+    If u = "" Then Exit Function
+    parts = Split(u, "\")
+    n = -1
+    For i = 0 To UBound(parts)
+        If Trim(parts(i)) <> "" Then n = n + 1
+    Next
+    If n < 0 Then Exit Function
+    ' Rebuild non-empty parts list via simple leaf/parent extract
+    a = fso.GetFileName(u)
+    b = fso.GetFileName(fso.GetParentFolderName(u))
+    If b <> "" And a <> "" Then
+        CadMismatchScanText = b & "\" & a
+    Else
+        CadMismatchScanText = a
+    End If
+End Function
+
 Function IsForeignJobCad(ByVal pathOrName)
     IsForeignJobCad = False
     Dim u, wantC, wantJob, tok, digits, i, ch, p, foundOtherC, foundWantC, foundOtherJob, foundWantJob
     Dim atC, digStart
-    u = UCase(CStr(pathOrName))
+    u = UCase(CadMismatchScanText(pathOrName))
+    If u = "" Then u = UCase(CStr(pathOrName))
     If u = "" Then Exit Function
     wantC = UCase(Trim(CStr(cNum)))
     If wantC = "" Then wantC = UCase(Trim(CStr(quoteNoHyphen)))
@@ -682,6 +732,7 @@ Function IsForeignJobCad(ByVal pathOrName)
         Next
         wantJob = digits
     End If
+    If IsMonthFolderJobToken(wantJob) Then wantJob = ""
 
     foundOtherC = False: foundWantC = False
     foundOtherJob = False: foundWantJob = False
@@ -729,10 +780,12 @@ Function IsForeignJobCad(ByVal pathOrName)
             digits = digits & ch
         Else
             If Len(digits) >= 8 Then
-                If wantJob <> "" And digits = wantJob Then
-                    foundWantJob = True
-                ElseIf wantJob <> "" Then
-                    foundOtherJob = True
+                If Not IsMonthFolderJobToken(digits) Then
+                    If wantJob <> "" And digits = wantJob Then
+                        foundWantJob = True
+                    ElseIf wantJob <> "" Then
+                        foundOtherJob = True
+                    End If
                 End If
             End If
             digits = ""
@@ -741,6 +794,73 @@ Function IsForeignJobCad(ByVal pathOrName)
 
     If foundOtherC And Not foundWantC Then IsForeignJobCad = True: Exit Function
     If foundOtherJob And Not foundWantJob Then IsForeignJobCad = True: Exit Function
+End Function
+
+' Find the same filename under a local staged folder (recursive one level + root).
+Function FindLocalCopyOfFile(ByVal localFolder, ByVal sourcePath)
+    FindLocalCopyOfFile = ""
+    On Error Resume Next
+    If localFolder = "" Or sourcePath = "" Then Exit Function
+    If Not fso.FolderExists(localFolder) Then Exit Function
+    Dim leaf, candidate, sub1, f
+    leaf = fso.GetFileName(sourcePath)
+    If leaf = "" Then Exit Function
+    candidate = localFolder & "\" & leaf
+    If fso.FileExists(candidate) Then FindLocalCopyOfFile = candidate: Exit Function
+    For Each f In fso.GetFolder(localFolder).Files
+        If StrComp(f.Name, leaf, vbTextCompare) = 0 Then
+            FindLocalCopyOfFile = f.Path
+            Exit Function
+        End If
+    Next
+    For Each sub1 In fso.GetFolder(localFolder).SubFolders
+        If UCase(sub1.Name) <> "BASE" Then
+            candidate = sub1.Path & "\" & leaf
+            If fso.FileExists(candidate) Then
+                FindLocalCopyOfFile = candidate
+                Exit Function
+            End If
+            For Each f In sub1.Files
+                If StrComp(f.Name, leaf, vbTextCompare) = 0 Then
+                    FindLocalCopyOfFile = f.Path
+                    Exit Function
+                End If
+            Next
+        End If
+    Next
+    On Error GoTo 0
+End Function
+
+' If CAD is still on a UNC/network path, copy it into C:\CMS_Local_Workspace\C#####.
+Function EnsureCadIsLocal(ByVal cadPath, ByVal cNumLocal)
+    EnsureCadIsLocal = cadPath
+    On Error Resume Next
+    If cadPath = "" Then Exit Function
+    If Not fso.FileExists(cadPath) Then Exit Function
+    Dim u, destFolder, destFile
+    u = UCase(cadPath)
+    If Left(u, Len(UCase(LOCAL_WORKSPACE_ROOT))) = UCase(LOCAL_WORKSPACE_ROOT) Then
+        EnsureCadIsLocal = cadPath
+        Exit Function
+    End If
+    ' Already local drive path under C:\ — still OK for OpenDoc; only force-copy UNC.
+    If Left(cadPath, 2) <> "\\" Then
+        EnsureCadIsLocal = cadPath
+        Exit Function
+    End If
+    If cNumLocal = "" Then cNumLocal = "CAD"
+    destFolder = LOCAL_WORKSPACE_ROOT & "\" & CleanFolderToken(cNumLocal)
+    EnsureFolderDeep destFolder
+    destFile = destFolder & "\" & fso.GetFileName(cadPath)
+    fso.CopyFile cadPath, destFile, True
+    If fso.FileExists(destFile) Then
+        LogStep "copied network CAD to local for OpenDoc: " & destFile
+        EnsureCadIsLocal = destFile
+    Else
+        LogStep "WARNING: could not copy network CAD locally; OpenDoc may fail: " & cadPath
+        EnsureCadIsLocal = cadPath
+    End If
+    On Error GoTo 0
 End Function
 
 ' Rank CAD files: strongly prefer the assembly that matches this job's C-number.
