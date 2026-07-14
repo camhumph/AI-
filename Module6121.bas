@@ -54,6 +54,7 @@ Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
 ' STL always exports a combined one-file mesh (merge when PartCount allows).
 Private Const FAST_QUOTE_MODE As Boolean = True
 Private Const CREATE_ISO_JPEGS As Boolean = True
+Private Const FAST_ISO_JPEG_CAPTURE As Boolean = True
 Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = False
 Private Const CREATE_DIM_DXF As Boolean = False   ' DIM DXF removed per request
 Private Const EXPORT_PER_PLATE_STLS As Boolean = False
@@ -4277,18 +4278,34 @@ Private Sub PrepareModelForJpegCapture(ByVal model As Object, _
                                        Optional ByVal showEverything As Boolean = False)
 On Error Resume Next
 
-    If model Is Nothing Then Exit Sub
-    If swApp Is Nothing Then Exit Sub
+    LogLine "JPEG prep ENTER showEverything=" & CStr(showEverything)
 
-    ' JPG capture needs real visible graphics.
+    If model Is Nothing Then
+        LogLine "JPEG prep EXIT: model is Nothing"
+        Exit Sub
+    End If
+
+    If swApp Is Nothing Then
+        LogLine "JPEG prep EXIT: swApp is Nothing"
+        Exit Sub
+    End If
+
+    ' JPG capture needs the real visible SolidWorks window.
     swApp.Visible = True
     swApp.UserControl = True
+    swApp.CommandInProgress = False
 
     Dim errs As Long
+    errs = 0
+
+    LogLine "JPEG prep: activating doc " & model.GetTitle
     swApp.ActivateDoc3 model.GetTitle, False, 0, errs
     Set model = swApp.ActiveDoc
 
-    If model Is Nothing Then Exit Sub
+    If model Is Nothing Then
+        LogLine "JPEG prep EXIT: ActiveDoc is Nothing"
+        Exit Sub
+    End If
 
     Dim swView As Object
     Set swView = model.ActiveView
@@ -4297,19 +4314,29 @@ On Error Resume Next
         swView.EnableGraphicsUpdate = True
     End If
 
-    model.FeatureManager.EnableFeatureTree = True
     model.ClearSelection2 True
 
     If showEverything Then
+
         If model.GetType = swDocASSEMBLY Then
+
+            LogLine "JPEG prep: showing assembly components only; skipping body-by-body scan for speed."
             ShowAllAssemblyComponents model
-            ShowAllBodiesInAssemblyComponents model
+
+            ' IMPORTANT:
+            ' Do NOT call ShowAllBodiesInAssemblyComponents here.
+            ' That loops every component/body and is one of the big hangs.
+
         ElseIf model.GetType = swDocPART Then
+
+            LogLine "JPEG prep: showing all part bodies."
             ShowAllPartBodies model
+
         End If
+
     End If
 
-    ' Shaded mode is much safer for screenshots than wireframe/hidden-line.
+    ' Shaded mode is safer for screenshots.
     Err.Clear
     model.ViewDisplayShaded
     Err.Clear
@@ -4317,12 +4344,19 @@ On Error Resume Next
     model.ViewZoomtofit2
     model.GraphicsRedraw2
     DoEvents
-    WaitMilliseconds 500
 
-    model.ViewZoomtofit2
-    model.GraphicsRedraw2
-    DoEvents
-    WaitMilliseconds 500
+    If FAST_ISO_JPEG_CAPTURE Then
+        WaitMilliseconds 150
+    Else
+        WaitMilliseconds 500
+        model.ViewZoomtofit2
+        model.GraphicsRedraw2
+        DoEvents
+        WaitMilliseconds 500
+    End If
+
+    LogLine "JPEG prep EXIT"
+
 End Sub
 
 Private Sub ShowAllBodiesInAssemblyComponents(ByVal assyModel As Object)
@@ -4561,13 +4595,25 @@ On Error GoTo ErrHandler
         LogLine "DEBUG: skipped ISO JPG exports."
 
     ElseIf CREATE_ISO_JPEGS Then
+
+        LogStart "Export ISO JPGs"
+
         If gJobIsStandardBase Then
+            LogLine "ISO JPG: standard full assembly path"
             ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
-            LogLine "ISO JPGs written to job folder (STANDARD full assembly — no Pyropel isolation)"
+            LogLine "ISO JPGs written to job folder (STANDARD full assembly)"
         Else
+            LogLine "ISO JPG: BMS Pyropel-hidden path"
             ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
             LogLine "ISO JPGs written to job folder (BMS Pyropel hidden)"
         End If
+
+        LogDone "Export ISO JPGs"
+
+    Else
+
+        LogLine "FAST QUOTE: skipped ISO JPGs because CREATE_ISO_JPEGS=False."
+
     End If
 
     If DEBUG_SKIP_DXF_EXPORT Then
@@ -6357,21 +6403,34 @@ On Error GoTo ErrHandler
     Dim warns As Long
 
     swApp.Visible = True
+    swApp.UserControl = True
+    swApp.CommandInProgress = False
+
+    errs = 0
     swApp.ActivateDoc3 model.GetTitle, False, 0, errs
     Set model = swApp.ActiveDoc
 
     If model Is Nothing Then Exit Function
 
-    PrepareModelForJpegCapture model, False
+    Dim swView As Object
+    Set swView = model.ActiveView
 
-    LogLine "Saving JPG image: " & imagePath
+    If Not swView Is Nothing Then
+        swView.EnableGraphicsUpdate = True
+    End If
+
+    model.GraphicsRedraw2
+    DoEvents
+    WaitMilliseconds 150
+
+    LogLine "JPG Save START: " & imagePath
 
     model.Extension.SaveAs3 imagePath, _
                             swSaveAsCurrentVersion, _
                             swSaveAsOptions_Silent, _
                             Nothing, Nothing, errs, warns
 
-    LogLine "Image save (" & imagePath & ") errs=" & errs & " warns=" & warns
+    LogLine "JPG Save DONE: " & imagePath & " errs=" & errs & " warns=" & warns
 
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
@@ -6393,7 +6452,7 @@ On Error GoTo ErrHandler
     Exit Function
 
 ErrHandler:
-    LogLine "SaveViewAsImage error: " & Err.Description
+    LogLine "SaveViewAsImage error: " & Err.Description & " path=" & imagePath
     SaveViewAsImage = False
 End Function
 
