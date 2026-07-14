@@ -846,13 +846,6 @@ Function EnsureCadIsLocal(ByVal cadPath, ByVal cNumLocal)
     On Error GoTo 0
 End Function
 
-Function IsNativeSwCad(ByVal pathOrName)
-    Dim e
-    IsNativeSwCad = False
-    e = LCase(fso.GetExtensionName(pathOrName))
-    If e = "sldasm" Or e = "sldprt" Then IsNativeSwCad = True
-End Function
-
 ' Open the XT (or STEP/IGES/SLD*) in SolidWorks. Capture the returned ModelDoc2.
 Function OpenCadInSolidWorks(ByVal swApp, ByVal cadPath)
     OpenCadInSolidWorks = False
