@@ -933,9 +933,15 @@ On Error GoTo ErrHandler
 
         LogLine "FAST QUOTE: skipped ResolveAllLightWeight / Unsuppress-all heavy prep (active CAD, all base types)."
 
+        LogLine "FAST QUOTE: entering PrepareAssemblyVisibilityFast"
         On Error Resume Next
         PrepareAssemblyVisibilityFast swModel
+        If Err.Number <> 0 Then
+            LogLine "WARNING: PrepareAssemblyVisibilityFast error: " & Err.Description
+            Err.Clear
+        End If
         On Error GoTo ErrHandler
+        LogLine "FAST QUOTE: leaving PrepareAssemblyVisibilityFast"
 
     Else
 
@@ -943,8 +949,11 @@ On Error GoTo ErrHandler
         ShowAllAssemblyComponents swModel
 
     End If
+    LogLine "ABOUT TO START EXPORT BASE PACKAGE (active CAD)"
     ApplyCmsTopView swModel
+    LogLine "Applied CMS top view before export"
     StabilizeActiveView swModel, 50
+    LogLine "Stabilized view before export"
 
     If isStd Then
         LogStart "Classify STANDARD mold base from active CAD"
@@ -991,6 +1000,7 @@ On Error GoTo ErrHandler
     End If
 
     ' Export FIRST so DXF EnsureNativeDxfSourceUsesCmsTop locks the view frame.
+    LogLine "ABOUT TO START EXPORT BASE PACKAGE (active CAD)"
     LogStart "Export base package (active CAD)"
     ExportBasePackage CurrentJobFolder & "\base"
     LogDone "Export base package (active CAD)"
@@ -2144,9 +2154,15 @@ On Error GoTo ErrHandler
 
         LogLine "FAST QUOTE: skipped ResolveAllLightWeight / Unsuppress-all heavy prep (all base types)."
 
+        LogLine "FAST QUOTE: entering PrepareAssemblyVisibilityFast"
         On Error Resume Next
         PrepareAssemblyVisibilityFast swModel
+        If Err.Number <> 0 Then
+            LogLine "WARNING: PrepareAssemblyVisibilityFast error: " & Err.Description
+            Err.Clear
+        End If
         On Error GoTo ErrHandler
+        LogLine "FAST QUOTE: leaving PrepareAssemblyVisibilityFast"
 
     Else
 
@@ -2159,8 +2175,11 @@ On Error GoTo ErrHandler
 
     End If
 
+    LogLine "ABOUT TO START EXPORT BASE PACKAGE"
     ApplyCmsTopView swModel
+    LogLine "Applied CMS top view before export"
     StabilizeActiveView swModel, 50
+    LogLine "Stabilized view before export"
 
     LogStart "Export base package"
     ExportBasePackage CurrentJobFolder & "\base"
@@ -4213,34 +4232,45 @@ End Sub
 Private Sub PrepareAssemblyVisibilityFast(ByVal model As Object)
 On Error Resume Next
 
-    If model Is Nothing Then Exit Sub
+    LogLine "PrepareAssemblyVisibilityFast ENTER"
+
+    If model Is Nothing Then
+        LogLine "PrepareAssemblyVisibilityFast EXIT: model is Nothing"
+        Exit Sub
+    End If
+
+    If swApp Is Nothing Then
+        LogLine "PrepareAssemblyVisibilityFast EXIT: swApp is Nothing"
+        Exit Sub
+    End If
 
     Dim errs As Long
+    errs = 0
+
+    LogLine "PrepareAssemblyVisibilityFast: activating doc " & model.GetTitle
     swApp.ActivateDoc3 model.GetTitle, False, 0, errs
+
     Set model = swApp.ActiveDoc
 
-    If model Is Nothing Then Exit Sub
-
-    swApp.UserControl = True
-
-    Dim swView As Object
-    Set swView = model.ActiveView
-
-    If Not swView Is Nothing Then
-        swView.EnableGraphicsUpdate = True
+    If model Is Nothing Then
+        LogLine "PrepareAssemblyVisibilityFast EXIT: ActiveDoc is Nothing after ActivateDoc3"
+        Exit Sub
     End If
+
+    LogLine "PrepareAssemblyVisibilityFast: active doc type=" & CStr(model.GetType)
+
+    ' Do NOT force graphics redraw here.
+    ' Do NOT enable viewport graphics here.
+    ' On large STEP imports this can hang before export even starts.
 
     model.ClearSelection2 True
 
-    If model.GetType = swDocASSEMBLY Then
-        ' Fast: do not resolve/unsuppress all here.
-        ShowAllAssemblyComponents model
-    ElseIf model.GetType = swDocPART Then
-        ShowAllPartBodies model
-    End If
+    ' Do not ShowAllAssemblyComponents here in FAST mode.
+    ' The assembly has not been intentionally hidden yet, so this is usually unnecessary.
+    ' ExportBasePackage and its subroutines can handle visibility when needed.
 
-    model.GraphicsRedraw2
-    DoEvents
+    LogLine "PrepareAssemblyVisibilityFast EXIT: no-redraw fast path"
+
 End Sub
 
 Private Sub PrepareModelForJpegCapture(ByVal model As Object, _
