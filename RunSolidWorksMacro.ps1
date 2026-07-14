@@ -19,7 +19,9 @@ $HandoffFile = "$LocalWorkspace\cms_handoff.txt"
 
 function Write-LauncherLog {
     param([string]$Message)
-    $line = ("[{0}] macro-runner: {1}" -f (Get-Date), $Message)
+    # Keep tag in sync with RunModule6121.vbs so webapp diagnostics do not
+    # treat this as the old "macro-runner:" (pre-v3) launcher.
+    $line = ("[{0}] macro-runner-v3: {1}" -f (Get-Date), $Message)
     foreach ($target in @(
         $LogFile,
         "$LocalWorkspace\CMS_Quote_Log.txt"
@@ -164,7 +166,7 @@ public class OleMessageFilter : IOleMessageFilter {
 
 try {
     [OleMessageFilter]::Register()
-    Write-LauncherLog "macro-runner-v3: starting; macro=$MacroPath procedure=$Procedure"
+    Write-LauncherLog "starting; macro=$MacroPath procedure=$Procedure"
 
     if (-not (Test-Path -LiteralPath $MacroPath)) {
         Write-LauncherLog "macro file not found: $MacroPath"

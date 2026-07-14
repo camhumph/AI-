@@ -399,6 +399,15 @@ def _launch_module6121_runner() -> tuple[subprocess.Popen | None, str]:
     if not vbs.exists():
         vbs = REPO_ROOT / "RunModule6121.vbs"
     if vbs.exists():
+        try:
+            log = LOCAL_WORKSPACE / "CMS_Quote_Log.txt"
+            with log.open("a", encoding="utf-8") as f:
+                f.write(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] webapp: launching macro-runner-v3 "
+                    f"via {vbs.name}\n"
+                )
+        except Exception:
+            pass
         proc = subprocess.Popen(
             ["wscript", "//nologo", str(vbs), str(swp)],
             close_fds=True,
@@ -924,6 +933,50 @@ def _read_tail(path: Path, max_chars: int = 2500) -> str:
         return ""
 
 
+def _current_launch_log_lines(log_tail: str) -> list[str]:
+    """Use only the current launch slice of CMS_Quote_Log.txt.
+
+    Older failed RunMacro attempts stay in the same file forever; matching those
+    made the UI keep saying "Old macro-runner still running" even after v3
+    deploy / a live quote.
+    """
+    lines = [ln for ln in (log_tail or "").splitlines() if ln.strip()]
+    if not lines:
+        return []
+    # Prefer everything after the latest webapp deploy / runner start marker.
+    start = None
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if (
+            "webapp: deployed launchers" in low
+            or "webapp: launching macro-runner-v3" in low
+            or "macro-runner-v3:" in low
+        ):
+            start = i
+    if start is None:
+        return lines[-25:]
+    # Do not expand backward — that reintroduces historical ok=False noise.
+    return lines[start:][-40:]
+
+
+def _recent_runner_is_old(log_lines: list[str]) -> bool:
+    """True only when the newest runner lines are pre-v3 (not historical)."""
+    runner_lines = [
+        ln
+        for ln in log_lines
+        if "macro-runner" in ln.lower() and "webapp:" not in ln.lower()
+    ]
+    if not runner_lines:
+        return False
+    last = runner_lines[-1].lower()
+    # v3 VBS / PS1 prefixes "macro-runner-v3:"
+    if "macro-runner-v3" in last:
+        return False
+    # Old PS1 style: "[...] macro-runner: attempt=..." without v3 in the line.
+    recent = "\n".join(ln.lower() for ln in runner_lines[-8:])
+    return "macro-runner:" in last and "ok=false" in recent
+
+
 def _collect_launch_diagnostics(status: dict) -> dict:
     """Read launcher/macro status files so the UI can show why a quote is stuck."""
     diag: dict = {
@@ -938,9 +991,12 @@ def _collect_launch_diagnostics(status: dict) -> dict:
     started_txt = _read_tail(MACRO_STARTED_FILE, 400)
     done_txt = _read_tail(MACRO_DONE_FILE, 400)
     launcher_status = _read_tail(LOCAL_WORKSPACE / "cms_launcher_status.txt", 800)
-    log_tail = _read_tail(LOCAL_WORKSPACE / "CMS_Quote_Log.txt", 3500)
+    log_tail = _read_tail(LOCAL_WORKSPACE / "CMS_Quote_Log.txt", 12000)
     if not log_tail:
-        log_tail = _read_tail(Path(r"C:\Users\lenovo\Downloads\CMS_Quote_Log.txt"), 3500)
+        log_tail = _read_tail(Path(r"C:\Users\lenovo\Downloads\CMS_Quote_Log.txt"), 12000)
+
+    log_lines = _current_launch_log_lines(log_tail)
+    recent_log = "\n".join(log_lines)
 
     if status_txt:
         diag["macro_status"] = status_txt
@@ -952,24 +1008,21 @@ def _collect_launch_diagnostics(status: dict) -> dict:
         diag["macro_done_text"] = done_txt
     if launcher_status:
         diag["launcher_last_step"] = launcher_status
-    if log_tail:
-        # Keep last ~12 log lines for the UI
-        lines = [ln for ln in log_tail.splitlines() if ln.strip()]
-        diag["launcher_log_tail"] = "\n".join(lines[-12:])
+    if log_lines:
+        diag["launcher_log_tail"] = "\n".join(log_lines[-12:])
 
-    # Human-readable stuck reason
+    # Human-readable stuck reason (current launch only — ignore old log noise)
     phase = (status.get("phase") or "").lower()
-    log_lines = [ln for ln in (log_tail or "").splitlines() if ln.strip()]
     last_log = log_lines[-1] if log_lines else ""
     if error_txt:
         diag["stuck_reason"] = f"Macro error: {error_txt.splitlines()[-1][:240]}"
     elif phase in {"launching", "running", "starting", "queued"}:
         if not MACRO_STARTED_FILE.exists():
             last = launcher_status or last_log
-            low = (log_tail or "").lower()
+            low = recent_log.lower()
             if "module6121.swp not found" in low:
                 diag["stuck_reason"] = "Module6121.swp missing in C:\\CMS_Local_Workspace — recompile the macro."
-            elif "macro-runner:" in low and "macro-runner-v3" not in low and "ok=false" in low:
+            elif _recent_runner_is_old(log_lines):
                 diag["stuck_reason"] = (
                     "Old macro-runner still running. Pull latest code, restart the webapp, "
                     "and confirm the log shows 'macro-runner-v3'. Also recompile Module6121.swp."
@@ -979,7 +1032,7 @@ def _collect_launch_diagnostics(status: dict) -> dict:
                     "Module6121.swp has no runnable entry points — recompile "
                     "Module6121.bas→.swp (see webapp\\COMPILE_MODULE6121.bat)."
                 )
-            elif "runmacro" in low and "ok=false" in low and "cms_macro_started" not in low:
+            elif ("runmacro" in low or " attempt " in low) and "ok=false" in low and "success" not in low:
                 diag["stuck_reason"] = (
                     "SolidWorks RunMacro failed (ok=False). Recompile Module6121.swp "
                     "with VBA module name Module61211 (COMPILE_MODULE6121.bat), "
