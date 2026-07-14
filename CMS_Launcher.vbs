@@ -250,11 +250,18 @@ End If
 
 ' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
 '    If the webapp already wrote BatchCount>1, keep that multi-job handoff.
+Dim handoffJobFolder
+handoffJobFolder = jobFolderName
+If customerSourceFolder <> "" Then
+    ' Use exact customer Downloads leaf (e.g. BMS-851100048-C18607) for output naming.
+    handoffJobFolder = fso.GetFileName(customerSourceFolder)
+End If
 If ExistingBatchCount() > 1 Then
     LogStep "preserving webapp BatchCount handoff (" & ExistingBatchCount() & " jobs); CadPath=" & gCadPath
     If gCadPath <> "" Then PatchBatchHandoffCadPath 1, gCadPath
 Else
-    WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir, gCadPath
+    WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, handoffJobFolder, customerPrefix, customerName, gAttachDir, gCadPath
+    LogStep "handoff AttachDir=" & gAttachDir & " JobFolder=" & handoffJobFolder
 End If
 
 Dim proposalPath

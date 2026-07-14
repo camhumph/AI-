@@ -763,6 +763,18 @@ On Error GoTo ErrHandler
         NetworkJobFolder = fso.GetParentFolderName(modelPath)
     End If
     If NetworkJobFolder = "" Then NetworkJobFolder = LOCAL_WORKSPACE_ROOT
+
+    ' Use the customer/job folder name as the output base name.
+    JobBaseName = ResolveOutputBaseNameFromFolder(modelPath)
+
+    If JobBaseName = "" Then
+        JobBaseName = CleanFileName(GetFileBaseName(modelTitle))
+    End If
+
+    If JobBaseName = "" Then JobBaseName = "ActiveCad"
+
+    LogLine "OUTPUT BASE FILE NAME FROM FOLDER: " & JobBaseName
+
     ' Use C-number folder when quoting from launcher (stable path for outputs).
     If gProcessingHandoff And CurrentJobNumber <> "" Then
         CurrentJobFolder = LOCAL_WORKSPACE_ROOT & "\" & CleanFileName(CurrentJobNumber)
@@ -1921,8 +1933,18 @@ On Error GoTo ErrHandler
         LogErrorText "Open CAD failed (tried " & cadCandidates.Count & " file(s))."
         GoTo CleanExit
     End If
+
     MainCadOpenedByMacro = True
     MainCadTitleForClose = swModel.GetTitle
+
+    ' Use the customer/job folder name as the output base name.
+    ' Examples:
+    '   BMS-851100048-C18607
+    '   Electroform-5023-C18600
+    '   Glenwood-10593-J8481-Final-7-10-26
+    JobBaseName = ResolveOutputBaseNameFromFolder(cadPath)
+    LogLine "OUTPUT BASE FILE NAME FROM FOLDER: " & JobBaseName
+
     LogDone "Open CAD"
 
     Dim errs As Long
@@ -7465,6 +7487,165 @@ Private Function CleanFileName(ByVal s As String) As String
     s = Replace(s, ">", "_")
     s = Replace(s, "|", "_")
     CleanFileName = Trim(s)
+End Function
+
+Private Function IsPlainCNumberFolder(ByVal folderName As String) As Boolean
+    IsPlainCNumberFolder = False
+
+    Dim s As String
+    Dim i As Long
+    Dim ch As String
+
+    s = UCase$(Trim$(folderName))
+
+    If Len(s) < 5 Then Exit Function
+    If Left$(s, 1) <> "C" Then Exit Function
+
+    For i = 2 To Len(s)
+        ch = Mid$(s, i, 1)
+
+        If ch < "0" Or ch > "9" Then
+            Exit Function
+        End If
+    Next i
+
+    IsPlainCNumberFolder = True
+End Function
+
+Private Function IsBadOutputFolderLeaf(ByVal folderName As String) As Boolean
+    IsBadOutputFolderLeaf = False
+
+    Dim s As String
+    s = UCase$(Trim$(folderName))
+
+    If s = "" Then
+        IsBadOutputFolderLeaf = True
+        Exit Function
+    End If
+
+    If s = "BASE" Then
+        IsBadOutputFolderLeaf = True
+        Exit Function
+    End If
+
+    If s = UCase$(EXTRACT_FOLDER_NAME) Then
+        IsBadOutputFolderLeaf = True
+        Exit Function
+    End If
+
+    If IsPlainCNumberFolder(s) Then
+        IsBadOutputFolderLeaf = True
+        Exit Function
+    End If
+
+    If Left$(s, 16) = "CMS_ACTIVE_QUOTE" Then
+        IsBadOutputFolderLeaf = True
+        Exit Function
+    End If
+End Function
+
+Private Function IsLocalWorkspacePath(ByVal p As String) As Boolean
+    IsLocalWorkspacePath = False
+
+    Dim u As String
+    u = UCase$(Trim$(p))
+
+    If u = "" Then Exit Function
+
+    If Left$(u, Len(UCase$(LOCAL_WORKSPACE_ROOT))) = UCase$(LOCAL_WORKSPACE_ROOT) Then
+        IsLocalWorkspacePath = True
+    End If
+End Function
+
+Private Function FolderLeafForOutputName(ByVal p As String) As String
+On Error Resume Next
+    FolderLeafForOutputName = ""
+
+    p = Trim$(p)
+    If p = "" Then Exit Function
+
+    Do While Right$(p, 1) = "\"
+        p = Left$(p, Len(p) - 1)
+    Loop
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    FolderLeafForOutputName = CleanFileName(fso.GetFileName(p))
+End Function
+
+Private Function CadParentFolderForOutputName(ByVal cadPath As String) As String
+On Error Resume Next
+    CadParentFolderForOutputName = ""
+
+    If Trim$(cadPath) = "" Then Exit Function
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If fso.FileExists(cadPath) Then
+        CadParentFolderForOutputName = fso.GetParentFolderName(cadPath)
+    End If
+End Function
+
+Private Function ResolveOutputBaseNameFromFolder(Optional ByVal sourceCadPath As String = "") As String
+On Error GoTo ErrHandler
+
+    ResolveOutputBaseNameFromFolder = ""
+
+    Dim cands(1 To 6) As String
+    Dim i As Long
+    Dim leaf As String
+
+    ' Priority order:
+    ' 1. Original customer folder from launcher/webapp AttachDir.
+    ' 2. Exact job folder name from handoff.
+    ' 3. Network job folder.
+    ' 4. CAD parent folder, but only if it is not just local workspace junk.
+    ' 5. Current job folder.
+    ' 6. Existing JobBaseName fallback.
+    cands(1) = gHandoffAttachDir
+    cands(2) = gExactJobFolderName
+    cands(3) = NetworkJobFolder
+    cands(4) = CadParentFolderForOutputName(sourceCadPath)
+    cands(5) = CurrentJobFolder
+    cands(6) = JobBaseName
+
+    For i = 1 To 6
+        If Trim$(cands(i)) <> "" Then
+
+            ' Avoid using C:\CMS_Local_Workspace\C18607 as the name.
+            ' We want the original customer/job folder name.
+            If i <> 4 Or Not IsLocalWorkspacePath(cands(i)) Then
+
+                leaf = FolderLeafForOutputName(cands(i))
+
+                If Not IsBadOutputFolderLeaf(leaf) Then
+                    ResolveOutputBaseNameFromFolder = CleanFileName(leaf)
+                    Exit Function
+                End If
+
+            End If
+
+        End If
+    Next i
+
+    ' Last fallback: CAD file name.
+    If sourceCadPath <> "" Then
+        Dim fso As Object
+        Set fso = CreateObject("Scripting.FileSystemObject")
+
+        If fso.FileExists(sourceCadPath) Then
+            ResolveOutputBaseNameFromFolder = CleanFileName(fso.GetBaseName(sourceCadPath))
+            Exit Function
+        End If
+    End If
+
+    ResolveOutputBaseNameFromFolder = CleanFileName(CurrentJobNumber)
+    Exit Function
+
+ErrHandler:
+    ResolveOutputBaseNameFromFolder = CleanFileName(CurrentJobNumber)
 End Function
 
 Private Sub EnsureFolder(ByVal folderPath As String)
@@ -14405,7 +14586,7 @@ Private Sub PublishJobOutputs()
 
     ' 1) Job signature CSV at the matching root (flat) so Elgin auto-imports it.
     Dim sigPath As String
-    sigPath = root & "\XT_Export_Job_Signature_" & CleanFileName(CurrentJobNumber) & ".csv"
+    sigPath = root & "\XT_Export_Job_Signature_" & CleanFileName(JobBaseName) & ".csv"
     WriteJobSignatureCsv sigPath
 
     ' 2) Copy this job's deliverables into root\<job>\ for Elgin's image/sheet finders.
@@ -16663,7 +16844,7 @@ On Error GoTo eh
     On Error GoTo eh
 
     Dim baseName As String, outPath As String
-    baseName = "Purchased Components " & IIf(JobBaseName <> "", JobBaseName, CurrentJobNumber)
+    baseName = IIf(JobBaseName <> "", JobBaseName, CurrentJobNumber) & " Purchased Components"
     outPath = CurrentJobFolder & "\" & baseName & ".xlsx"
 
     On Error Resume Next
