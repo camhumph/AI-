@@ -76,7 +76,18 @@ export default function BackgroundQuoteBar() {
                 <div className="mt-1 line-clamp-3 text-[10px] text-ink-500">{job.status.message}</div>
               )}
               {job.status.warning && (
-                <div className="mt-1 line-clamp-2 text-[10px] text-accent-amber">{job.status.warning}</div>
+                <div
+                  className={`mt-1 line-clamp-3 text-[10px] font-semibold ${
+                    job.status.cad_job_mismatch ||
+                    /different job-number|differs from folder job|does not match handoff/i.test(
+                      job.status.warning,
+                    )
+                      ? "text-accent-rose"
+                      : "text-accent-amber"
+                  }`}
+                >
+                  {job.status.warning}
+                </div>
               )}
               {stuck && (
                 <div className="mt-1 whitespace-pre-wrap break-words text-[10px] text-accent-rose">

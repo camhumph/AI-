@@ -116,6 +116,8 @@ Private Const BCP_BOTTOM_ORIENTATION_KEYS As String = "BCP|BOTTOM CLAMPING|BOTTO
 Private Const PERSIST_CMS_TOP_AS_STANDARD_VIEWS_BEFORE_BASE_SAVE As Boolean = True
 Private Const PROMPT_FOR_TOP_ORIENTATION As Boolean = False
 Private Const SUPPRESS_USER_PROMPTS As Boolean = True
+' Soft-allow: CAD filename may use an older/internal BMS id than the quote folder.
+Private Const ALLOW_ACTIVE_CAD_HANDOFF_MISMATCH As Boolean = True
 ' Front-orientation tuning (ported from gemini1).
 Private Const POT_BLOCKS_MUST_BE_FRONT_OF_HOLDERS As Boolean = True
 Private Const POT_FRONT_REQUIRE_EVERY_POT_AHEAD_OF_EVERY_HOLDER As Boolean = True
@@ -805,20 +807,31 @@ On Error GoTo ErrHandler
         If CustomerJobNumber <> "" Then
             If InStr(UCase(modelTitle & " " & modelPath), UCase(CustomerJobNumber)) = 0 Then
 
-                LogErrorText "Active CAD does not match handoff customer job. Stopping to prevent wrong BOM/CAD quote."
-                LogLine "  Active CAD: " & modelTitle
-                LogLine "  Active path: " & modelPath
-                LogLine "  Handoff customer job: " & CustomerJobNumber
+                If ALLOW_ACTIVE_CAD_HANDOFF_MISMATCH Then
 
-                If Not SUPPRESS_USER_PROMPTS Then
-                    MsgBox "The open CAD does not match the launcher/job handoff." & vbCrLf & vbCrLf & _
-                           "Open CAD: " & modelTitle & vbCrLf & _
-                           "Expected customer job: " & CustomerJobNumber & vbCrLf & vbCrLf & _
-                           "Close the wrong CAD or clear the handoff file before running.", _
-                           vbCritical, "CMS Base Export - CAD/BOM mismatch"
+                    ' BMS / customer CAD packages sometimes contain an older/internal job
+                    ' number in the XT/SLDASM filename. Do NOT stop the quote because of
+                    ' the CAD filename mismatch. The launcher/job folder/BOM handoff is
+                    ' treated as the source of truth.
+                    LogLine "WARNING: Active CAD name does not match handoff customer job, but continuing because ALLOW_ACTIVE_CAD_HANDOFF_MISMATCH=True."
+                    LogLine "  Active CAD: " & modelTitle
+                    LogLine "  Active path: " & modelPath
+                    LogLine "  Handoff customer job: " & CustomerJobNumber
+                    LogLine "  CurrentJobNumber/CNum: " & CurrentJobNumber
+                    LogLine "  Job folder: " & CurrentJobFolder
+                    LogLine "  AttachDir: " & gHandoffAttachDir
+                    WriteCadJobMismatchNotice modelTitle, modelPath, CustomerJobNumber
+
+                Else
+
+                    LogErrorText "Active CAD does not match handoff customer job. Stopping to prevent wrong BOM/CAD quote."
+                    LogLine "  Active CAD: " & modelTitle
+                    LogLine "  Active path: " & modelPath
+                    LogLine "  Handoff customer job: " & CustomerJobNumber
+                    Exit Sub
+
                 End If
 
-                Exit Sub
             End If
         End If
     End If
@@ -1946,6 +1959,7 @@ On Error GoTo ErrHandler
         ElseIf fsoCad.FileExists(gHandoffCadPath) Then
             If IsForeignJobCadName(gHandoffCadPath) Then
                 LogLine "NOTE: CAD job # differs from folder job # — continuing: " & gHandoffCadPath
+                WriteCadJobMismatchNotice CStr(gHandoffCadPath), CStr(gHandoffCadPath), CustomerJobNumber
             End If
             cadCandidates.Add gHandoffCadPath
             LogLine "Using CadPath from handoff first: " & gHandoffCadPath
@@ -7669,6 +7683,27 @@ On Error Resume Next
         CadParentFolderForOutputName = fso.GetParentFolderName(cadPath)
     End If
 End Function
+
+Private Sub WriteCadJobMismatchNotice(ByVal cadTitle As String, ByVal cadPath As String, ByVal expectedJob As String)
+On Error Resume Next
+    Dim f As Integer
+    Dim p As String
+    p = LOCAL_WORKSPACE_ROOT & "\cms_cad_job_mismatch.txt"
+    EnsureFolderDeep LOCAL_WORKSPACE_ROOT
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Mismatch=1"
+    Print #f, "Message=Quoting different job-number CAD files than the folder job. Continuing."
+    Print #f, "ExpectedJob=" & expectedJob
+    Print #f, "CurrentJobNumber=" & CurrentJobNumber
+    Print #f, "CadTitle=" & cadTitle
+    Print #f, "CadPath=" & cadPath
+    Print #f, "JobFolder=" & CurrentJobFolder
+    Print #f, "AttachDir=" & gHandoffAttachDir
+    Print #f, "When=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Close #f
+    WriteMacroLaunchStatus "STARTED", "Quoting different job-number CAD (continuing): expected " & expectedJob & " / CAD=" & cadTitle
+End Sub
 
 Private Function CopyOriginalXtToOutput(ByVal destXtPath As String) As Boolean
 On Error GoTo ErrHandler

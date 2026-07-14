@@ -24,7 +24,16 @@ export default function QuoteProgressModal({
         <div className="section-label mb-2">Quote in progress</div>
         <p className="text-sm text-ink-300">{status.message || "Running full CMS quote pipeline..."}</p>
         {status.warning && (
-          <p className="mt-2 text-xs text-accent-amber">{status.warning}</p>
+          <p
+            className={`mt-2 text-xs font-semibold ${
+              status.cad_job_mismatch ||
+              /different job-number|differs from folder job|does not match handoff/i.test(status.warning)
+                ? "text-accent-rose"
+                : "text-accent-amber"
+            }`}
+          >
+            {status.warning}
+          </p>
         )}
         {status.stuck_reason && (
           <p className="mt-2 text-xs text-accent-rose">{status.stuck_reason}</p>

@@ -30,6 +30,7 @@ MACRO_STARTED_FILE = LOCAL_WORKSPACE / "cms_macro_started.txt"
 MACRO_DONE_FILE = LOCAL_WORKSPACE / "cms_macro_done.txt"
 MACRO_ERROR_FILE = LOCAL_WORKSPACE / "cms_macro_error.txt"
 LAUNCHER_STATUS_FILE = LOCAL_WORKSPACE / "cms_launcher_status.txt"
+CAD_JOB_MISMATCH_FILE = LOCAL_WORKSPACE / "cms_cad_job_mismatch.txt"
 STATUS_DIR = config.DATA_DIR / "quote_status"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -53,6 +54,7 @@ def _clear_macro_launch_status_files() -> None:
         MACRO_ERROR_FILE,
         LAUNCHER_STATUS_FILE,
         CANCEL_FILE,
+        CAD_JOB_MISMATCH_FILE,
     ):
         _delete_if_exists(p)
 
@@ -175,7 +177,8 @@ def _cad_folder_job_mismatch_warning(
     if not others:
         return ""
     return (
-        f"CAD job {others[0]} differs from folder job {want} — continuing with this XT."
+        f"Quoting different job-number CAD files than folder job {want} "
+        f"(CAD uses {others[0]}). Continuing."
     )
 
 
@@ -645,6 +648,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         c_number=c_number or None,
         cad_path=local_cad or None,
         warning=cad_warning or None,
+        cad_job_mismatch=True if cad_warning else None,
     )
 
     run_dme_price_lookup(wait=False)
@@ -658,6 +662,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         phase="launching",
         message=launch_msg,
         warning=cad_warning or None,
+        cad_job_mismatch=True if cad_warning else None,
     )
 
     proc, how = _start_cms_launcher()
@@ -707,6 +712,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             handoff=handoff if c_num else {},
             macro_started=started,
             warning=cad_warning or None,
+            cad_job_mismatch=True if cad_warning else None,
             cad_path=local_cad or handoff.get("CadPath") or None,
         )
     else:
@@ -716,6 +722,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
             message="SolidWorks opening CAD, then Module6121.swp...",
             job_id=quote_id,
             warning=cad_warning or None,
+            cad_job_mismatch=True if cad_warning else None,
         )
 
     return {
@@ -726,6 +733,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         "handoff_file": str(HANDOFF_FILE),
         "macro_started": MACRO_STARTED_FILE.exists(),
         "warning": cad_warning or None,
+        "cad_job_mismatch": True if cad_warning else None,
     }
 
 
@@ -811,6 +819,7 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             batch=True,
             cad_path=cad_path or None,
             warning=cad_warning or None,
+            cad_job_mismatch=True if cad_warning else None,
         )
         jobs.create_job(c_number, display_name=str(info.get("subject", c_number))[:80], customer=str(info.get("cust_job", "")))
 
@@ -1082,6 +1091,38 @@ def _recent_runner_is_old(log_lines: list[str]) -> bool:
     return "macro-runner:" in last and "ok=false" in recent
 
 
+def _read_cad_job_mismatch() -> dict:
+    """Parse cms_cad_job_mismatch.txt written by Module6121 when CAD job # ≠ folder job #."""
+    out: dict = {}
+    if not CAD_JOB_MISMATCH_FILE.exists():
+        return out
+    try:
+        for line in CAD_JOB_MISMATCH_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except Exception:
+        return {}
+    return out
+
+
+def _cad_mismatch_warning_text(info: dict | None = None, fallback: str = "") -> str:
+    info = info or {}
+    expected = (info.get("ExpectedJob") or "").strip()
+    cad = (info.get("CadTitle") or info.get("CadPath") or "").strip()
+    if expected and cad:
+        return (
+            f"Quoting different job-number CAD files than folder job {expected}. "
+            f"CAD: {cad}. Continuing."
+        )
+    msg = (info.get("Message") or "").strip()
+    if msg:
+        return msg
+    return fallback or (
+        "Quoting different job-number CAD files than the folder job. Continuing."
+    )
+
+
 def _collect_launch_diagnostics(status: dict) -> dict:
     """Read launcher/macro status files so the UI can show why a quote is stuck."""
     diag: dict = {
@@ -1099,6 +1140,8 @@ def _collect_launch_diagnostics(status: dict) -> dict:
     log_tail = _read_tail(LOCAL_WORKSPACE / "CMS_Quote_Log.txt", 12000)
     if not log_tail:
         log_tail = _read_tail(Path(r"C:\Users\lenovo\Downloads\CMS_Quote_Log.txt"), 12000)
+    live_log = _read_tail(LOCAL_WORKSPACE / "CMS_Module6121_Live_Log.txt", 4000)
+    mismatch_info = _read_cad_job_mismatch()
 
     log_lines = _current_launch_log_lines(log_tail)
     recent_log = "\n".join(log_lines)
@@ -1129,11 +1172,42 @@ def _collect_launch_diagnostics(status: dict) -> dict:
     if log_lines:
         diag["launcher_log_tail"] = "\n".join(log_lines[-12:])
 
+    # Soft CAD job-number mismatch (continue quoting, but flag in red in the UI).
+    blob = "\n".join(
+        [
+            recent_log,
+            live_log or "",
+            status_txt or "",
+            str(status.get("warning") or ""),
+            str(status.get("message") or ""),
+        ]
+    ).lower()
+    if mismatch_info.get("Mismatch") == "1" or mismatch_info.get("ExpectedJob"):
+        diag["cad_job_mismatch"] = True
+        diag["cad_job_mismatch_text"] = _cad_mismatch_warning_text(mismatch_info)
+    elif (
+        "does not match handoff customer job" in blob
+        or "cad job # mismatch" in blob
+        or "differs from folder job" in blob
+        or "quoting different job-number" in blob
+    ):
+        diag["cad_job_mismatch"] = True
+        diag["cad_job_mismatch_text"] = _cad_mismatch_warning_text(
+            fallback=str(status.get("warning") or "")
+        )
+    if diag.get("cad_job_mismatch"):
+        diag["warning"] = diag["cad_job_mismatch_text"]
+
     # Human-readable stuck reason (current launch only — ignore old log noise)
     phase = (status.get("phase") or "").lower()
     last_log = log_lines[-1] if log_lines else ""
     if error_txt:
-        diag["stuck_reason"] = f"Macro error: {error_txt.splitlines()[-1][:240]}"
+        err_low = error_txt.lower()
+        # Soft mismatch must not mark the quote failed when we allow continuing.
+        if "does not match handoff customer job" in err_low and diag.get("cad_job_mismatch"):
+            pass
+        else:
+            diag["stuck_reason"] = f"Macro error: {error_txt.splitlines()[-1][:240]}"
     elif phase in {"launching", "running", "starting", "queued"}:
         if not MACRO_STARTED_FILE.exists():
             last = launcher_status or last_log
@@ -1211,19 +1285,31 @@ def poll_completion(quote_id: str) -> dict:
     status["diagnostics"] = diag
     if diag.get("stuck_reason"):
         status["stuck_reason"] = diag["stuck_reason"]
+    if diag.get("cad_job_mismatch"):
+        status["cad_job_mismatch"] = True
+        status["warning"] = diag.get("cad_job_mismatch_text") or diag.get("warning") or status.get("warning")
+    elif diag.get("warning") and not status.get("warning"):
+        status["warning"] = diag["warning"]
     if diag.get("macro_error") and status.get("phase") not in {"completed", "cancelled", "error"}:
-        status["phase"] = "error"
-        status["message"] = diag.get("stuck_reason") or "Macro reported an error"
-        try:
-            set_status(
-                quote_id,
-                phase="error",
-                message=status["message"],
-                stuck_reason=status.get("stuck_reason"),
-                diagnostics=diag,
-            )
-        except Exception:
+        # Soft CAD mismatch notice must not flip the quote to error.
+        err_blob = (diag.get("macro_error_text") or "").lower()
+        if diag.get("cad_job_mismatch") and "does not match handoff customer job" in err_blob:
             pass
+        else:
+            status["phase"] = "error"
+            status["message"] = diag.get("stuck_reason") or "Macro reported an error"
+            try:
+                set_status(
+                    quote_id,
+                    phase="error",
+                    message=status["message"],
+                    stuck_reason=status.get("stuck_reason"),
+                    warning=status.get("warning"),
+                    cad_job_mismatch=status.get("cad_job_mismatch"),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
 
     local = find_local_job_folder(job_id)
     if local:

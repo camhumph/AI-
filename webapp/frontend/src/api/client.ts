@@ -173,6 +173,7 @@ export interface QuoteRunStatus {
   phase: string;
   message?: string;
   warning?: string;
+  cad_job_mismatch?: boolean;
   stuck_reason?: string;
   diagnostics?: {
     stuck_reason?: string;
@@ -184,6 +185,9 @@ export interface QuoteRunStatus {
     macro_started?: boolean;
     macro_done?: boolean;
     macro_error?: boolean;
+    cad_job_mismatch?: boolean;
+    cad_job_mismatch_text?: string;
+    warning?: string;
   };
   job_id?: string;
   c_number?: string;
