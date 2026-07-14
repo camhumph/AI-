@@ -608,31 +608,50 @@ End Function
 Function SampleFolderFiles(ByVal folderPath)
     SampleFolderFiles = ""
     On Error Resume Next
+
     Dim f, n, parts, sub1, f2
     n = 0
     parts = ""
+
+    If folderPath = "" Then
+        SampleFolderFiles = "(missing folder)"
+        Exit Function
+    End If
+
+    If Not fso.FolderExists(folderPath) Then
+        SampleFolderFiles = "(folder not found)"
+        Exit Function
+    End If
+
     For Each f In fso.GetFolder(folderPath).Files
         If n > 0 Then parts = parts & ", "
         parts = parts & f.Name
         n = n + 1
         If n >= 6 Then Exit For
     Next
+
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(sub1.Name) <> "BASE" Then
             If n > 0 Then parts = parts & ", "
             parts = parts & "[" & sub1.Name & "/"
+
             For Each f2 In sub1.Files
                 parts = parts & f2.Name & " "
                 n = n + 1
                 If n >= 10 Then Exit For
             Next
+
             parts = parts & "]"
             n = n + 1
+
             If n >= 10 Then Exit For
         End If
     Next
+
     If parts = "" Then parts = "(empty)"
     SampleFolderFiles = parts
+
+    On Error GoTo 0
 End Function
 
 Function IsGeneratedBaseCadPath(ByVal p)
@@ -1203,51 +1222,60 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
 
         For pi = 0 To UBound(pairArr)
             pairParts = Split(pairArr(pi), Chr(1))
+
             If UBound(pairParts) >= 1 Then
-            moduleName = pairParts(0)
-            procName = pairParts(1)
-            runOk = False
-            runErr = CLng(0)
-            vbaErr = 0
-
-            On Error Resume Next
-            Err.Clear
-            ' Prefer RunMacro (no ByRef) — avoids err=0 false negatives.
-            runOk = swApp.RunMacro(macroPath, moduleName, procName)
-            vbaErr = Err.Number
-            If runOk = False Or vbaErr <> 0 Then
-                Err.Clear
+                moduleName = pairParts(0)
+                procName = pairParts(1)
+                runOk = False
                 runErr = CLng(0)
-                runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
-                vbaErr = Err.Number
-            End If
-            If runOk = False Or vbaErr <> 0 Then
+                vbaErr = 0
+
+                On Error Resume Next
                 Err.Clear
-                runErr = CLng(0)
-                runOk = swApp.RunMacro2(macroPath, moduleName, procName, 1, runErr)
+
+                ' Prefer RunMacro (no ByRef) — avoids err=0 false negatives.
+                runOk = swApp.RunMacro(macroPath, moduleName, procName)
                 vbaErr = Err.Number
-            End If
-            On Error GoTo 0
 
-            LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
-                    " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
+                If runOk = False Or vbaErr <> 0 Then
+                    Err.Clear
+                    runErr = CLng(0)
+                    runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
+                    vbaErr = Err.Number
+                End If
 
-            waitStart = Timer
-            Do
-                If fso.FileExists(MACRO_STARTED_FILE) Then
-                    LogStep "macro acknowledged STARTED (module=" & moduleName & " proc=" & procName & ")"
-                    RunMacroWithRetry = True
-                    Exit Function
+                If runOk = False Or vbaErr <> 0 Then
+                    Err.Clear
+                    runErr = CLng(0)
+                    runOk = swApp.RunMacro2(macroPath, moduleName, procName, 1, runErr)
+                    vbaErr = Err.Number
                 End If
-                If fso.FileExists(MACRO_ERROR_FILE) Then
-                    LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
-                    RunMacroWithRetry = True
-                    Exit Function
-                End If
-                WaitSeconds 1
-                If Timer < waitStart Then Exit Do
-                If Timer - waitStart >= 8 Then Exit Do
-            Loop
+
+                On Error GoTo 0
+
+                LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
+                        " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
+
+                waitStart = Timer
+
+                Do
+                    If fso.FileExists(MACRO_STARTED_FILE) Then
+                        LogStep "macro acknowledged STARTED (module=" & moduleName & " proc=" & procName & ")"
+                        RunMacroWithRetry = True
+                        Exit Function
+                    End If
+
+                    If fso.FileExists(MACRO_ERROR_FILE) Then
+                        LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
+                        RunMacroWithRetry = True
+                        Exit Function
+                    End If
+
+                    WaitSeconds 1
+
+                    If Timer < waitStart Then Exit Do
+                    If Timer - waitStart >= 8 Then Exit Do
+                Loop
             End If
         Next
 
