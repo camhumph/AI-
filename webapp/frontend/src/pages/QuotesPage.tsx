@@ -209,7 +209,7 @@ function FolderPickerModal({
           qid;
         startQuote(qid, label, {
           phase: "running",
-          message: `Batch ${i + 1}/${qids.length} — sequential SolidWorks quotes`,
+          message: `Batch ${i + 1}/${qids.length} — one job at a time (SolidWorks restarts between)`,
           job_id: job?.job_id || qid,
         });
       });

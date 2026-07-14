@@ -45,11 +45,20 @@ DeleteIfExists STARTED_FILE
 DeleteIfExists ERROR_FILE
 DeleteIfExists DONE_FILE
 
+' Always start from a clean SolidWorks process.
+LogLine RUNNER_TAG & ": force-closing any running SolidWorks..."
+On Error Resume Next
+shell.Run "taskkill /F /IM SLDWORKS.exe /T", 0, True
+shell.Run "taskkill /F /IM sldworks.exe /T", 0, True
+shell.Run "taskkill /F /IM SLDWORKS_FCE.exe /T", 0, True
+On Error GoTo 0
+WScript.Sleep 5000
+LogLine RUNNER_TAG & ": SolidWorks force-close done — starting fresh session"
+
 Dim sw
 Set sw = Nothing
 On Error Resume Next
-Set sw = GetObject(, SW_PROGID)
-If sw Is Nothing Then Set sw = CreateObject(SW_PROGID)
+Set sw = CreateObject(SW_PROGID)
 On Error GoTo 0
 
 If sw Is Nothing Then

@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -36,6 +37,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 _active_launcher_procs: dict[str, subprocess.Popen] = {}
 _cancelled_quotes: set[str] = set()
+_batch_advance_lock = threading.Lock()
+_batch_advance_started: set[str] = set()  # batch_id:index already launched
 
 
 def _delete_if_exists(path: Path) -> None:
@@ -516,9 +519,61 @@ def _launch_module6121_runner() -> tuple[subprocess.Popen | None, str]:
     return None, "no RunModule6121.vbs or RunSolidWorksMacro.ps1 found"
 
 
-def _start_cms_launcher() -> tuple[subprocess.Popen | None, str]:
+def _force_close_solidworks() -> None:
+    """Force-close SolidWorks so each quote starts with a clean session.
+
+    Reusing an open SW session (especially after a stuck/batch run) leaves quotes
+    waiting forever on cms_macro_started.txt. Kill first; launcher reopens fresh.
+    """
+    if os.name != "nt":
+        _append_quote_log("force-close SolidWorks skipped (not Windows)")
+        return
+    _append_quote_log("force-closing SolidWorks before quote launch...")
+    for image in ("SLDWORKS.exe", "sldworks.exe", "SLDWORKS_FCE.exe"):
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", image, "/T"],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+        except Exception as e:
+            _append_quote_log(f"taskkill {image}: {e}")
+    # Let COM / file locks release before CreateObject.
+    time.sleep(5)
+    _append_quote_log("SolidWorks force-close complete")
+
+
+def _batch_queue_path(batch_id: str) -> Path:
+    safe = re.sub(r"[^\w\-]", "_", batch_id or "batch")
+    return STATUS_DIR / f"batch_{safe}.json"
+
+
+def _save_batch_queue(batch_id: str, data: dict) -> None:
+    _ensure_status_dir()
+    path = _batch_queue_path(batch_id)
+    data = dict(data)
+    data["batch_id"] = batch_id
+    data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_batch_queue(batch_id: str) -> dict | None:
+    path = _batch_queue_path(batch_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _start_cms_launcher(*, force_close_sw: bool = True) -> tuple[subprocess.Popen | None, str]:
     """Start CMS_Launcher.vbs /usemail — stages CAD, opens SolidWorks, runs Module6121."""
     _deploy_launcher_assets()
+    if force_close_sw:
+        _force_close_solidworks()
     launcher = _find_launcher()
     if not launcher:
         return None, "CMS_Launcher.vbs not found in C:\\CMS_Local_Workspace or repo root"
@@ -738,10 +793,13 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
 
 
 def launch_batch_quotes(items: list[dict]) -> dict:
-    """Launch multiple quotes as one sequential SolidWorks batch.
+    """Queue multiple quotes and run them one-at-a-time (never two Module6121s at once).
 
     Each item: quote_id, attach_dir, and optional email fields
     (subject, cust_job, c_number, similar_to, ship_date, root_path, job_folder, cad_path).
+
+    Only job 1 is launched immediately (after force-closing SolidWorks). When it
+    finishes (or errors), the next queued job starts automatically.
     """
     if not items:
         return {"launched": False, "error": "No quotes in batch"}
@@ -749,10 +807,10 @@ def launch_batch_quotes(items: list[dict]) -> dict:
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     _deploy_launcher_assets()
     _delete_if_exists(TRAINING_TRIGGER)
-    _clear_macro_launch_status_files()
 
-    batch_jobs: list[dict[str, str]] = []
+    prepared: list[dict] = []
     quote_ids: list[str] = []
+    batch_id = f"BATCH-{int(time.time())}"
 
     for item in items:
         quote_id = str(item.get("quote_id") or item.get("c_number") or "").strip()
@@ -774,11 +832,10 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         if not c_number:
             continue
 
-        # Re-quote after Cancel is allowed — clear sticky cancel for this id.
-        _clear_quote_cancel(quote_id)
+        qid = quote_id or c_number
+        _clear_quote_cancel(qid)
         _clear_quote_cancel(c_number)
 
-        # Launcher/macro stages locally — do not full-copy here (was making the UI slow).
         hinted = _cad_hint_from_sources(
             c_number,
             [
@@ -791,129 +848,276 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         cad_path = str(hinted.get("cad_path") or info.get("cad_path") or item.get("cad_path") or "")
         cad_warning = str(hinted.get("warning") or "")
 
-        job = {
-            "CNum": c_number,
-            "QuoteNum": str(info.get("quote_num") or c_number),
-            "CustJob": str(info.get("cust_job") or ""),
-            "SimilarTo": str(info.get("similar_to") or ""),
-            "ShipDate": str(info.get("ship_date") or ""),
-            "RootPath": str(info.get("root_path") or item.get("root_path") or ""),
-            "JobFolder": str(info.get("job_folder") or item.get("job_folder") or ""),
-            "CustomerPrefix": str(info.get("customer_prefix") or ""),
-            "CustomerName": str(info.get("customer_name") or ""),
-            "AttachDir": attach_dir,
-            "CadPath": cad_path,
+        email_info = {
+            "subject": str(info.get("subject") or c_number),
+            "cust_job": str(info.get("cust_job") or ""),
+            "c_number": c_number,
+            "similar_to": str(info.get("similar_to") or ""),
+            "ship_date": str(info.get("ship_date") or ""),
+            "root_path": str(info.get("root_path") or item.get("root_path") or ""),
+            "job_folder": str(info.get("job_folder") or item.get("job_folder") or ""),
+            "customer_prefix": str(info.get("customer_prefix") or ""),
+            "customer_name": str(info.get("customer_name") or ""),
+            "attachments": info.get("attachments", 0),
+            "cad_path": cad_path,
         }
-        batch_jobs.append(job)
-        qid = quote_id or c_number
+        prepared.append(
+            {
+                "quote_id": qid,
+                "attach_dir": attach_dir,
+                "c_number": c_number,
+                "email_info": email_info,
+                "cad_warning": cad_warning,
+            }
+        )
         quote_ids.append(qid)
-        queue_msg = f"Queued in batch ({len(batch_jobs)} jobs)..."
+
+    if not prepared:
+        return {"launched": False, "error": "No valid C-numbers in batch"}
+
+    batch_id = f"BATCH-{prepared[0]['c_number']}-{int(time.time())}"
+    total = len(prepared)
+
+    # Persist queue so we can start job 2 only after job 1 finishes.
+    _save_batch_queue(
+        batch_id,
+        {
+            "items": prepared,
+            "index": 0,
+            "active_quote_id": prepared[0]["quote_id"],
+            "quote_ids": quote_ids,
+        },
+    )
+
+    for i, prep in enumerate(prepared):
+        qid = prep["quote_id"]
+        c_num = prep["c_number"]
+        cad_warning = prep.get("cad_warning") or ""
+        if i == 0:
+            msg = f"Batch 1/{total}: starting next (force-close SolidWorks, then Module6121)…"
+        else:
+            msg = f"Batch {i + 1}/{total}: waiting in queue — will start after previous job finishes"
         if cad_warning:
-            queue_msg = f"{cad_warning} {queue_msg}"
+            msg = f"{cad_warning} {msg}"
         set_status(
             qid,
             phase="queued",
-            message=queue_msg,
-            c_number=c_number,
-            attach_dir=attach_dir,
+            message=msg,
+            c_number=c_num,
+            job_id=c_num,
+            attach_dir=prep.get("attach_dir") or None,
             batch=True,
-            cad_path=cad_path or None,
+            batch_id=batch_id,
+            batch_count=total,
+            batch_index=i + 1,
+            cad_path=(prep.get("email_info") or {}).get("cad_path") or None,
             warning=cad_warning or None,
             cad_job_mismatch=True if cad_warning else None,
         )
-        jobs.create_job(c_number, display_name=str(info.get("subject", c_number))[:80], customer=str(info.get("cust_job", "")))
-
-    if not batch_jobs:
-        return {"launched": False, "error": "No valid C-numbers in batch"}
-
-    _write_batch_handoff(batch_jobs)
-    EMAIL_OUTPUT_FILE.write_text(
-        "\n".join(
-            [
-                f"Found={len(batch_jobs)}",
-                f"BatchCount={len(batch_jobs)}",
-                f"CNum={','.join(j['CNum'] for j in batch_jobs)}",
-                f"AttachDir={batch_jobs[0].get('AttachDir', '')}",
-                "Error=",
-            ]
+        jobs.create_job(
+            c_num,
+            display_name=str((prep.get("email_info") or {}).get("subject") or c_num)[:80],
+            customer=str((prep.get("email_info") or {}).get("cust_job") or ""),
         )
-        + "\n",
-        encoding="utf-8",
+
+    # Launch ONLY the first job as a normal single quote (no BatchCount handoff).
+    first = prepared[0]
+    _append_quote_log(
+        f"batch {batch_id}: launching job 1/{total} only ({first['c_number']}); "
+        f"{total - 1} waiting in queue"
+    )
+    result = launch_full_quote(
+        first["quote_id"],
+        first.get("attach_dir") or "",
+        email_info=first.get("email_info") or {},
+    )
+    # Preserve batch metadata on the active status.
+    set_status(
+        first["quote_id"],
+        batch=True,
+        batch_id=batch_id,
+        batch_count=total,
+        batch_index=1,
+        message=(
+            f"Batch 1/{total}: {result.get('message') or 'Module6121 running'} "
+            f"({first['c_number']})"
+            if result.get("launched")
+            else f"Batch 1/{total}: launch failed — {result.get('error') or 'unknown'}"
+        ),
     )
 
-    run_dme_price_lookup(wait=False)
-
-    for qid in quote_ids:
-        set_status(qid, phase="launching", message=f"Launching batch of {len(batch_jobs)} quotes...")
-
-    # Always use CMS_Launcher (stages CAD + opens SolidWorks). RunModule6121 alone
-    # was leaving quotes stuck with only "webapp: deployed" and no SW start.
-    launched = False
-    batch_id = f"BATCH-{quote_ids[0]}" if quote_ids else "BATCH"
-    how = ""
-
-    try:
-        proc, how = _start_cms_launcher()
-        if proc is not None:
-            _active_launcher_procs[batch_id] = proc
-            launched = True
-            for qid in quote_ids:
-                set_status(qid, phase="launching", message=f"Started {how}", runner=how)
-        else:
-            # Last resort: RunMacro-only runner (no CAD open).
-            proc2, how2 = _launch_module6121_runner()
-            how = how2
-            if proc2 is not None:
-                _active_launcher_procs[batch_id] = proc2
-                launched = True
-                for qid in quote_ids:
-                    set_status(qid, phase="launching", message=f"Started {how}", runner=how)
-            else:
-                err = how or how2 or "Could not start CMS_Launcher / Module6121 runner"
-                for qid in quote_ids:
-                    set_status(qid, phase="error", message=err)
-                return {"launched": False, "error": err}
-    except Exception as e:
-        for qid in quote_ids:
-            set_status(qid, phase="error", message=str(e))
-        return {"launched": False, "error": str(e)}
-
-    # Brief STARTED peek — do not block the UI for 30s.
-    for _ in range(6):
-        time.sleep(0.25)
-        if MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
-            break
-
-    started = MACRO_STARTED_FILE.exists()
-    for i, qid in enumerate(quote_ids):
-        c_num = batch_jobs[i]["CNum"]
-        set_status(
-            qid,
-            phase="running",
-            message=(
-                f"Batch {i + 1}/{len(batch_jobs)}: Module6121 started ({c_num})"
-                if started and i == 0
-                else f"Batch {i + 1}/{len(batch_jobs)}: queued for Module6121 ({c_num})"
-            ),
-            c_number=c_num,
-            job_id=c_num,
-            batch=True,
-            batch_count=len(batch_jobs),
-            batch_index=i + 1,
-            macro_started=started and i == 0,
-            runner=how,
-        )
+    if not result.get("launched"):
+        # Still try to advance so later jobs are not stranded forever.
+        _schedule_batch_advance(batch_id, first["quote_id"], reason="launch_failed")
 
     return {
-        "launched": launched,
+        "launched": bool(result.get("launched")),
         "batch": True,
-        "batch_count": len(batch_jobs),
+        "sequential": True,
+        "batch_id": batch_id,
+        "batch_count": total,
         "quote_ids": quote_ids,
-        "c_numbers": [j["CNum"] for j in batch_jobs],
+        "c_numbers": [p["c_number"] for p in prepared],
+        "active_quote_id": first["quote_id"],
         "handoff_file": str(HANDOFF_FILE),
-        "macro_started": started,
-        "runner": how,
+        "macro_started": bool(result.get("macro_started")),
+        "runner": result.get("runner"),
+        "error": result.get("error"),
     }
+
+
+def _schedule_batch_advance(batch_id: str, finished_quote_id: str, reason: str = "completed") -> None:
+    """Start the next queued batch job in a background thread (non-blocking)."""
+    if not batch_id:
+        return
+    key = f"{batch_id}:{finished_quote_id}:{reason}"
+    with _batch_advance_lock:
+        if key in _batch_advance_started:
+            return
+        _batch_advance_started.add(key)
+
+    def _run() -> None:
+        try:
+            # Brief pause so macro / SW can finish writing outputs before we kill SW.
+            time.sleep(3)
+            _start_next_batch_job(batch_id, finished_quote_id)
+        except Exception as e:
+            _append_quote_log(f"batch advance error ({batch_id}): {e}")
+
+    threading.Thread(target=_run, daemon=True, name=f"cms-batch-{batch_id}").start()
+
+
+def _start_next_batch_job(batch_id: str, finished_quote_id: str = "") -> dict | None:
+    """Launch the next waiting quote in a batch (one at a time)."""
+    with _batch_advance_lock:
+        queue = _load_batch_queue(batch_id)
+        if not queue:
+            _append_quote_log(f"batch {batch_id}: no queue file — nothing to advance")
+            return None
+        items = list(queue.get("items") or [])
+        if not items:
+            return None
+        # Find finished index, then next non-cancelled item.
+        start_at = int(queue.get("index") or 0)
+        finished_idx = None
+        for i, it in enumerate(items):
+            if str(it.get("quote_id") or "") == str(finished_quote_id or ""):
+                finished_idx = i
+                break
+        if finished_idx is not None:
+            start_at = finished_idx
+
+        next_idx = None
+        next_item = None
+        for i in range(start_at + 1, len(items)):
+            qid = str(items[i].get("quote_id") or "")
+            if is_quote_cancelled(qid):
+                set_status(
+                    qid,
+                    phase="cancelled",
+                    message=f"Batch {i + 1}/{len(items)}: skipped (cancelled)",
+                    batch=True,
+                    batch_id=batch_id,
+                    batch_index=i + 1,
+                    batch_count=len(items),
+                )
+                continue
+            st = get_status(qid) or {}
+            if st.get("phase") in {"completed", "running", "launching", "starting"}:
+                # Already past queued — do not double-launch.
+                if st.get("phase") in {"running", "launching", "starting"}:
+                    _append_quote_log(f"batch {batch_id}: job {i + 1} already active — skip advance")
+                    return None
+                continue
+            next_idx = i
+            next_item = items[i]
+            break
+
+        if next_item is None or next_idx is None:
+            _append_quote_log(f"batch {batch_id}: all jobs finished after {finished_quote_id}")
+            queue["index"] = len(items)
+            queue["active_quote_id"] = ""
+            queue["done"] = True
+            _save_batch_queue(batch_id, queue)
+            return None
+
+        launch_key = f"{batch_id}:launch:{next_idx}"
+        if launch_key in _batch_advance_started:
+            return None
+        _batch_advance_started.add(launch_key)
+
+        queue["index"] = next_idx
+        queue["active_quote_id"] = next_item["quote_id"]
+        _save_batch_queue(batch_id, queue)
+
+    qid = next_item["quote_id"]
+    c_num = next_item.get("c_number") or qid
+    total = len(items)
+    _append_quote_log(
+        f"batch {batch_id}: starting job {next_idx + 1}/{total} ({c_num}) "
+        f"after {finished_quote_id or 'previous'}"
+    )
+    set_status(
+        qid,
+        phase="starting",
+        message=(
+            f"Batch {next_idx + 1}/{total}: force-closing SolidWorks, then starting Module6121 "
+            f"({c_num})…"
+        ),
+        batch=True,
+        batch_id=batch_id,
+        batch_count=total,
+        batch_index=next_idx + 1,
+        c_number=c_num,
+        job_id=c_num,
+    )
+
+    result = launch_full_quote(
+        qid,
+        next_item.get("attach_dir") or "",
+        email_info=next_item.get("email_info") or {},
+    )
+    set_status(
+        qid,
+        batch=True,
+        batch_id=batch_id,
+        batch_count=total,
+        batch_index=next_idx + 1,
+    )
+    if not result.get("launched"):
+        set_status(
+            qid,
+            phase="error",
+            message=f"Batch {next_idx + 1}/{total}: launch failed — {result.get('error') or 'unknown'}",
+        )
+        _schedule_batch_advance(batch_id, qid, reason="launch_failed")
+    return result
+
+
+def _maybe_advance_batch_after_quote(quote_id: str, reason: str = "completed") -> None:
+    """If this quote belongs to a sequential batch, start the next waiting job."""
+    status = get_status(quote_id) or {}
+    batch_id = status.get("batch_id")
+    if not batch_id:
+        # Also match by scanning queue files for this quote_id.
+        _ensure_status_dir()
+        for path in STATUS_DIR.glob("batch_*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if quote_id in (data.get("quote_ids") or []) or quote_id == data.get("active_quote_id"):
+                batch_id = data.get("batch_id") or path.stem.replace("batch_", "", 1)
+                break
+    if not batch_id:
+        return
+    if status.get("batch_advanced"):
+        return
+    try:
+        set_status(quote_id, batch_advanced=True)
+    except Exception:
+        pass
+    _schedule_batch_advance(str(batch_id), quote_id, reason=reason)
 
 
 def _folder_looks_like_bms(folder: Path) -> bool:
@@ -956,6 +1160,8 @@ def sync_completed_job(job_id: str, folder_path: str, base_type: str = "standard
         job_id=job_id,
         folder_path=str(folder),
     )
+    # Start the next one-at-a-time batch job (force-closes SW before launch).
+    _maybe_advance_batch_after_quote(job_id, reason="completed")
     return job
 
 
@@ -1007,13 +1213,20 @@ def cancel_quote(quote_id: str) -> dict:
         pass
 
     current = get_status(quote_id) or {"quote_id": quote_id}
+    batch_id = current.get("batch_id")
+    was_active = (current.get("phase") or "") in {"starting", "launching", "running"}
     set_status(
         quote_id,
         phase="cancelled",
         message="Quote cancelled by user",
         job_id=current.get("job_id") or quote_id,
         dismissed=True,
+        batch_advanced=True,
     )
+    # Only advance the queue when the *active* job was cancelled — not when a
+    # waiting sibling is dismissed (that would double-launch while SW is busy).
+    if batch_id and was_active:
+        _schedule_batch_advance(str(batch_id), quote_id, reason="cancelled")
     return get_status(quote_id) or {"phase": "cancelled", "quote_id": quote_id}
 
 
@@ -1200,6 +1413,9 @@ def _collect_launch_diagnostics(status: dict) -> dict:
 
     # Human-readable stuck reason (current launch only — ignore old log noise)
     phase = (status.get("phase") or "").lower()
+    # Waiting siblings in a sequential batch are not stuck — they have not launched yet.
+    if phase == "queued" and status.get("batch"):
+        return diag
     last_log = log_lines[-1] if log_lines else ""
     if error_txt:
         err_low = error_txt.lower()
@@ -1310,6 +1526,7 @@ def poll_completion(quote_id: str) -> dict:
                 )
             except Exception:
                 pass
+            _maybe_advance_batch_after_quote(quote_id, reason="error")
 
     local = find_local_job_folder(job_id)
     if local:

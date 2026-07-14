@@ -137,7 +137,7 @@ export default function EmailPage() {
           const subj = messages?.find((m) => m.id === mid)?.subject || qid;
           startQuote(qid, subj, {
             phase: "running",
-            message: `Batch ${i + 1}/${qids.length} — sequential SolidWorks quotes`,
+            message: `Batch ${i + 1}/${qids.length} — one job at a time (SolidWorks restarts between)`,
             job_id: result.c_numbers?.[i] || qid,
           });
         });

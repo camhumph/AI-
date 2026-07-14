@@ -1213,6 +1213,20 @@ Function FindBestCadInFolders(jobFolder, attachDir)
     If sb > sa Then FindBestCadInFolders = b Else FindBestCadInFolders = a
 End Function
 
+' Force-close every SolidWorks process so the next quote gets a clean COM session.
+Sub KillSolidWorksProcesses()
+    Dim shell
+    Set shell = CreateObject("WScript.Shell")
+    LogStep "force-closing any running SolidWorks before quote..."
+    On Error Resume Next
+    shell.Run "taskkill /F /IM SLDWORKS.exe /T", 0, True
+    shell.Run "taskkill /F /IM sldworks.exe /T", 0, True
+    shell.Run "taskkill /F /IM SLDWORKS_FCE.exe /T", 0, True
+    On Error GoTo 0
+    WScript.Sleep 5000
+    LogStep "SolidWorks force-close done — starting a fresh session"
+End Sub
+
 ' Open SolidWorks 2023 → open the CAD part/assembly → THEN run Module6121.swp.
 ' This matches how you work manually and avoids the empty welcome-screen hang.
 Function LaunchSolidWorksOpenCadThenMacro()
@@ -1239,9 +1253,13 @@ Function LaunchSolidWorksOpenCadThenMacro()
 
     LogStep "sw exe: " & SW_EXE & "  progid: " & SW_PROGID
 
+    ' Always start from a clean SolidWorks process. Reusing an open session
+    ' (especially after a stuck/batch quote) leaves the webapp waiting forever.
+    KillSolidWorksProcesses
+
     On Error Resume Next
-    Set sw = GetObject(, SW_PROGID)
-    If sw Is Nothing Then Set sw = CreateObject(SW_PROGID)
+    Set sw = Nothing
+    Set sw = CreateObject(SW_PROGID)
     On Error GoTo 0
 
     If sw Is Nothing Then
@@ -1265,7 +1283,7 @@ Function LaunchSolidWorksOpenCadThenMacro()
         End If
         LogStep "connected to SolidWorks 2023"
     Else
-        LogStep "using existing SolidWorks 2023 session"
+        LogStep "created fresh SolidWorks 2023 session"
     End If
 
     On Error Resume Next
