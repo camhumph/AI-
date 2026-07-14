@@ -68,6 +68,12 @@ Private Const MAX_SANE_MOLD_DIM_IN As Double = 120#    ' mold parts rarely excee
 ' --- Deliverable safety ---
 Private Const CREATE_FULL_ASSEMBLY_STL As Boolean = True
 
+' Debug toggles for finding slow export step.
+' Leave all False for normal production.
+Private Const DEBUG_SKIP_STL_EXPORT As Boolean = False
+Private Const DEBUG_SKIP_ISO_JPEGS As Boolean = False
+Private Const DEBUG_SKIP_DXF_EXPORT As Boolean = False
+
 ' For BMS / holder-pot jobs, STL should contain ONLY the quoted base components:
 ' TCP, BCP, ID Holder, OD Holder, ID Pot, OD Pot.
 ' It excludes purchased hardware, pins, bushings, straps, insulation, etc.
@@ -451,6 +457,7 @@ Private gRootJobPath As String          ' resolved month folder (from handoff or
 Private gExactJobFolderName As String    ' exact folder name from launcher handoff (avoids fuzzy match)
 Private gHandoffAttachDir As String      ' email attachment folder when network job folder is missing
 Private gHandoffCadPath As String        ' preferred CAD path from batch/single handoff
+Private gSourceCadPath As String         ' original customer CAD opened for this job (for XT copy)
 Private gDiagBomPath As String           ' BOM file the macro used (for the end-of-run popup)
 Private gEmailStatus As String           ' result of the proposal email step
 Private gLastJobDiag As String           ' summary of BOM/components/email for the popup
@@ -713,6 +720,8 @@ On Error GoTo ErrHandler
     modelTitle = swModel.GetTitle
     On Error GoTo ErrHandler
     If modelTitle = "" Then modelTitle = "ActiveCad"
+    gSourceCadPath = modelPath
+    LogLine "SOURCE CAD PATH: " & gSourceCadPath
 
     ' Do not quote from a previously exported base assembly.
     ' Those files live in \base\ and can have moved/broken component references,
@@ -1884,10 +1893,38 @@ On Error GoTo ErrHandler
     extractFolder = CurrentJobFolder & "\" & EXTRACT_FOLDER_NAME
 
     LogStart "Extract ZIP files"
-    EnsureFolderDeep extractFolder
-    ExtractAllZipFilesInJobFolder CurrentJobFolder, extractFolder
-    FlattenExtractedZipContentsIntoJobFolder CurrentJobFolder, extractFolder
-    If DELETE_EXTRACTED_ZIP_AFTER_FLATTEN Then DeleteFolderSafe extractFolder
+
+    Dim zipMarker As String
+    zipMarker = CurrentJobFolder & "\cms_zip_extract_done.txt"
+
+    If gHandoffCadPath <> "" And fsoJ.FileExists(gHandoffCadPath) Then
+
+        LogLine "FAST: skipping ZIP extraction because handoff CadPath already exists:"
+        LogLine "  " & gHandoffCadPath
+
+    ElseIf fsoJ.FileExists(zipMarker) Then
+
+        LogLine "FAST: skipping ZIP extraction because marker exists:"
+        LogLine "  " & zipMarker
+
+    Else
+
+        EnsureFolderDeep extractFolder
+        ExtractAllZipFilesInJobFolder CurrentJobFolder, extractFolder
+        FlattenExtractedZipContentsIntoJobFolder CurrentJobFolder, extractFolder
+        If DELETE_EXTRACTED_ZIP_AFTER_FLATTEN Then DeleteFolderSafe extractFolder
+
+        On Error Resume Next
+        Dim zf As Integer
+        zf = FreeFile
+        Open zipMarker For Output As #zf
+        Print #zf, "Extracted=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+        Print #zf, "Folder=" & CurrentJobFolder
+        Close #zf
+        On Error GoTo ErrHandler
+
+    End If
+
     LogDone "Extract ZIP files"
 
     LogStart "Find CAD file"
@@ -1937,6 +1974,10 @@ On Error GoTo ErrHandler
     MainCadOpenedByMacro = True
     MainCadTitleForClose = swModel.GetTitle
 
+    ' Remember the original customer CAD file.
+    ' If it is already an X_T, we will copy it instead of re-exporting it.
+    gSourceCadPath = cadPath
+
     ' Use the customer/job folder name as the output base name.
     ' Examples:
     '   BMS-851100048-C18607
@@ -1944,6 +1985,7 @@ On Error GoTo ErrHandler
     '   Glenwood-10593-J8481-Final-7-10-26
     JobBaseName = ResolveOutputBaseNameFromFolder(cadPath)
     LogLine "OUTPUT BASE FILE NAME FROM FOLDER: " & JobBaseName
+    LogLine "SOURCE CAD PATH: " & gSourceCadPath
 
     LogDone "Open CAD"
 
@@ -4008,14 +4050,24 @@ End Sub
 
 Private Sub SaveModelAs(ByVal model As Object, ByVal fullPath As String)
 On Error GoTo ErrHandler
+
     Dim errs As Long
     Dim warns As Long
+
     LogLine "Saving: " & fullPath
+    WriteMacroLaunchStatus "STARTED", "Saving: " & fullPath
+
     model.Extension.SaveAs3 fullPath, swSaveAsCurrentVersion, swSaveAsOptions_Silent, Nothing, Nothing, errs, warns
-    LogLine "Save done. Errors=" & errs & " Warnings=" & warns
+
+    LogLine "Save done. Errors=" & errs & " Warnings=" & warns & " Path=" & fullPath
+    LogFileExistsAndSize "SAVED FILE", fullPath
+    WriteMacroLaunchStatus "STARTED", "Save done: " & fullPath & " Errors=" & errs & " Warnings=" & warns
+
     Exit Sub
+
 ErrHandler:
-    LogLine "SaveModelAs error: " & Err.Description
+    LogLine "SaveModelAs error: " & Err.Description & " Path=" & fullPath
+    WriteMacroLaunchStatus "ERROR", "SaveModelAs error: " & Err.Description & " Path=" & fullPath
 End Sub
 
 Private Function SaveModelCopyAs(ByVal model As Object, ByVal fullPath As String) As Boolean
@@ -4356,14 +4408,25 @@ On Error GoTo ErrHandler
 
     ' Native SolidWorks copy first (DXF needs the .sldasm path).
     SaveModelAs swModel, sldPath
-    SaveModelAs swModel, xtPath
+
+    ' Big speed fix:
+    ' If the customer already sent an X_T, do NOT re-export it from SolidWorks.
+    ' Just copy/rename the original X_T to the job-folder output name.
+    If Not CopyOriginalXtToOutput(xtPath) Then
+        LogLine "Original source was not reusable X_T; exporting X_T through SolidWorks SaveAs."
+        SaveModelAs swModel, xtPath
+    End If
 
     ' ============================================================
     ' STL FIRST:
     ' Export ONE merged STL containing only quoted/steel components.
     ' This avoids SolidWorks component STL shards in the job folder.
     ' ============================================================
-    If CREATE_FULL_ASSEMBLY_STL Then
+    If DEBUG_SKIP_STL_EXPORT Then
+
+        LogLine "DEBUG: skipped STL export."
+
+    ElseIf CREATE_FULL_ASSEMBLY_STL Then
 
         Dim stlCreated As Boolean
         stlCreated = False
@@ -4438,7 +4501,11 @@ On Error GoTo ErrHandler
         LogLine "FAST QUOTE: skipped STL."
 
     End If
-    If CREATE_ISO_JPEGS Then
+    If DEBUG_SKIP_ISO_JPEGS Then
+
+        LogLine "DEBUG: skipped ISO JPG exports."
+
+    ElseIf CREATE_ISO_JPEGS Then
         If gJobIsStandardBase Then
             ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
             LogLine "ISO JPGs written to job folder (STANDARD full assembly — no Pyropel isolation)"
@@ -4448,7 +4515,11 @@ On Error GoTo ErrHandler
         End If
     End If
 
-    If EXPORT_BASE_DXF Then
+    If DEBUG_SKIP_DXF_EXPORT Then
+
+        LogLine "DEBUG: skipped DXF export."
+
+    ElseIf EXPORT_BASE_DXF Then
         If gJobIsStandardBase Then
             LogLine "STANDARD BASE DXF: full assembly (no Pyropel isolation / no pot-block keep-list)"
             CreateProjectedDxfFromNativePath sldPath, dxfPath, "BASE", CMS_TOP_VIEW_NAME, "*Top", False, True
@@ -7588,6 +7659,52 @@ On Error Resume Next
     End If
 End Function
 
+Private Function CopyOriginalXtToOutput(ByVal destXtPath As String) As Boolean
+On Error GoTo ErrHandler
+
+    CopyOriginalXtToOutput = False
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Trim$(gSourceCadPath) = "" Then Exit Function
+    If Trim$(destXtPath) = "" Then Exit Function
+
+    If Not fso.FileExists(gSourceCadPath) Then Exit Function
+
+    Dim ext As String
+    ext = LCase$(fso.GetExtensionName(gSourceCadPath))
+
+    ' Only copy true Parasolid text files.
+    ' Do not copy STEP/IGES and rename them as .x_t.
+    If ext <> "x_t" Then Exit Function
+
+    If LCase$(gSourceCadPath) = LCase$(destXtPath) Then
+        LogLine "Original X_T already has target name: " & destXtPath
+        CopyOriginalXtToOutput = True
+        Exit Function
+    End If
+
+    LogLine "Copying original customer X_T instead of re-exporting from SolidWorks:"
+    LogLine "  FROM: " & gSourceCadPath
+    LogLine "  TO:   " & destXtPath
+
+    fso.CopyFile gSourceCadPath, destXtPath, True
+
+    If fso.FileExists(destXtPath) Then
+        LogFileExistsAndSize "COPIED ORIGINAL X_T", destXtPath
+        CopyOriginalXtToOutput = True
+    Else
+        LogLine "WARNING: original X_T copy failed; will fall back to SolidWorks SaveAs."
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "CopyOriginalXtToOutput error: " & Err.Description
+    CopyOriginalXtToOutput = False
+End Function
+
 Private Function ResolveOutputBaseNameFromFolder(Optional ByVal sourceCadPath As String = "") As String
 On Error GoTo ErrHandler
 
@@ -7784,25 +7901,50 @@ End Sub
 
 Private Sub LogLine(ByVal msg As String)
 On Error Resume Next
+
+    Dim line As String
+    line = Format(Now, "yyyy-mm-dd hh:nn:ss") & "  " & msg
+
     Dim f As Integer
-    f = FreeFile
     Dim path As String
+
+    ' Normal macro log
     path = RunLogPath
     If path = "" Then path = StartupLogPath
     If path = "" Then path = Environ$("USERPROFILE") & "\Desktop\CMS_Base_Export_STARTUP_Log.txt"
+
+    f = FreeFile
     Open path For Append As #f
-    Print #f, Format(Now, "yyyy-mm-dd hh:nn:ss") & "  " & msg
+    Print #f, line
     Close #f
+
+    ' Always-on live troubleshooting log
+    EnsureFolderDeep LOCAL_WORKSPACE_ROOT
+    f = FreeFile
+    Open LOCAL_WORKSPACE_ROOT & "\CMS_Module6121_Live_Log.txt" For Append As #f
+    Print #f, line
+    Close #f
+
+    ' Also mirror to current job folder if available
+    If CurrentJobFolder <> "" Then
+        f = FreeFile
+        Open CurrentJobFolder & "\CMS_Module6121_Live_Log.txt" For Append As #f
+        Print #f, line
+        Close #f
+    End If
 End Sub
 
 Private Sub LogStart(ByVal stepName As String)
     CurrentStepName = stepName
     StepStartTime = Now
+
     LogLine ">>> START: " & stepName
+    WriteMacroLaunchStatus "STARTED", "STEP START: " & stepName
 End Sub
 
 Private Sub LogDone(ByVal stepName As String)
     LogLine "<<< DONE : " & stepName & " (" & DateDiff("s", StepStartTime, Now) & "s)"
+    WriteMacroLaunchStatus "STARTED", "STEP DONE: " & stepName
 End Sub
 
 Private Sub LogErrorText(ByVal msg As String)
