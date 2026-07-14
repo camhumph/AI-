@@ -1159,14 +1159,20 @@ def _collect_launch_diagnostics(status: dict) -> dict:
                 )
             elif "did not start" in low or "could not connect" in low:
                 diag["stuck_reason"] = "SolidWorks did not start or connect. Check CMS_SOLIDWORKS_EXE / SW 2023 install."
-            elif "opendoc/loadfile failed" in low and "macro acknowledged started" not in low and "running macro with retry" not in low:
-                diag["stuck_reason"] = "SolidWorks could not open the CAD/XT. Check CadPath in cms_handoff.txt."
-            elif "opendoc/loadfile failed" in low and "running macro with retry" in low:
-                # Network OpenDoc often fails; launcher continues and macro opens local CAD.
-                diag["stuck_reason"] = (
-                    "Waiting for macro STARTED after OpenDoc warning (network CAD often fails; "
-                    "macro should open the staged local copy)."
-                )
+            elif "opendoc/loadfile failed" in low or "opendoc/loadfile returned nothing" in low:
+                # Pre-open is best-effort; Module6121 opens CadPath from handoff.
+                if "macro acknowledged started" in low:
+                    pass
+                elif "running macro with retry" in low:
+                    diag["stuck_reason"] = (
+                        "Waiting for macro STARTED (launcher OpenDoc was best-effort; "
+                        "macro opens CadPath from handoff)."
+                    )
+                else:
+                    diag["stuck_reason"] = (
+                        "Waiting for macro after CAD pre-open warning. "
+                        "CadPath is in cms_handoff.txt — macro should open it next."
+                    )
             elif "no cad" in low or "cad: (none)" in low or "cad=no" in low:
                 diag["stuck_reason"] = (
                     "No CAD/XT found before macro run (often still inside a ZIP). "
