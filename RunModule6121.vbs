@@ -116,7 +116,7 @@ arr = Split(pairList, "|")
 
 For pi = 0 To UBound(arr)
     parts = Split(arr(pi), Chr(1))
-    If UBound(parts) < 1 Then GoTo NextPair
+    If UBound(parts) >= 1 Then
     moduleName = parts(0)
     procName = parts(1)
 
@@ -152,7 +152,7 @@ For pi = 0 To UBound(arr)
         LogLine RUNNER_TAG & ": SUCCESS via COM module=" & moduleName & " proc=" & procName
         WScript.Quit 0
     End If
-NextPair:
+    End If
 Next
 
 ' Fallback: command line /m

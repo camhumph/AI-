@@ -618,18 +618,18 @@ Function SampleFolderFiles(ByVal folderPath)
         If n >= 6 Then Exit For
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
-        If UCase(sub1.Name) = "BASE" Then GoTo NextSampleSub
-        If n > 0 Then parts = parts & ", "
-        parts = parts & "[" & sub1.Name & "/"
-        For Each f2 In sub1.Files
-            parts = parts & f2.Name & " "
+        If UCase(sub1.Name) <> "BASE" Then
+            If n > 0 Then parts = parts & ", "
+            parts = parts & "[" & sub1.Name & "/"
+            For Each f2 In sub1.Files
+                parts = parts & f2.Name & " "
+                n = n + 1
+                If n >= 10 Then Exit For
+            Next
+            parts = parts & "]"
             n = n + 1
             If n >= 10 Then Exit For
-        Next
-        parts = parts & "]"
-        n = n + 1
-        If n >= 10 Then Exit For
-NextSampleSub:
+        End If
     Next
     If parts = "" Then parts = "(empty)"
     SampleFolderFiles = parts
@@ -1203,7 +1203,7 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
 
         For pi = 0 To UBound(pairArr)
             pairParts = Split(pairArr(pi), Chr(1))
-            If UBound(pairParts) < 1 Then GoTo NextPair
+            If UBound(pairParts) >= 1 Then
             moduleName = pairParts(0)
             procName = pairParts(1)
             runOk = False
@@ -1248,7 +1248,7 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
                 If Timer < waitStart Then Exit Do
                 If Timer - waitStart >= 8 Then Exit Do
             Loop
-NextPair:
+            End If
         Next
 
         WaitSeconds 2
