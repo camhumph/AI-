@@ -16,6 +16,7 @@
 ' ============================================================
 
 Const DOWNLOADS_FOLDER       = "C:\Users\lenovo\Downloads"
+Const CUSTOMER_DOWNLOADS_ROOT = "\\Mycloudex2ultra\mexico\Downloads"
 Const LOCAL_WORKSPACE_ROOT   = "C:\CMS_Local_Workspace"
 Const QUOTE_PROPOSALS_FOLDER = "\\Mycloudex2ultra\mexico\Cameron's stuff\RON'S QUOTES\Quote-Proposals-2026"
 Const JOB_ROOT_BASE          = "\\Mycloudex2ultra\mexico\Cameron's stuff\RON'S QUOTES"   ' Ron-only month folders live here
@@ -145,6 +146,25 @@ Else
     LogStep "no existing C-number found — assigned new quote: " & quoteNum
 End If
 
+' Force the source files to come from the customer Downloads archive folder.
+' Example:
+' \\Mycloudex2ultra\mexico\Downloads\000000007. July-2026\BMS-851100038-C18605
+Dim customerSourceFolder
+customerSourceFolder = FindCustomerDownloadJobFolder(custJobNum, cNum)
+
+If customerSourceFolder <> "" Then
+    gAttachDir = customerSourceFolder
+
+    ' Do not trust any stale local/webapp CAD path.
+    ' We will restage from the authoritative customer folder.
+    gLocalJobFolder = ""
+    gEmailCadPath = ""
+
+    LogStep "using customer Downloads source folder: " & gAttachDir
+Else
+    LogStep "WARNING: customer Downloads source folder not found for CustJob=" & custJobNum & " CNum=" & cNum
+End If
+
 ' 5. Create the job folder in the current month folder and drop the
 '    downloaded CAD/BOM files (from the email) into it.
 Dim monthFolder, jobFolderName, jobFolderPath
@@ -163,40 +183,45 @@ If jobFolderPath = "" Then
     End If
 End If
 
-' 5b. Pull job/attach files into C:\CMS_Local_Workspace\C##### and open XT from there.
+' 5b. Pull customer files into C:\CMS_Local_Workspace\C#####.
+' If we found the official customer Downloads folder, force restage from there.
 Dim localStagePath
 localStagePath = ""
-If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
-    If FindBestXtInFolder(gLocalJobFolder) <> "" Or FindBestCadInFolder(gLocalJobFolder) <> "" Then
-        localStagePath = gLocalJobFolder
-        LogStep "using webapp-staged local folder: " & localStagePath
-    Else
-        LogStep "webapp local folder empty of CAD — restaging from job/attach"
+
+If customerSourceFolder <> "" Then
+    LogStep "force-restaging from customer source folder: " & customerSourceFolder
+
+    ' Important: pass blank jobFolderPath here so stale Ron quote folder files cannot affect XT selection.
+    localStagePath = StageJobToLocalWorkspace(cNum, "", customerSourceFolder)
+Else
+    If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
+        If FindBestXtInFolder(gLocalJobFolder) <> "" Then
+            localStagePath = gLocalJobFolder
+            LogStep "using webapp-staged local folder: " & localStagePath
+        Else
+            LogStep "webapp local folder has no XT — restaging from job/attach"
+        End If
+    End If
+
+    If localStagePath = "" Then
+        localStagePath = StageJobToLocalWorkspace(cNum, jobFolderPath, gAttachDir)
     End If
 End If
-If localStagePath = "" Then
-    localStagePath = StageJobToLocalWorkspace(cNum, jobFolderPath, gAttachDir)
-End If
+
 If localStagePath <> "" Then
     gLocalJobFolder = localStagePath
     LogStep "local CMS workspace ready: " & gLocalJobFolder
+Else
+    LogStep "ERROR: could not stage customer files into local workspace for " & cNum
 End If
 
-' 6. Find the XT file and use that. Keep it simple.
+' 6. Find the XT in the staged local folder (after unzip), then open it.
 gCadPath = ""
-If gEmailCadPath <> "" Then
-    If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
-        If gLocalJobFolder <> "" Then
-            gCadPath = FindLocalCopyOfFile(gLocalJobFolder, gEmailCadPath)
-        End If
-        If gCadPath = "" Then gCadPath = gEmailCadPath
-    End If
-End If
-If gCadPath = "" And gLocalJobFolder <> "" Then
+If gLocalJobFolder <> "" Then
     gCadPath = FindBestXtInFolder(gLocalJobFolder)
 End If
-If gCadPath = "" Then
-    gCadPath = FindBestXtInFolders(gAttachDir, jobFolderPath)
+If gCadPath = "" And gAttachDir <> "" Then
+    gCadPath = FindBestXtInFolder(gAttachDir)
 End If
 If gCadPath <> "" Then
     If IsGeneratedBaseCadPath(gCadPath) Then
@@ -213,8 +238,8 @@ If gCadPath <> "" Then
     End If
     LogStep "XT to open: " & gCadPath
 Else
-    LogStep "WARNING: no XT found in local/job/attach folders"
-    LogStep "XT search paths: local=" & gLocalJobFolder & " job=" & jobFolderPath & " attach=" & gAttachDir
+    LogStep "WARNING: no XT found after staging/unzip"
+    LogStep "XT search paths: local=" & gLocalJobFolder & " attach=" & gAttachDir
     If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
         LogStep "local folder sample: " & SampleFolderFiles(gLocalJobFolder)
     End If
@@ -1048,47 +1073,83 @@ Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
     If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
 End Function
 
-' Unzip *.zip into the same folder (Shell.NameSpace). Non-fatal on failure.
+' Unzip *.zip recursively (Shell.NameSpace). Non-fatal on failure.
 Sub ExtractZipsInFolder(ByVal folderPath)
     On Error Resume Next
+
     If folderPath = "" Then Exit Sub
     If Not fso.FolderExists(folderPath) Then Exit Sub
-    Dim sh, f, zipPath, destNs, zipNs, n
+
+    Dim sh, n
     Set sh = CreateObject("Shell.Application")
+
+    n = ExtractZipsRecursive(folderPath, sh, 0)
+
+    If n > 0 Then
+        LogStep "zip extract count=" & n
+        WScript.Sleep 2500
+    Else
+        LogStep "no zip files needed extraction in: " & folderPath
+    End If
+
+    On Error GoTo 0
+End Sub
+
+Function ExtractZipsRecursive(ByVal folderPath, ByVal sh, ByVal depth)
+    ExtractZipsRecursive = 0
+
+    On Error Resume Next
+
+    If depth > 8 Then Exit Function
+    If folderPath = "" Then Exit Function
+    If Not fso.FolderExists(folderPath) Then Exit Function
+    If UCase(fso.GetFileName(folderPath)) = "BASE" Then Exit Function
+
+    Dim folder, f, sub1, zipNs, destNs, marker, ts, n
     n = 0
-    For Each f In fso.GetFolder(folderPath).Files
+
+    Set folder = fso.GetFolder(folderPath)
+
+    ' Extract ZIPs in this folder.
+    For Each f In folder.Files
         If LCase(fso.GetExtensionName(f.Name)) = "zip" Then
-            zipPath = f.Path
-            Set zipNs = sh.NameSpace(zipPath)
-            Set destNs = sh.NameSpace(folderPath)
-            If Not zipNs Is Nothing And Not destNs Is Nothing Then
-                destNs.CopyHere zipNs.Items, 16+4+512   ' NoUI + YesToAll + NoProgressUI
-                n = n + 1
-                LogStep "extracted zip for CAD search: " & f.Name
-                WScript.Sleep 1500
+            marker = f.Path & ".cms_unzipped"
+
+            If Not fso.FileExists(marker) Then
+                Set zipNs = sh.NameSpace(f.Path)
+                Set destNs = sh.NameSpace(folderPath)
+
+                If Not zipNs Is Nothing And Not destNs Is Nothing Then
+                    LogStep "extracting zip: " & f.Path
+
+                    ' 16 = YesToAll, 4 = NoProgressDialog, 512 = NoConfirmMakeDir
+                    destNs.CopyHere zipNs.Items, 16 + 4 + 512
+
+                    WScript.Sleep 2000
+
+                    Set ts = fso.CreateTextFile(marker, True)
+                    ts.WriteLine Now & " extracted"
+                    ts.Close
+
+                    n = n + 1
+                Else
+                    LogStep "WARNING: Shell.NameSpace could not open zip: " & f.Path
+                End If
             End If
         End If
     Next
-    ' One level of subfolders (common: CAD.zip dropped in a nested attach folder)
-    Dim sub1, f2
-    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+
+    ' Recurse into subfolders, including folders that were just extracted.
+    For Each sub1 In folder.SubFolders
         If UCase(sub1.Name) <> "BASE" Then
-            For Each f2 In sub1.Files
-                If LCase(fso.GetExtensionName(f2.Name)) = "zip" Then
-                    Set zipNs = sh.NameSpace(f2.Path)
-                    Set destNs = sh.NameSpace(sub1.Path)
-                    If Not zipNs Is Nothing And Not destNs Is Nothing Then
-                        destNs.CopyHere zipNs.Items, 16+4+512
-                        n = n + 1
-                        LogStep "extracted nested zip for CAD search: " & sub1.Name & "\" & f2.Name
-                        WScript.Sleep 1500
-                    End If
-                End If
-            Next
+            n = n + ExtractZipsRecursive(sub1.Path, sh, depth + 1)
         End If
     Next
-    If n > 0 Then LogStep "zip extract count=" & n
-End Sub
+
+    ExtractZipsRecursive = n
+
+    On Error GoTo 0
+End Function
 
 Function FindBestCadInFolder(folderPath)
     FindBestCadInFolder = ""
@@ -1273,15 +1334,15 @@ Function LaunchSolidWorksOpenCadThenMacro()
     LaunchSolidWorksOpenCadThenMacro = ran
 End Function
 
-' Try GetMacroMethods entry points first, then common names.
+' Try known Module61211/Module6121 entry points first.
 ' NEVER set CommandInProgress=True before RunMacro.
+' Skip GetMacroMethods — it can hang SolidWorks COM with no further log lines.
 ' If COM still fails, fall back to SLDWORKS.EXE /m "macro.swp".
 Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
     RunMacroWithRetry = False
 
     Dim startTime, attempt, runOk, runErr, waitStart
     Dim pairs, pi, moduleName, procName, vbaErr
-    Dim methods, mi, parts, entry
     Dim shell
 
     On Error Resume Next
@@ -1293,33 +1354,13 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
     End If
     On Error GoTo 0
 
-    ' Build (module, proc) list from the .swp itself.
-    pairs = ""
-    On Error Resume Next
-    methods = swApp.GetMacroMethods(macroPath, 1)  ' without args
-    If IsEmpty(methods) Or IsNull(methods) Then methods = swApp.GetMacroMethods(macroPath, 0)
-    On Error GoTo 0
-    If IsArray(methods) Then
-        For mi = 0 To UBound(methods)
-            entry = CStr(methods(mi))
-            LogStep "GetMacroMethods entry: " & entry
-            parts = Split(entry, ".")
-            If UBound(parts) >= 1 Then
-                If pairs <> "" Then pairs = pairs & "|"
-                pairs = pairs & parts(0) & Chr(1) & parts(1)
-            End If
-        Next
-    Else
-        LogStep "GetMacroMethods returned no entry points — .swp may be corrupt/stale or macros disabled"
-    End If
-
-    ' Always append preferred guesses after discovered names.
-    If pairs <> "" Then pairs = pairs & "|"
-    pairs = pairs & "Module61211" & Chr(1) & "main" & "|" & _
+    ' Known entry points only (avoid GetMacroMethods hang).
+    pairs = "Module61211" & Chr(1) & "main" & "|" & _
             "Module61211" & Chr(1) & "RunFromLauncher" & "|" & _
             "Module6121" & Chr(1) & "main" & "|" & _
             "Module6121" & Chr(1) & "RunFromLauncher" & "|" & _
             "Module1" & Chr(1) & "main"
+    LogStep "RunMacro using known entry points (skipped GetMacroMethods)"
 
     Dim pairArr, pairParts
     pairArr = Split(pairs, "|")
@@ -1643,6 +1684,98 @@ Function MonthFolderName(d)
     m = Month(d)
     y = Year(d)
     MonthFolderName = Right("00000000" & m, 9) & "." & MonthName(m) & " " & y
+End Function
+
+Function DownloadsMonthFolderName(ByVal d)
+    ' Example: 000000007. July-2026
+    DownloadsMonthFolderName = Right("00000000" & Month(d), 9) & ". " & MonthName(Month(d)) & "-" & Year(d)
+End Function
+
+Function NormalizeCFolder(ByVal s)
+    s = UCase(Trim(CStr(s)))
+    s = Replace(s, "-", "")
+
+    If s = "" Then
+        NormalizeCFolder = ""
+        Exit Function
+    End If
+
+    If Left(s, 1) = "C" Then
+        NormalizeCFolder = s
+    Else
+        NormalizeCFolder = "C" & ExtractDigits(s)
+    End If
+End Function
+
+Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
+    FindCustomerDownloadJobFolder = ""
+
+    On Error Resume Next
+
+    Dim cTok, jobTok
+    cTok = NormalizeCFolder(cLocal)
+    jobTok = CleanFolderToken(custJob)
+
+    If jobTok = "" Or cTok = "" Then Exit Function
+    If Not fso.FolderExists(CUSTOMER_DOWNLOADS_ROOT) Then
+        LogStep "customer Downloads root not found: " & CUSTOMER_DOWNLOADS_ROOT
+        Exit Function
+    End If
+
+    Dim monthPath, candidate, prefixes, i, p, expected
+    monthPath = CUSTOMER_DOWNLOADS_ROOT & "\" & DownloadsMonthFolderName(Date)
+
+    ' Fast exact check first:
+    ' \\Mycloudex2ultra\mexico\Downloads\000000007. July-2026\BMS-851100038-C18605
+    prefixes = Array(gCustomerPrefix, "BMS", "")
+
+    If fso.FolderExists(monthPath) Then
+        For i = 0 To UBound(prefixes)
+            p = CleanFolderToken(prefixes(i))
+
+            If p <> "" Then
+                expected = p & "-" & jobTok & "-" & cTok
+            Else
+                expected = jobTok & "-" & cTok
+            End If
+
+            candidate = monthPath & "\" & expected
+
+            If fso.FolderExists(candidate) Then
+                FindCustomerDownloadJobFolder = candidate
+                On Error GoTo 0
+                Exit Function
+            End If
+        Next
+    Else
+        LogStep "current customer Downloads month folder not found: " & monthPath
+    End If
+
+    ' Fallback: search all month folders one level deep.
+    Dim root, mon, sub1, u, best
+    best = ""
+
+    Set root = fso.GetFolder(CUSTOMER_DOWNLOADS_ROOT)
+
+    For Each mon In root.SubFolders
+        For Each sub1 In mon.SubFolders
+            u = UCase(sub1.Name)
+
+            If InStr(u, UCase(jobTok)) > 0 And InStr(u, UCase(cTok)) > 0 Then
+                If InStr(u, "BMS-") > 0 Then
+                    FindCustomerDownloadJobFolder = sub1.Path
+                    On Error GoTo 0
+                    Exit Function
+                End If
+
+                If best = "" Then best = sub1.Path
+            End If
+        Next
+    Next
+
+    If best <> "" Then FindCustomerDownloadJobFolder = best
+
+    On Error GoTo 0
 End Function
 
 ' Create  <monthFolder>\<jobName>\  and copy the downloaded email files into it.
