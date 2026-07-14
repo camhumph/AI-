@@ -29,6 +29,7 @@ MACRO_STATUS_FILE = LOCAL_WORKSPACE / "cms_macro_status.txt"
 MACRO_STARTED_FILE = LOCAL_WORKSPACE / "cms_macro_started.txt"
 MACRO_DONE_FILE = LOCAL_WORKSPACE / "cms_macro_done.txt"
 MACRO_ERROR_FILE = LOCAL_WORKSPACE / "cms_macro_error.txt"
+LAUNCHER_STATUS_FILE = LOCAL_WORKSPACE / "cms_launcher_status.txt"
 STATUS_DIR = config.DATA_DIR / "quote_status"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -45,8 +46,46 @@ def _delete_if_exists(path: Path) -> None:
 
 
 def _clear_macro_launch_status_files() -> None:
-    for p in (MACRO_STATUS_FILE, MACRO_STARTED_FILE, MACRO_DONE_FILE, MACRO_ERROR_FILE):
+    for p in (
+        MACRO_STATUS_FILE,
+        MACRO_STARTED_FILE,
+        MACRO_DONE_FILE,
+        MACRO_ERROR_FILE,
+        LAUNCHER_STATUS_FILE,
+        CANCEL_FILE,
+    ):
         _delete_if_exists(p)
+
+
+def _append_quote_log(message: str) -> None:
+    """Append a webapp line to CMS_Quote_Log.txt and refresh launcher status."""
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] webapp: {message}"
+    try:
+        LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
+        with (LOCAL_WORKSPACE / "CMS_Quote_Log.txt").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        LAUNCHER_STATUS_FILE.write_text(line + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _popen_wscript(*args: str) -> subprocess.Popen:
+    """Start wscript so SolidWorks UI can appear on the shop desktop."""
+    cmd = ["wscript", "//nologo", *[str(a) for a in args]]
+    kwargs: dict = {}
+    if os.name == "nt":
+        # Avoid close_fds on Windows — can prevent GUI child processes from starting.
+        kwargs["close_fds"] = False
+        # New process group; keep the desktop session so SW is visible.
+        create = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if create:
+            kwargs["creationflags"] = create
+    else:
+        kwargs["close_fds"] = True
+    return subprocess.Popen(cmd, cwd=str(LOCAL_WORKSPACE), **kwargs)
 
 
 def _clear_quote_cancel(quote_id: str) -> None:
@@ -386,9 +425,9 @@ def _deploy_launcher_assets() -> dict:
 
 
 def _launch_module6121_runner() -> tuple[subprocess.Popen | None, str]:
-    """Start Module6121 via VBS runner (preferred) or PowerShell fallback.
+    """Fallback: RunModule6121.vbs (RunMacro only — does not stage/open CAD).
 
-    Returns (proc, how) where how describes which runner was used.
+    Prefer _start_cms_launcher for live quotes.
     """
     _deploy_launcher_assets()
     swp = LOCAL_WORKSPACE / "Module6121.swp"
@@ -399,19 +438,11 @@ def _launch_module6121_runner() -> tuple[subprocess.Popen | None, str]:
     if not vbs.exists():
         vbs = REPO_ROOT / "RunModule6121.vbs"
     if vbs.exists():
+        _append_quote_log(f"launching macro-runner-v3 via {vbs.name} (fallback, no CAD stage)")
         try:
-            log = LOCAL_WORKSPACE / "CMS_Quote_Log.txt"
-            with log.open("a", encoding="utf-8") as f:
-                f.write(
-                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] webapp: launching macro-runner-v3 "
-                    f"via {vbs.name}\n"
-                )
-        except Exception:
-            pass
-        proc = subprocess.Popen(
-            ["wscript", "//nologo", str(vbs), str(swp)],
-            close_fds=True,
-        )
+            proc = _popen_wscript(str(vbs), str(swp))
+        except Exception as e:
+            return None, f"failed to start {vbs.name}: {e}"
         return proc, f"wscript {vbs} (macro-runner-v3)"
 
     ps1 = LOCAL_WORKSPACE / "RunSolidWorksMacro.ps1"
@@ -420,30 +451,61 @@ def _launch_module6121_runner() -> tuple[subprocess.Popen | None, str]:
     if ps1.exists():
         sw_exe = r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.EXE"
         progid = "SldWorks.Application.31"
-        proc = subprocess.Popen(
-            [
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(ps1),
-                "-MacroPath",
-                str(swp),
-                "-SwExe",
-                sw_exe,
-                "-ProgId",
-                progid,
-                "-Procedure",
-                "main",
-                "-TimeoutSeconds",
-                "120",
-            ],
-            close_fds=True,
-        )
+        _append_quote_log(f"launching macro-runner-v3 via {ps1.name} (fallback)")
+        try:
+            proc = subprocess.Popen(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ps1),
+                    "-MacroPath",
+                    str(swp),
+                    "-SwExe",
+                    sw_exe,
+                    "-ProgId",
+                    progid,
+                    "-Procedure",
+                    "main",
+                    "-TimeoutSeconds",
+                    "120",
+                ],
+                cwd=str(LOCAL_WORKSPACE),
+                close_fds=(os.name != "nt"),
+            )
+        except Exception as e:
+            return None, f"failed to start {ps1.name}: {e}"
         return proc, f"powershell {ps1}"
 
     return None, "no RunModule6121.vbs or RunSolidWorksMacro.ps1 found"
+
+
+def _start_cms_launcher() -> tuple[subprocess.Popen | None, str]:
+    """Start CMS_Launcher.vbs /usemail — stages CAD, opens SolidWorks, runs Module6121."""
+    _deploy_launcher_assets()
+    launcher = _find_launcher()
+    if not launcher:
+        return None, "CMS_Launcher.vbs not found in C:\\CMS_Local_Workspace or repo root"
+    swp = LOCAL_WORKSPACE / "Module6121.swp"
+    if not swp.exists():
+        _append_quote_log(f"WARNING Module6121.swp missing at {swp} — launcher will fail until recompiled")
+    _append_quote_log(f"starting CMS_Launcher.vbs /usemail ({launcher})")
+    try:
+        proc = _popen_wscript(str(launcher), "/usemail")
+    except FileNotFoundError:
+        return None, "wscript.exe not found — is Windows Script Host available?"
+    except Exception as e:
+        return None, f"failed to start CMS_Launcher.vbs: {e}"
+
+    # Quick sanity: if wscript dies instantly, surface it instead of fake "opening CAD".
+    time.sleep(0.8)
+    code = proc.poll()
+    if code is not None and code != 0:
+        _append_quote_log(f"CMS_Launcher.vbs exited immediately code={code}")
+        return None, f"CMS_Launcher.vbs exited immediately (code {code}). See CMS_Quote_Log.txt."
+    return proc, f"wscript {launcher} /usemail"
 
 
 def run_dme_price_lookup(wait: bool = False) -> bool:
@@ -483,6 +545,8 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     _deploy_launcher_assets()
     _delete_if_exists(TRAINING_TRIGGER)
     _clear_macro_launch_status_files()
+    # Do not keep a prior BatchCount handoff — that blocked single quotes.
+    _delete_if_exists(HANDOFF_FILE)
     _clear_quote_cancel(quote_id)
 
     info = email_info or {}
@@ -565,21 +629,19 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         warning=cad_warning or None,
     )
 
-    launcher = _find_launcher()
-    launched = False
-    if launcher:
-        try:
-            proc = subprocess.Popen(["wscript", str(launcher), "/usemail"], close_fds=True)
-            _active_launcher_procs[quote_id] = proc
-            launched = True
-        except Exception as e:
-            set_status(quote_id, phase="error", message=str(e))
-            return {"launched": False, "error": str(e)}
+    proc, how = _start_cms_launcher()
+    launched = proc is not None
+    if proc is not None:
+        _active_launcher_procs[quote_id] = proc
+        set_status(quote_id, phase="launching", message=f"Started {how}", runner=how)
+    else:
+        set_status(quote_id, phase="error", message=how, runner=how)
+        return {"launched": False, "error": how, "quote_id": quote_id}
 
     # Brief handoff peek only — do not block the UI for 30s.
     c_num = c_number
     handoff: dict = {}
-    for _ in range(6):
+    for _ in range(8):
         time.sleep(0.25)
         if quote_id in _cancelled_quotes:
             set_status(quote_id, phase="cancelled", message="Quote cancelled before launch")
@@ -588,6 +650,12 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         c_num = handoff.get("CNum", "") or handoff.get("QuoteNum", "").replace("-", "") or c_num
         if c_num or MACRO_STARTED_FILE.exists() or MACRO_ERROR_FILE.exists():
             break
+        # Detect instant launcher death after the initial check.
+        if proc.poll() is not None and proc.returncode not in (None, 0) and not MACRO_STARTED_FILE.exists():
+            err = f"CMS_Launcher exited code={proc.returncode} before macro start. See CMS_Quote_Log.txt."
+            _append_quote_log(err)
+            set_status(quote_id, phase="error", message=err)
+            return {"launched": False, "error": err, "quote_id": quote_id}
 
     if c_num:
         jobs.create_job(c_num, display_name=info.get("subject", c_num)[:80], customer=info.get("cust_job", ""))
@@ -738,27 +806,30 @@ def launch_batch_quotes(items: list[dict]) -> dict:
     for qid in quote_ids:
         set_status(qid, phase="launching", message=f"Launching batch of {len(batch_jobs)} quotes...")
 
-    # Prefer VBS macro-runner-v3 (reliable COM). Fall back to PS1, then single VBS launcher.
+    # Always use CMS_Launcher (stages CAD + opens SolidWorks). RunModule6121 alone
+    # was leaving quotes stuck with only "webapp: deployed" and no SW start.
     launched = False
     batch_id = f"BATCH-{quote_ids[0]}" if quote_ids else "BATCH"
     how = ""
 
     try:
-        proc, how = _launch_module6121_runner()
+        proc, how = _start_cms_launcher()
         if proc is not None:
             _active_launcher_procs[batch_id] = proc
             launched = True
             for qid in quote_ids:
                 set_status(qid, phase="launching", message=f"Started {how}", runner=how)
         else:
-            launcher = _find_launcher()
-            if launcher and len(batch_jobs) == 1:
-                proc = subprocess.Popen(["wscript", str(launcher), "/usemail"], close_fds=True)
-                _active_launcher_procs[batch_id] = proc
+            # Last resort: RunMacro-only runner (no CAD open).
+            proc2, how2 = _launch_module6121_runner()
+            how = how2
+            if proc2 is not None:
+                _active_launcher_procs[batch_id] = proc2
                 launched = True
-                how = f"wscript {launcher} /usemail"
+                for qid in quote_ids:
+                    set_status(qid, phase="launching", message=f"Started {how}", runner=how)
             else:
-                err = how or "Could not start Module6121 runner"
+                err = how or how2 or "Could not start CMS_Launcher / Module6121 runner"
                 for qid in quote_ids:
                     set_status(qid, phase="error", message=err)
                 return {"launched": False, "error": err}
@@ -950,7 +1021,10 @@ def _current_launch_log_lines(log_tail: str) -> list[str]:
         if (
             "webapp: deployed launchers" in low
             or "webapp: launching macro-runner-v3" in low
+            or "webapp: starting cms_launcher" in low
             or "macro-runner-v3:" in low
+            or "launcher process alive" in low
+            or "launcher: ===== launcher" in low
         ):
             start = i
     if start is None:
@@ -990,13 +1064,26 @@ def _collect_launch_diagnostics(status: dict) -> dict:
     error_txt = _read_tail(MACRO_ERROR_FILE, 1200)
     started_txt = _read_tail(MACRO_STARTED_FILE, 400)
     done_txt = _read_tail(MACRO_DONE_FILE, 400)
-    launcher_status = _read_tail(LOCAL_WORKSPACE / "cms_launcher_status.txt", 800)
+    launcher_status = _read_tail(LAUNCHER_STATUS_FILE, 800)
     log_tail = _read_tail(LOCAL_WORKSPACE / "CMS_Quote_Log.txt", 12000)
     if not log_tail:
         log_tail = _read_tail(Path(r"C:\Users\lenovo\Downloads\CMS_Quote_Log.txt"), 12000)
 
     log_lines = _current_launch_log_lines(log_tail)
     recent_log = "\n".join(log_lines)
+
+    # Ignore stale cms_launcher_status.txt left by older runners (e.g. July 13
+    # "macro-runner:" lines) when the current log slice has no matching step.
+    if launcher_status:
+        status_core = launcher_status.strip().lstrip("\ufeff")
+        low_status = status_core.lower()
+        in_current = bool(status_core) and status_core in recent_log
+        written_by_webapp = low_status.startswith("[") and "webapp:" in low_status
+        written_by_v3 = "macro-runner-v3" in low_status or "launcher:" in low_status or "launcher process alive" in low_status
+        if not in_current and not written_by_webapp and not written_by_v3:
+            launcher_status = ""
+        elif not in_current and "macro-runner:" in low_status and "macro-runner-v3" not in low_status:
+            launcher_status = ""
 
     if status_txt:
         diag["macro_status"] = status_txt
@@ -1047,6 +1134,12 @@ def _collect_launch_diagnostics(status: dict) -> dict:
                 diag["stuck_reason"] = (
                     "No CAD/XT found before macro run (often still inside a ZIP). "
                     "Launcher now extracts ZIPs; pull latest CMS_Launcher.vbs and retry."
+                )
+            elif "webapp: starting cms_launcher" in low and "launcher process alive" not in low and "launcher started" not in low:
+                diag["stuck_reason"] = (
+                    "Webapp started CMS_Launcher.vbs but it has not logged yet. "
+                    "If SolidWorks never opens, run manually: "
+                    "wscript C:\\CMS_Local_Workspace\\CMS_Launcher.vbs /usemail"
                 )
             elif last:
                 diag["stuck_reason"] = f"Waiting for macro STARTED. Last launcher step: {last[-220:]}"

@@ -630,18 +630,10 @@ def _write_email_handoff(info: dict, attach_dir: Path, attach_count: int) -> Non
 
 def _launch_quote_flow() -> bool:
     """Start CMS_Launcher.vbs /usemail on Windows when available."""
-    candidates = [
-        LOCAL_WORKSPACE / "CMS_Launcher.vbs",
-        Path(__file__).resolve().parent.parent.parent.parent / "CMS_Launcher.vbs",
-    ]
-    for vbs in candidates:
-        if vbs.exists():
-            try:
-                subprocess.Popen(["wscript", str(vbs), "/usemail"], close_fds=True)
-                return True
-            except Exception:
-                pass
-    return False
+    from . import quote_pipeline
+
+    proc, how = quote_pipeline._start_cms_launcher()
+    return proc is not None
 
 
 def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:

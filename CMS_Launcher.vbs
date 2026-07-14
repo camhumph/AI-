@@ -70,6 +70,8 @@ gEmailCadPath = ""
 
 ' Make sure the local workspace exists (handoff + email files live here)
 If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
+' Log FIRST so the webapp can see the process started even if later steps fail.
+LogStep "===== launcher process alive ====="
 If fso.FileExists(TRAINING_TRIGGER) Then
     fso.DeleteFile TRAINING_TRIGGER, True
     LogStep "cleared stale cms_training_xt.txt (live quote, not training)"
@@ -227,7 +229,13 @@ Else
 End If
 
 ' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
-WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir, gCadPath
+'    If the webapp already wrote BatchCount>1, keep that multi-job handoff.
+If ExistingBatchCount() > 1 Then
+    LogStep "preserving webapp BatchCount handoff (" & ExistingBatchCount() & " jobs); CadPath=" & gCadPath
+    If gCadPath <> "" Then PatchBatchHandoffCadPath 1, gCadPath
+Else
+    WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir, gCadPath
+End If
 
 Dim proposalPath
 proposalPath = ""
@@ -431,6 +439,57 @@ Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobF
     If attachDir <> "" Then body = body & "AttachDir=" & attachDir & vbCrLf
     If cadPath <> "" Then body = body & "CadPath=" & cadPath & vbCrLf
     WriteHandoffAtomic HANDOFF_FILE, body
+End Sub
+
+Function ExistingBatchCount()
+    ExistingBatchCount = 0
+    On Error Resume Next
+    If Not fso.FileExists(HANDOFF_FILE) Then Exit Function
+    Dim ts, line, p, k, v
+    Set ts = fso.OpenTextFile(HANDOFF_FILE, 1)
+    Do Until ts.AtEndOfStream
+        line = ts.ReadLine
+        p = InStr(line, "=")
+        If p > 0 Then
+            k = UCase(Trim(Left(line, p - 1)))
+            v = Trim(Mid(line, p + 1))
+            If k = "BATCHCOUNT" Then
+                If IsNumeric(v) Then ExistingBatchCount = CLng(v)
+                Exit Do
+            End If
+        End If
+    Loop
+    ts.Close
+    On Error GoTo 0
+End Function
+
+Sub PatchBatchHandoffCadPath(ByVal jobIndex, ByVal cadPath)
+    On Error Resume Next
+    If cadPath = "" Or Not fso.FileExists(HANDOFF_FILE) Then Exit Sub
+    Dim ts, content, key, lines, i, line, p, k, outBody, replaced
+    Set ts = fso.OpenTextFile(HANDOFF_FILE, 1)
+    content = ts.ReadAll
+    ts.Close
+    key = "Job" & jobIndex & ".CadPath="
+    lines = Split(content, vbCrLf)
+    outBody = ""
+    replaced = False
+    For i = 0 To UBound(lines)
+        line = lines(i)
+        p = InStr(line, "=")
+        If p > 0 Then
+            k = Left(line, p - 1)
+            If StrComp(k, "Job" & jobIndex & ".CadPath", vbTextCompare) = 0 Then
+                line = key & cadPath
+                replaced = True
+            End If
+        End If
+        If outBody <> "" Then outBody = outBody & vbCrLf
+        outBody = outBody & line
+    Next
+    If Not replaced Then outBody = outBody & vbCrLf & key & cadPath
+    WriteHandoffAtomic HANDOFF_FILE, outBody
+    On Error GoTo 0
 End Sub
 
 ' Write BatchCount=N + Job1.* / Job2.* ... for sequential multi-quote runs.
