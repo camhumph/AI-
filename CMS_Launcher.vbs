@@ -182,43 +182,18 @@ If localStagePath <> "" Then
     LogStep "local CMS workspace ready: " & gLocalJobFolder
 End If
 
-' 6. Prefer LOCAL staged CAD first (network OpenDoc/LoadFile often fails).
-'    Prefer native .sldasm/.sldprt over XT for reliable OpenDoc; keep XT as fallback.
+' 6. Find the XT file and use that. Keep it simple.
 gCadPath = ""
-If gLocalJobFolder <> "" Then
-    gCadPath = FindBestCadInFolder(gLocalJobFolder)
-    If gCadPath = "" Then gCadPath = FindBestXtInFolder(gLocalJobFolder)
-End If
 If gEmailCadPath <> "" Then
     If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
-        localSameAsEmail = ""
         If gLocalJobFolder <> "" Then
-            localSameAsEmail = FindLocalCopyOfFile(gLocalJobFolder, gEmailCadPath)
+            gCadPath = FindLocalCopyOfFile(gLocalJobFolder, gEmailCadPath)
         End If
-        If localSameAsEmail <> "" Then
-            ' Do not replace a local native SW file with the email XT.
-            If gCadPath = "" Then
-                gCadPath = localSameAsEmail
-                LogStep "using staged local copy of cms_email CadPath: " & gCadPath
-            ElseIf IsNativeSwCad(gCadPath) Then
-                LogStep "keeping local native CAD (better than email XT): " & gCadPath
-            ElseIf Not IsNativeSwCad(localSameAsEmail) And IsNativeSwCad(gCadPath) Then
-                LogStep "keeping local CAD: " & gCadPath
-            ElseIf StrComp(gCadPath, localSameAsEmail, vbTextCompare) <> 0 Then
-                ' Prefer whatever FindBestCad already picked unless empty.
-                LogStep "keeping ranked local CAD: " & gCadPath
-            End If
-        ElseIf gCadPath = "" Then
-            gCadPath = gEmailCadPath
-            LogStep "using CadPath from cms_email.txt (network): " & gCadPath
-        End If
-        If gCadPath <> "" And IsForeignJobCad(gCadPath) Then
-            LogStep "NOTE: CAD job # differs from folder job # — continuing: " & gCadPath
-        End If
+        If gCadPath = "" Then gCadPath = gEmailCadPath
     End If
 End If
-If gCadPath = "" Then
-    gCadPath = FindBestCadInFolders(gAttachDir, jobFolderPath)
+If gCadPath = "" And gLocalJobFolder <> "" Then
+    gCadPath = FindBestXtInFolder(gLocalJobFolder)
 End If
 If gCadPath = "" Then
     gCadPath = FindBestXtInFolders(gAttachDir, jobFolderPath)
@@ -229,23 +204,22 @@ If gCadPath <> "" Then
         gCadPath = ""
     End If
 End If
-' Last chance: if still on UNC/network, copy just the CAD file into local workspace.
 If gCadPath <> "" Then
     gCadPath = EnsureCadIsLocal(gCadPath, cNum)
 End If
 If gCadPath <> "" Then
-    LogStep "CAD to open first (nested unzipped folder OK): " & gCadPath
+    If IsForeignJobCad(gCadPath) Then
+        LogStep "NOTE: CAD job # differs from folder job # — continuing: " & gCadPath
+    End If
+    LogStep "XT to open: " & gCadPath
 Else
-    LogStep "WARNING: no CAD/XT/SLDASM found yet in local/job/attach folders"
-    LogStep "CAD search paths: local=" & gLocalJobFolder & " job=" & jobFolderPath & " attach=" & gAttachDir
+    LogStep "WARNING: no XT found in local/job/attach folders"
+    LogStep "XT search paths: local=" & gLocalJobFolder & " job=" & jobFolderPath & " attach=" & gAttachDir
     If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
         LogStep "local folder sample: " & SampleFolderFiles(gLocalJobFolder)
     End If
     If gAttachDir <> "" And fso.FolderExists(gAttachDir) Then
         LogStep "attach folder sample: " & SampleFolderFiles(gAttachDir)
-    End If
-    If jobFolderPath <> "" And fso.FolderExists(jobFolderPath) Then
-        LogStep "job folder sample: " & SampleFolderFiles(jobFolderPath)
     End If
 End If
 
@@ -879,52 +853,46 @@ Function IsNativeSwCad(ByVal pathOrName)
     If e = "sldasm" Or e = "sldprt" Then IsNativeSwCad = True
 End Function
 
-' Open a CAD/XT/STEP file in SolidWorks. Must capture the returned ModelDoc2 —
-' checking Err.Number alone falsely reports LoadFile4 failures.
+' Open the XT (or STEP/IGES/SLD*) in SolidWorks. Capture the returned ModelDoc2.
 Function OpenCadInSolidWorks(ByVal swApp, ByVal cadPath)
     OpenCadInSolidWorks = False
     On Error Resume Next
-    Dim ext, errs, warns, importErrors, mdl, errN
+    Dim ext, errs, warns, importErrors, mdl
     If cadPath = "" Then Exit Function
     If Not fso.FileExists(cadPath) Then
-        LogStep "OpenCadInSolidWorks: file missing: " & cadPath
+        LogStep "XT/CAD file missing: " & cadPath
         Exit Function
     End If
+
     ext = LCase(fso.GetExtensionName(cadPath))
     errs = 0: warns = 0: importErrors = 0
     Set mdl = Nothing
     Err.Clear
+    swApp.Visible = True
+    swApp.UserControl = True
+    swApp.CommandInProgress = False
+    Err.Clear
 
-    If ext = "sldasm" Then
+    ' XT / STEP / IGES: LoadFile4 (this is how SolidWorks opens foreign files)
+    If ext = "x_t" Or ext = "x_b" Or ext = "step" Or ext = "stp" Or ext = "igs" Or ext = "iges" Then
+        Set mdl = swApp.LoadFile4(cadPath, "", Nothing, importErrors)
+        If mdl Is Nothing Then
+            Err.Clear
+            Set mdl = swApp.LoadFile4(cadPath, "r", Nothing, importErrors)
+        End If
+    ElseIf ext = "sldasm" Then
         Set mdl = swApp.OpenDoc6(cadPath, 2, 1, "", errs, warns)
     ElseIf ext = "sldprt" Then
         Set mdl = swApp.OpenDoc6(cadPath, 1, 1, "", errs, warns)
     Else
-        ' Parasolid / STEP / IGES — same sequence as Module6121.OpenCadFile
-        Set mdl = swApp.LoadFile4(cadPath, "r", Nothing, importErrors)
-        errN = Err.Number
-        If mdl Is Nothing Then
-            Err.Clear
-            Set mdl = swApp.LoadFile4(cadPath, "", Nothing, importErrors)
-            errN = Err.Number
-        End If
-        If mdl Is Nothing Then
-            Err.Clear
-            Set mdl = swApp.OpenDoc6(cadPath, 2, 1, "", errs, warns)
-        End If
-        If mdl Is Nothing Then
-            Err.Clear
-            Set mdl = swApp.OpenDoc6(cadPath, 1, 1, "", errs, warns)
-        End If
+        Set mdl = swApp.LoadFile4(cadPath, "", Nothing, importErrors)
     End If
 
     If Not mdl Is Nothing Then
         OpenCadInSolidWorks = True
-        LogStep "CAD opened successfully (" & ext & ") errs=" & errs & " warns=" & warns & " importErrors=" & importErrors
+        LogStep "opened XT/CAD OK: " & cadPath
     Else
-        LogStep "WARNING: OpenDoc/LoadFile returned Nothing for " & cadPath & _
-                " err=" & Err.Number & " errs=" & errs & " warns=" & warns & _
-                " importErrors=" & importErrors & " — macro will try to open it"
+        LogStep "WARNING: could not open XT/CAD (LoadFile4 returned Nothing) importErrors=" & importErrors & " — macro will try: " & cadPath
     End If
     Err.Clear
     On Error GoTo 0
@@ -956,18 +924,15 @@ Function CadPriority(ext, fileName)
         bonus = bonus + 10
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
-    ' Unzipped mold-base packages often keep the older BMS id in the file name —
-    ' still prefer them when they are clearly mold-base / outsource quote CAD.
     If InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0 Then
         bonus = bonus + 60
     End If
     Select Case e
-        ' Native SW assemblies open most reliably via OpenDoc6 before the macro.
-        Case "sldasm": CadPriority = 200 + bonus
-        Case "x_t", "x_b": CadPriority = 120 + bonus
+        Case "x_t", "x_b": CadPriority = 200 + bonus
         Case "step", "stp": CadPriority = 110 + bonus
-        Case "sldprt": CadPriority = 100 + bonus
+        Case "sldasm": CadPriority = 105 + bonus
         Case "igs", "iges": CadPriority = 90 + bonus
+        Case "sldprt": CadPriority = 55 + bonus
         Case "prt", "asm": CadPriority = 50 + bonus
         Case Else: CadPriority = 0
     End Select
@@ -1259,19 +1224,14 @@ Function LaunchSolidWorksOpenCadThenMacro()
     sw.CommandInProgress = False
     On Error GoTo 0
 
-    ' ---- OPEN THE CAD FIRST ----
+    ' ---- OPEN THE XT FIRST ----
     opened = False
     If gCadPath <> "" And IsGeneratedBaseCadPath(gCadPath) Then
         LogStep "WARNING: refusing to open generated \base\ assembly before macro: " & gCadPath
         gCadPath = ""
     End If
     If gCadPath <> "" And fso.FileExists(gCadPath) Then
-        LogStep "opening CAD before macro: " & gCadPath
-        On Error Resume Next
-        sw.Visible = True
-        sw.UserControl = True
-        sw.CommandInProgress = False
-        On Error GoTo 0
+        LogStep "opening XT before macro: " & gCadPath
         opened = OpenCadInSolidWorks(sw, gCadPath)
         If opened Then
             WScript.Sleep 3000
@@ -1289,7 +1249,7 @@ Function LaunchSolidWorksOpenCadThenMacro()
             On Error GoTo 0
         End If
     Else
-        LogStep "WARNING: no CAD path to open first — macro will search job folder"
+        LogStep "WARNING: no XT path to open first — macro will search job folder"
     End If
 
     ' ---- THEN RUN THE .SWP MACRO WITH STARTED ACKNOWLEDGEMENT ----
