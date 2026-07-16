@@ -113,6 +113,7 @@ def load_job_pullcore(job_dir: Path) -> list[dict]:
 # BMS QuoteWorksheet #2 4140 block (Module6121 FillQuoteWorkbookFromBoundingBox).
 # Col A = name, C = qty, D = thickness, E = width, F = length.
 # Template formulas often put hours in G and price in H.
+# Rows 22/23/31-34 are the canonical pot-block plates; 24-30 are spare/extra.
 _BMS_QUOTE_STEEL_ROWS = {
     22: ("TCP", "tcp"),
     23: ("BCP", "bcp"),
@@ -138,6 +139,18 @@ _BMS_NAME_TO_ROLE = {
     "od pot": "od_pot",
     "id pot block": "id_pot",
     "od pot block": "od_pot",
+    "id holder block": "id_holder",
+    "od holder block": "od_holder",
+}
+
+_BMS_ROLE_LABELS = {
+    "tcp": "TCP",
+    "bcp": "BCP",
+    "id_holder": "ID Holder",
+    "od_holder": "OD Holder",
+    "id_pot": "ID Pot",
+    "od_pot": "OD Pot",
+    "steel_plate": "Steel Plate",
 }
 
 
@@ -145,6 +158,16 @@ def _cell_str(val) -> str:
     if val is None:
         return ""
     return str(val).strip()
+
+
+def _canonical_steel_name(name: str, role: str, default_name: str = "") -> str:
+    """Never return a blank steel description — UI shows '--' otherwise."""
+    n = _cell_str(name)
+    if n and n not in {"--", "-", "None", "none"}:
+        return n
+    if default_name:
+        return default_name
+    return _BMS_ROLE_LABELS.get(role, "") or role or "Steel Plate"
 
 
 def _iter_workbook_rows(wb_path: Path, sheet_names: tuple[str, ...] | None = None):
@@ -174,6 +197,8 @@ def _iter_workbook_rows(wb_path: Path, sheet_names: tuple[str, ...] | None = Non
     except ImportError:
         return
     try:
+        # data_only=True needs Excel to have calculated+saved formulas.
+        # Fall back to formula workbook if cached values are missing.
         wb = openpyxl.load_workbook(wb_path, read_only=True, data_only=True)
     except Exception:
         return
@@ -190,37 +215,197 @@ def _iter_workbook_rows(wb_path: Path, sheet_names: tuple[str, ...] | None = Non
         wb.close()
 
 
+def _score_quote_workbook(path: Path) -> int:
+    nm = path.name.upper()
+    if "PURCHASED" in nm:
+        return -1000
+    score = 0
+    if "QUOTE" in nm and "STEEL" in nm:
+        score += 80
+    if "GRIND" in nm:
+        score += 30
+    if "QUOTE" in nm:
+        score += 20
+    if path.suffix.lower() in {".xlsx", ".xlsm"}:
+        score += 5
+    # Prefer shorter names (fewer date/initials suffixes).
+    score -= max(0, len(path.name) - 40) // 5
+    return score
+
+
+def _score_steel_workbook(path: Path) -> int:
+    nm = path.name.upper()
+    if "PURCHASED" in nm:
+        return -1000
+    score = 0
+    if "STEEL" in nm and "SHEET" in nm:
+        score += 80
+    if "J000" in nm:
+        score += 40
+    if "MACHINING" in nm:
+        score += 20
+    # Quote_Steel_Grinding also matches *steel* — de-prioritize vs true J000.
+    if "QUOTE" in nm and "GRIND" in nm:
+        score -= 30
+    if path.suffix.lower() in {".xlsx", ".xlsm"}:
+        score += 5
+    score -= max(0, len(path.name) - 40) // 5
+    return score
+
+
+def _iter_candidate_workbooks(job_dir: Path):
+    seen: set[str] = set()
+    for sub in ("", "documents"):
+        base = job_dir / sub if sub else job_dir
+        if not base.exists():
+            continue
+        for pat in ("*.xlsx", "*.xlsm", "*.xls"):
+            for hit in sorted(base.glob(pat)):
+                key = hit.name.lower()
+                if key.startswith("~$"):
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield hit
+
+
+def _find_workbook(job_dir: Path) -> Path | None:
+    """Best quote workbook (Quote_Steel_Grinding), else best steel sheet."""
+    quote = _find_quote_workbook(job_dir)
+    if quote:
+        return quote
+    return _find_steel_workbook(job_dir)
+
+
+def _find_quote_workbook(job_dir: Path) -> Path | None:
+    best: Path | None = None
+    best_score = 0
+    for hit in _iter_candidate_workbooks(job_dir):
+        sc = _score_quote_workbook(hit)
+        if sc > best_score:
+            best_score = sc
+            best = hit
+    return best if best_score > 0 else None
+
+
+def _find_steel_workbook(job_dir: Path) -> Path | None:
+    best: Path | None = None
+    best_score = 0
+    for hit in _iter_candidate_workbooks(job_dir):
+        sc = _score_steel_workbook(hit)
+        if sc > best_score:
+            best_score = sc
+            best = hit
+    return best if best_score > 0 else None
+
+
 def load_steel_plate_lines(job_dir: Path) -> list[dict]:
-    """Steel plates from quote workbook #2 block, else J000 steel sheet."""
-    wb = _find_workbook(job_dir)
-    if not wb:
-        return _load_steel_from_bom_match(job_dir)
+    """Steel plates from J000 (names) merged with QuoteWorksheet hours/price.
 
-    # Prefer QuoteWorksheet BMS #2 block (has hours/price formulas when calculated).
-    quote_lines = _load_steel_from_quote_block(wb)
+    Module6121 writes plate *names* reliably on the J000 Steel Order sheet.
+    The QuoteWorksheet #2 block has stock dims + Excel hours/price formulas
+    (only populated after Excel calculates). Prefer J000 for the row list so
+    the UI never shows blank Description='--'.
+    """
+    quote_wb = _find_quote_workbook(job_dir)
+    steel_wb = _find_steel_workbook(job_dir)
+
+    j000_lines = _load_steel_from_j000(steel_wb) if steel_wb else []
+    # Quote workbook sometimes *is* the only file; also try J000 sheets there.
+    if not j000_lines and quote_wb and quote_wb != steel_wb:
+        j000_lines = _load_steel_from_j000(quote_wb)
+
+    quote_lines = _load_steel_from_quote_block(quote_wb) if quote_wb else []
+
+    if j000_lines:
+        return _merge_steel_hours_prices(j000_lines, quote_lines)
+
     if quote_lines:
+        # Ensure every line has a visible name.
+        for line in quote_lines:
+            line["component"] = _canonical_steel_name(
+                line.get("component") or "",
+                line.get("role") or "",
+            )
         return quote_lines
-
-    steel_lines = _load_steel_from_j000(wb)
-    if steel_lines:
-        return steel_lines
 
     return _load_steel_from_bom_match(job_dir)
 
 
-def _load_steel_from_quote_block(wb_path: Path) -> list[dict]:
+def _merge_steel_hours_prices(base_lines: list[dict], quote_lines: list[dict]) -> list[dict]:
+    """Copy hours/price from quote block onto J000 rows matched by role (then dims)."""
+    if not quote_lines:
+        return base_lines
+
+    by_role: dict[str, list[dict]] = {}
+    for q in quote_lines:
+        role = q.get("role") or ""
+        by_role.setdefault(role, []).append(q)
+
+    used: set[int] = set()
+    out: list[dict] = []
+    for line in base_lines:
+        merged = dict(line)
+        merged["component"] = _canonical_steel_name(
+            merged.get("component") or "",
+            merged.get("role") or "",
+        )
+        role = merged.get("role") or ""
+        candidates = by_role.get(role) or []
+        best = None
+        best_idx = -1
+        best_score = -1.0
+        for i, q in enumerate(candidates):
+            if id(q) in used:
+                continue
+            score = 0.0
+            for key in ("thickness", "width", "length"):
+                a = float(merged.get(key) or 0)
+                b = float(q.get(key) or 0)
+                if a > 0 and b > 0 and abs(a - b) < 0.35:
+                    score += 1.0
+            if float(q.get("price") or 0) > 0:
+                score += 0.25
+            if float(q.get("hours") or 0) > 0:
+                score += 0.25
+            if score > best_score:
+                best_score = score
+                best = q
+                best_idx = i
+        if best is not None and best_score >= 1.0:
+            used.add(id(best))
+            if best.get("hours"):
+                merged["hours"] = best["hours"]
+            if float(best.get("price") or 0) > 0:
+                merged["price"] = best["price"]
+                merged["price_source"] = best.get("price_source") or merged.get("price_source")
+            # Keep J000 finished dims (source of truth for T/W/L). Quote stock
+            # sizes can swap axes vs the steel sheet — do not overwrite.
+        out.append(merged)
+    return out
+
+
+def _load_steel_from_quote_block(wb_path: Path | None) -> list[dict]:
+    if not wb_path:
+        return []
     lines: list[dict] = []
     for sheet_name, row_idx, cells in _iter_workbook_rows(
         wb_path, ("QuoteWorksheet", "Quote")
     ):
+        # Prefer the real QuoteWorksheet; skip fuzzy "Quote Summary" etc. when
+        # the exact sheet exists in this workbook iteration order.
+        if sheet_name not in ("QuoteWorksheet", "Quote") and "quote" not in sheet_name.lower():
+            continue
         if row_idx not in _BMS_QUOTE_STEEL_ROWS:
             continue
         default_name, role = _BMS_QUOTE_STEEL_ROWS[row_idx]
-        # Pad cells so index access is safe (openpyxl may truncate trailing empties).
         while len(cells) < 10:
             cells.append(None)
 
-        name = _cell_str(cells[0]) or default_name
+        # Col A preferred; some templates put the label in Col B.
+        raw_name = _cell_str(cells[0]) or _cell_str(cells[1])
+        name = _canonical_steel_name(raw_name, role, default_name)
         qty = _safe_float(cells[2], 0.0)
         thickness = _parse_fraction(cells[3])
         width = _parse_fraction(cells[4])
@@ -231,12 +416,18 @@ def _load_steel_from_quote_block(wb_path: Path) -> list[dict]:
         # Skip empty / zero-qty template rows (flipper blanks, etc.).
         if qty <= 0 and thickness <= 0 and width <= 0 and length <= 0:
             continue
-        if not name:
-            continue
         if qty <= 0:
             continue
+        # Skip spare rows that have no real name and no default (blank extras).
+        if not name or (not default_name and role == "steel_plate" and not raw_name):
+            if role == "steel_plate" and not raw_name:
+                continue
 
         role_key = _BMS_NAME_TO_ROLE.get(_norm(name), role)
+        if role_key in _BMS_ROLE_LABELS and (not raw_name or role_key in {"tcp", "bcp", "id_holder", "od_holder", "id_pot", "od_pot"}):
+            # Keep canonical BMS labels for the six pot-block slots.
+            if default_name:
+                name = default_name
         cu_in = 0.0
         if thickness > 0 and width > 0 and length > 0:
             cu_in = round(qty * thickness * width * length, 2)
@@ -259,8 +450,10 @@ def _load_steel_from_quote_block(wb_path: Path) -> list[dict]:
     return lines
 
 
-def _load_steel_from_j000(wb_path: Path) -> list[dict]:
+def _load_steel_from_j000(wb_path: Path | None) -> list[dict]:
     """J000 Steel Order / Machining Sheet: A=Qty B=Name C=T E=W G=L."""
+    if not wb_path:
+        return []
     lines: list[dict] = []
     seen: set[str] = set()
     for sheet_name, row_idx, cells in _iter_workbook_rows(
@@ -282,7 +475,8 @@ def _load_steel_from_j000(wb_path: Path) -> list[dict]:
                     role = r
                     break
         if not role:
-            continue
+            # Still show named steel rows Module6121 wrote (extras like Flipper).
+            role = "steel_plate"
         qty = _safe_float(cells[0], 1.0)
         if qty <= 0:
             continue
@@ -298,7 +492,7 @@ def _load_steel_from_j000(wb_path: Path) -> list[dict]:
         cu_in = round(qty * thickness * width * length, 2)
         lines.append(
             {
-                "component": name,
+                "component": _canonical_steel_name(name, role),
                 "role": role,
                 "qty": qty,
                 "thickness": thickness,
@@ -556,19 +750,6 @@ def _parse_fraction(val) -> float:
     if m:
         return int(m.group(1)) / int(m.group(2))
     return _safe_float(s)
-
-
-def _find_workbook(job_dir: Path) -> Path | None:
-    patterns = ("*quote*.xls*", "*Quote*.xls*", "*steel*.xls*", "*J000*.xls*")
-    for sub in ("", "documents"):
-        base = job_dir / sub if sub else job_dir
-        if not base.exists():
-            continue
-        for pat in patterns:
-            hits = sorted(base.glob(pat))
-            if hits:
-                return hits[0]
-    return None
 
 
 def read_sheet_dimensions(job_dir: Path) -> dict[str, dict]:

@@ -1496,6 +1496,11 @@ def poll_completion(quote_id: str) -> dict:
         return status
     job_id = status.get("job_id") or status.get("c_number") or quote_id
 
+    # Waiting batch siblings must not look "stuck" on the active job's log.
+    if status.get("phase") == "queued" and status.get("batch"):
+        status.pop("stuck_reason", None)
+        return status
+
     # Always attach live launcher/macro diagnostics while active (or on error).
     diag = _collect_launch_diagnostics(status)
     status["diagnostics"] = diag

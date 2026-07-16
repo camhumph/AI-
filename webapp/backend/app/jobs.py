@@ -568,6 +568,8 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
     _hoist_macro_deliverables(src, job_dir)
 
     # Flat files in job root -> documents/
+    # Always refresh quote/steel Excel copies — a stale first sync (pre-fill)
+    # left empty Description / "sheet" prices on the Parts tab.
     docs = job_dir / "documents"
     docs.mkdir(exist_ok=True)
     for f in src.iterdir():
@@ -579,8 +581,27 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
             "classification.csv",
         }:
             dest = docs / f.name
-            if not dest.exists():
-                shutil.copy2(f, dest)
+            refresh = (
+                not dest.exists()
+                or "quote" in low
+                or "steel" in low
+                or "j000" in low
+                or "grind" in low
+                or "purchased" in low
+            )
+            if refresh:
+                try:
+                    shutil.copy2(f, dest)
+                except Exception:
+                    pass
+            # Also keep the primary quote/steel workbooks at job root for pricing.
+            if any(k in low for k in ("quote", "steel", "j000", "grind")) and low.endswith(
+                (".xlsx", ".xls", ".xlsm")
+            ):
+                try:
+                    shutil.copy2(f, job_dir / f.name)
+                except Exception:
+                    pass
 
     meta = _read_meta(job_dir)
     meta.update(

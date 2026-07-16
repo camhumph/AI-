@@ -11143,6 +11143,7 @@ On Error GoTo ErrHandler
             If QUOTE_ROUND_UP_TO_QUARTER Then
                 qt = SteelStockThickness(tt)
             End If
+            xlWs.Cells(rowN(i), 1).value = stdN(i)
             xlWs.Cells(rowN(i), 3).value = 1
             xlWs.Cells(rowN(i), 4).value = qt
             xlWs.Cells(rowN(i), 5).value = qw
@@ -11186,6 +11187,13 @@ On Error GoTo ErrHandler
         WritePurchasedCategoryToSheet xlWs
     End If
     StampWorkbookDateAndRef xlWb, FormatRefNumber
+    ' Force formula calc so the webapp can read hours/price with data_only.
+    On Error Resume Next
+    xlApp.Calculation = -4105   ' xlCalculationAutomatic
+    xlApp.CalculateFull
+    xlWs.Calculate
+    Err.Clear
+    On Error GoTo ErrHandler
     xlWb.Save
     xlWb.Close False
     xlApp.Quit
@@ -13297,6 +13305,13 @@ On Error GoTo ErrHandler
         WritePurchasedCategoryToSheet xlWs
     End If
     StampWorkbookDateAndRef xlWb, FormatRefNumber
+    ' Force formula calc so the webapp can read hours/price with data_only.
+    On Error Resume Next
+    xlApp.Calculation = -4105   ' xlCalculationAutomatic
+    xlApp.CalculateFull
+    xlWs.Calculate
+    Err.Clear
+    On Error GoTo ErrHandler
     xlWb.Save
     xlWb.Close False
     xlApp.Quit

@@ -35,7 +35,16 @@ function fmtMoney(v: number | null | undefined): string {
 function shortComponent(name: string) {
   if (!name) return "--";
   const segs = name.split("/");
-  return segs[segs.length - 1];
+  const last = segs[segs.length - 1]?.trim();
+  return last || "--";
+}
+
+function rowDescription(row: QuoteLineItem): string {
+  const fromComp = shortComponent(row.component || "");
+  if (fromComp && fromComp !== "--") return fromComp;
+  if (row.role_label && row.role_label.trim()) return row.role_label.trim();
+  if (row.role && row.role.trim()) return row.role.trim();
+  return "--";
 }
 
 function sectionHint(group: string): string {
@@ -155,8 +164,8 @@ export default function PartsTable({
                   <tbody>
                     {rows.map((row) => (
                       <tr key={row.index} className="border-t border-ink-800/60 hover:bg-ink-800/30">
-                        <td className="max-w-xs truncate px-4 py-2 font-mono text-xs text-ink-200" title={row.component}>
-                          {shortComponent(row.component)}
+                        <td className="max-w-xs truncate px-4 py-2 font-mono text-xs text-ink-200" title={row.component || row.role_label}>
+                          {rowDescription(row)}
                         </td>
                         {isPurchased && (
                           <td className="px-4 py-2 text-xs text-ink-300">{row.vendor || "--"}</td>

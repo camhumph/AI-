@@ -104,7 +104,13 @@ def build_quote_sheet(job: dict) -> dict:
             role_group_name="Steel Plates / Mold Base",
         )
         for i, r in enumerate(steel_rows, start=1)
+        if (r.get("component") or r.get("role"))
     ]
+    # Guarantee a visible description even if the workbook Col A was blank.
+    for item in steel_items:
+        if not (item.get("component") or "").strip():
+            item["component"] = item.get("role_label") or item.get("role") or "Steel Plate"
+
     pullcore_items = [
         _line_from_section_row(
             r,
@@ -113,6 +119,7 @@ def build_quote_sheet(job: dict) -> dict:
             role_group_name="Pull Cores & Keys",
         )
         for i, r in enumerate(pullcore_rows, start=1)
+        if (r.get("component") or "").strip()
     ]
     purchased_items = [
         _line_from_section_row(
@@ -122,6 +129,7 @@ def build_quote_sheet(job: dict) -> dict:
             role_group_name="Purchased Components",
         )
         for i, r in enumerate(purchased_rows, start=1)
+        if (r.get("component") or "").strip()
     ]
 
     line_items: list[dict] = []
@@ -134,6 +142,14 @@ def build_quote_sheet(job: dict) -> dict:
     classified_items: list[dict] = []
     if base_type != "bms":
         for row in job.get("parts", []):
+            role = row.get("role") or ""
+            component = (row.get("Component") or row.get("component") or "").strip()
+            label = (row.get("role_label") or role_label(role) or role or "").strip()
+            display = component or label
+            # Drop blank junk rows that become "Other Hardware --"
+            if not display or display in {"--", "-"}:
+                continue
+
             priced = sheet_pricing.price_for_part(row, shop_rows, job_purchased, sheet_dims)
             price = priced["price"]
             total += price
@@ -142,13 +158,12 @@ def build_quote_sheet(job: dict) -> dict:
             elif row.get("quote") or row.get("Quote"):
                 missing += 1
 
-            role = row.get("role") or ""
             item = {
                 "index": row.get("index"),
                 "section": "classified",
-                "component": row.get("Component") or row.get("component"),
+                "component": display,
                 "role": role,
-                "role_label": row.get("role_label") or role_label(role),
+                "role_label": label or role_label(role),
                 "role_group": row.get("role_group") or role_group(role),
                 "confidence": row.get("confidence") or row.get("Confidence"),
                 "quote": bool(row.get("quote") or row.get("Quote")),
