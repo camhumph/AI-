@@ -210,7 +210,10 @@ def extract_json(text):
     # those first, then extract the first JSON object.
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
     text = text.replace("\b", "")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I)
+    text = re.sub(r"`[^`]*`", "", text, flags=re.S)
+    text = re.sub(r"(?i)done thinking\.\s*", "", text)
     text = re.sub(r"^Thinking\.\.\..*?(?=\{)", "", text, flags=re.S)
     text = text.strip()
     if text.startswith("{"):
@@ -238,6 +241,19 @@ def round_bar_diameter(row):
 
 def name_key(row):
     return str(row.get("name", "")).upper().replace("\\", "/")
+
+
+def _shop_token_locked(roles: dict, idx: str) -> bool:
+    """True when a strong shop-name token already assigned this index."""
+    if idx not in roles:
+        return False
+    _role, conf, reason, _quote = roles[idx]
+    return conf == "HIGH" and "shop token" in str(reason).lower()
+
+
+def _set_role_if_unlocked(roles: dict, idx: str, role: str, conf: str, reason: str, quote: bool) -> None:
+    if not _shop_token_locked(roles, idx):
+        roles[idx] = (role, conf, reason, quote)
 
 
 LATCH_LOCK_TOKENS = (
@@ -294,12 +310,64 @@ def apply_strong_shop_name_hints(rows, roles):
             roles[idx] = ("bottom_ejector_plate", "HIGH", "Strong shop token EJ-BACKUP-PLATE; thicker/lower backing plate in ejector stack. CMS naming: Bottom Ejector Plate (never Ejector Retainer Plate).", True)
         elif "EJ-RET-PLATE" in name or "EJ_RET_PLATE" in name:
             roles[idx] = ("ejector_plate", "HIGH", "Strong shop token EJ-RET-PLATE; thinner plate in ejector stack. CMS naming: Ejector Plate.", True)
+        elif ("EJECTOR PLATE" in name or "EJECTOR-PLATE" in name) and "BACKUP" not in name:
+            roles[idx] = ("ejector_plate", "HIGH", "Strong shop token EJECTOR PLATE in component name.", True)
         elif "RAIL-" in name or "_RAIL" in name or "/RAIL" in name:
             roles[idx] = ("rail", "HIGH", "Strong shop token RAIL; long side rail/support block.", True)
         elif "LDR-PIN" in name or "LDR_PIN" in name:
             roles[idx] = ("leader_pin", "HIGH", "Strong shop token LDR-PIN; primary leader pin set.", False)
         elif "/LBB_" in name or "LBB_" in name:
             roles[idx] = ("leader_pin_bushing", "HIGH", "Strong shop token LBB; leader pin bushing.", False)
+
+
+def looks_like_pot_block_geometry(rows) -> bool:
+    """Detect BMS / Tempcraft pot-block stacks that must NOT get A/B/rail roles.
+
+    Signature: ~2 thin full-footprint clamps, >=2 thick non-full holders,
+    plus distinguishable pot cubes (thick, chunky, footprint << mold) and/or
+    0.25\" insulation with at least one pot. Generic asm_objects names still match.
+    Full-size A/B plates are never pots.
+    """
+    if not rows or len(rows) < 6:
+        return False
+    max_w = max(r["w"] for r in rows)
+    max_l = max(r["l"] for r in rows)
+    max_fp = max(r["w"] * r["l"] for r in rows)
+    full_thin = [
+        r for r in rows
+        if r["w"] >= max_w * 0.85 and r["l"] >= max_l * 0.85 and 0.75 <= r["t"] <= 2.5
+    ]
+    thick_inner = [
+        r for r in rows
+        if r["t"] >= 3.0 and (r["w"] * r["l"]) < max_fp * 0.85 and (r["w"] * r["l"]) >= max_fp * 0.15
+    ]
+    thin_sheets = [r for r in rows if abs(r["t"] - 0.25) <= 0.06]
+
+    def _is_pot(r) -> bool:
+        t, w, l = r["t"], r["w"], r["l"]
+        if t < 3.0 or w <= 0 or l <= 0:
+            return False
+        if (l / w) > 1.7:
+            return False
+        fp = w * l
+        if fp >= 0.55 * max_fp:
+            return False
+        dim_max = max(t, w, l)
+        dim_min = min(t, w, l)
+        return dim_max > 0 and (dim_min / dim_max) >= 0.35
+
+    pot_like = [r for r in rows if _is_pot(r)]
+    full_plates = [
+        r for r in rows
+        if r["w"] >= max_w * 0.85 and r["l"] >= max_l * 0.85 and r["t"] >= 0.5
+    ]
+    if len(full_plates) >= 5:
+        return False
+    return (
+        len(full_thin) <= 2
+        and len(thick_inner) >= 2
+        and (len(pot_like) >= 2 or (len(thin_sheets) >= 2 and len(pot_like) >= 1))
+    )
 
 
 def classify_geometry(rows):
@@ -313,6 +381,30 @@ def classify_geometry(rows):
     stack_axis = "CenterY"
     roles = {}
     apply_strong_shop_name_hints(rows, roles)
+
+    # HARD GUARD: pot-block / BMS geometry must never invent A Plate / B Plate / Rails.
+    # Module6121 owns those jobs via BOM (TCP, ID/OD Holder, ID/OD Pot, BCP).
+    if looks_like_pot_block_geometry(rows):
+        return {
+            "job_analysis": {
+                "stack_axis": stack_axis,
+                "base_type": "bms",
+                "rules_for_this_job": [
+                    "Pot-block / BMS geometry detected — skipped standard A/B/rail classify. "
+                    "Use Module6121 BOM-driven TCP / Holder / Pot / BCP fill."
+                ],
+            },
+            "classifications": [
+                {
+                    "index": str(r["i"]),
+                    "role": "hardware_other",
+                    "confidence": "LOW",
+                    "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+                    "quote": False,
+                }
+                for r in rows
+            ],
+        }
 
     has_latch_lock = any(is_latch_lock_name(name_key(r)) for r in rows)
 
@@ -352,12 +444,14 @@ def classify_geometry(rows):
                 )
     else:
         for row in full_plates:
-            roles[str(row["i"])] = (
-                "full_footprint_plate",
-                "MEDIUM",
-                "Full-footprint plate, but fewer than 5 full plates were found so standard stack role was not forced.",
-                True,
-            )
+            idx = str(row["i"])
+            if idx not in roles:
+                roles[idx] = (
+                    "full_footprint_plate",
+                    "MEDIUM",
+                    "Full-footprint plate, but fewer than 5 full plates were found so standard stack role was not forced.",
+                    True,
+                )
 
     if len(full_plates) == 2:
         axes = {
@@ -367,13 +461,17 @@ def classify_geometry(rows):
         }
         die_axis = max(axes, key=axes.get)
         hi_full, lo_full = sorted(full_plates, key=lambda r: r[die_axis], reverse=True)
-        roles[str(lo_full["i"])] = (
+        _set_role_if_unlocked(
+            roles,
+            str(lo_full["i"]),
             "bottom_clamp_plate",
             "HIGH",
             "Two-half mold pattern: lower full-footprint plate along stack axis is BCP.",
             True,
         )
-        roles[str(hi_full["i"])] = (
+        _set_role_if_unlocked(
+            roles,
+            str(hi_full["i"]),
             "top_clamp_plate",
             "MEDIUM",
             "Two-half mold pattern: opposite full-footprint clamp plate.",
@@ -383,6 +481,7 @@ def classify_geometry(rows):
         non_full_blocks = [
             r for r in rows
             if str(r["i"]) not in roles
+            and not _shop_token_locked(roles, str(r["i"]))
             and r["t"] >= 3.0
             and r["w"] >= max_w * 0.30
             and r["l"] >= max_l * 0.30
@@ -390,13 +489,17 @@ def classify_geometry(rows):
         non_full_blocks.sort(key=lambda r: r["v"], reverse=True)
         if len(non_full_blocks) >= 2:
             high_inner, low_inner = sorted(non_full_blocks[:2], key=lambda r: r[die_axis], reverse=True)
-            roles[str(high_inner["i"])] = (
+            _set_role_if_unlocked(
+                roles,
+                str(high_inner["i"]),
                 "a_plate",
                 "MEDIUM",
                 "Two-half mold pattern: larger inner block on high side of stack axis.",
                 True,
             )
-            roles[str(low_inner["i"])] = (
+            _set_role_if_unlocked(
+                roles,
+                str(low_inner["i"]),
                 "b_plate",
                 "MEDIUM",
                 "Two-half mold pattern: matching inner block on low side of stack axis.",

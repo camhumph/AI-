@@ -1,0 +1,227 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter Variable", "Inter", -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  /* Dark SpaceX base — lifted slightly for readability */
+  --color-ink-950: #0e0e14;
+  --color-ink-900: #14141c;
+  --color-ink-850: #1a1a24;
+  --color-ink-800: #22222e;
+  --color-ink-700: #2e2e3a;
+  --color-ink-600: #4a4a58;
+  --color-ink-500: #7a7a88;
+  --color-ink-400: #a8a8b4;
+  --color-ink-300: #c8c8d0;
+  --color-ink-200: #e4e4ea;
+  --color-ink-100: #f5f5f7;
+
+  --color-brand-500: #0a84ff;
+  --color-brand-400: #409cff;
+  --color-brand-600: #0066cc;
+
+  --color-accent-teal: #0a84ff;
+  --color-accent-amber: #ff9f0a;
+  --color-accent-rose: #ff453a;
+  --color-accent-green: #30d158;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-ink-950);
+  color: var(--color-ink-100);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: 0.01em;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 90% 70% at 0% -10%, rgba(10, 132, 255, 0.12), transparent 55%),
+    radial-gradient(ellipse 70% 60% at 100% 110%, rgba(255, 255, 255, 0.07), transparent 50%),
+    radial-gradient(ellipse 50% 40% at 50% 50%, rgba(10, 132, 255, 0.04), transparent 70%);
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+h1, h2, h3 {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.font-mono, code {
+  font-family: var(--font-mono);
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 99px;
+}
+
+/* iOS liquid glass + SpaceX precision */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.065);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.35) inset,
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 16px 48px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+}
+
+.glass-panel-strong {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4) inset,
+    0 1px 0 rgba(255, 255, 255, 0.12) inset,
+    0 20px 60px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.glass-input:focus {
+  border-color: rgba(10, 132, 255, 0.5);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.15);
+  outline: none;
+}
+
+.scrollbar-thin { scrollbar-width: thin; }
+
+.section-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--color-ink-500);
+}
+
+/* Inbox — dark glass rows */
+.inbox-row {
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.inbox-row:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.inbox-row-selected {
+  background: rgba(10, 132, 255, 0.12);
+  box-shadow: inset 2px 0 0 var(--color-accent-teal);
+}
+
+.inbox-unread .inbox-sender,
+.inbox-unread .inbox-subject {
+  font-weight: 600;
+  color: var(--color-ink-100);
+}
+
+.compose-shadow {
+  box-shadow:
+    0 24px 80px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* Subtle grid — SpaceX engineering feel */
+.space-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* Modal / overlay backdrop */
+.overlay-backdrop {
+  background: rgba(14, 14, 20, 0.65);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+/* iOS-style segmented tab bar */
+.tab-bar {
+  display: inline-flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.tab-bar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  padding: 0.625rem 1rem;
+  border-radius: 9999px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-500);
+  transition: all 0.2s ease;
+}
+
+.tab-bar-item:hover {
+  color: var(--color-ink-200);
+}
+
+.tab-bar-item-active {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--color-ink-100);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+    0 0 20px rgba(10, 132, 255, 0.15);
+}
+
+/* Horizon line — launch-pad accent */
+.horizon-line {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(10, 132, 255, 0.35) 20%,
+    rgba(255, 255, 255, 0.12) 50%,
+    rgba(10, 132, 255, 0.35) 80%,
+    transparent
+  );
+}
+
+/* Glow pulse for live indicators */
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.glow-pulse {
+  animation: glow-pulse 2.5s ease-in-out infinite;
+}

@@ -239,3 +239,22 @@ Why B Plate is B Plate:
 - `T001015_B-PLATE` is an exact shop token.
 - Primary leader pins are centered at roughly the same stack position as B Plate.
 - `SC-RETAINER` and `SC-BACKUP` are extra sequenced plates below B, not replacements for B.
+
+## BMS / Pot-Block Steel Sheet Dimensions (W × L × H)
+
+BMS jobs do **not** use the AI classifier. The macro fills the J000 Steel Order /
+Machining Sheet from CAD bbox dims after the **CMS DXF view frame** is locked
+(TOP X=Width, TOP Y=Length, RIGHT X=Thickness). Do **not** use blind
+`L ≥ W ≥ T` sorting — holder/pot Thickness is often the largest size.
+
+| Steel sheet column | Meaning | CAD source |
+|---|---|---|
+| **C** | **Thickness / Height** | RIGHT view horizontal |
+| **E** | **Width** | TOP view horizontal |
+| **G** | **Length** | TOP view vertical |
+| H | Steel type | `#2 4140` |
+
+Never put Stock Weight into a size column. Tempcraft Lth/Wth/Hgt need
+role-based remap when BOM is the only source (see `bms_steel_dim_rules.md`).
+QuoteWorksheet stock sizes add +0.25" to thickness; steel sheet keeps finished sizes.
+Training writes `geometry_classifier/data/training/bms_steel_dim_rules.md` when BMS jobs are scanned.

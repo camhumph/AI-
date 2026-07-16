@@ -1,0 +1,571 @@
+import { useEffect, useState } from "react";
+import { Save, Mail, Send, FolderCog, CheckCircle2, XCircle, Brain, Play, AlertTriangle, Loader2, Square } from "lucide-react";
+import Layout from "../components/Layout";
+import { Card, Badge, Button, Spinner } from "../components/ui";
+import { api, type EmailSettings, type TrainingReport } from "../api/client";
+
+type Rate = { mode: string; rate: number; minimum: number };
+
+export default function SettingsPage() {
+  const [rates, setRates] = useState<Record<string, Rate> | null>(null);
+  const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null);
+  const [imapPassword, setImapPassword] = useState("");
+  const [smtpPassword, setSmtpPassword] = useState("");
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailSaved, setEmailSaved] = useState(false);
+  const [trainingStatus, setTrainingStatus] = useState<TrainingReport | null>(null);
+  const [trainingRunning, setTrainingRunning] = useState(false);
+  const [trainingError, setTrainingError] = useState("");
+  const [jobsRoot, setJobsRoot] = useState("C:\\Users\\lenovo\\Downloads\\TRAINING");
+  const [useQwen, setUseQwen] = useState(true);
+  const [exportXt, setExportXt] = useState(true);
+  const [qwenModel, setQwenModel] = useState("qwen3.5:9b");
+  const [qwenLiveText, setQwenLiveText] = useState("");
+
+  const [cancelling, setCancelling] = useState(false);
+
+  useEffect(() => {
+    api.getPricing().then(setRates);
+    api.getEmailSettings().then(setEmailSettings);
+    api.trainingStatus().then(setTrainingStatus).catch(() => setTrainingStatus(null));
+  }, []);
+
+  useEffect(() => {
+    if (!trainingStatus?.running && !trainingRunning) return;
+    const iv = setInterval(() => {
+      api.trainingStatus().then(setTrainingStatus).catch(() => {});
+    }, 1500);
+    return () => clearInterval(iv);
+  }, [trainingStatus?.running, trainingRunning]);
+
+  useEffect(() => {
+    if (!trainingStatus?.qwen_thinking) {
+      setQwenLiveText("");
+      return;
+    }
+    const poll = () => {
+      api.qwenLive().then((r) => setQwenLiveText(r.text || "")).catch(() => {});
+    };
+    poll();
+    const iv = setInterval(poll, 2000);
+    return () => clearInterval(iv);
+  }, [trainingStatus?.qwen_thinking, trainingStatus?.current_job]);
+
+  const saveEmail = async () => {
+    if (!emailSettings) return;
+    setEmailSaving(true);
+    try {
+      const updated = await api.putEmailSettings({
+        imap_host: emailSettings.imap_host,
+        imap_port: emailSettings.imap_port,
+        imap_user: emailSettings.imap_user,
+        imap_password: imapPassword,
+        imap_folder: emailSettings.imap_folder,
+        imap_ssl: emailSettings.imap_ssl,
+        smtp_host: emailSettings.smtp_host,
+        smtp_port: emailSettings.smtp_port,
+        smtp_user: emailSettings.smtp_user,
+        smtp_password: smtpPassword,
+        smtp_from: emailSettings.smtp_from,
+        gmail_address: emailSettings.gmail_address,
+      });
+      setEmailSettings(updated);
+      setImapPassword("");
+      setSmtpPassword("");
+      setEmailSaved(true);
+      setTimeout(() => setEmailSaved(false), 2000);
+    } finally {
+      setEmailSaving(false);
+    }
+  };
+
+  const [emailTestMsg, setEmailTestMsg] = useState("");
+
+  const testEmail = async () => {
+    setEmailTestMsg("");
+    try {
+      const r = await api.testEmail();
+      setEmailTestMsg(r.message);
+    } catch (e) {
+      setEmailTestMsg((e as Error).message);
+    }
+  };
+
+  const runTraining = async () => {
+    setTrainingRunning(true);
+    setTrainingError("");
+    setCancelling(false);
+    try {
+      const result = await api.runTraining(jobsRoot.trim() || undefined, useQwen, qwenModel, exportXt);
+      setTrainingStatus(result);
+      setTrainingRunning(false);
+    } catch (e) {
+      setTrainingError(e instanceof Error ? e.message : "Training scan failed");
+      setTrainingRunning(false);
+    }
+  };
+
+  const cancelTraining = async () => {
+    setCancelling(true);
+    try {
+      const result = await api.cancelTraining();
+      setTrainingStatus({ ...result, running: false, phase: "cancelled" });
+      setTrainingRunning(false);
+      setCancelling(false);
+    } catch (e) {
+      setTrainingError(e instanceof Error ? e.message : "Cancel failed");
+      // Force UI clear even if API fails
+      setTrainingStatus((prev) =>
+        prev ? { ...prev, running: false, phase: "cancelled", message: "Training cancelled" } : prev
+      );
+      setTrainingRunning(false);
+      setCancelling(false);
+    }
+  };
+
+  return (
+    <Layout title="Settings" subtitle="Email credentials, AI training, pricing, and Module6121 bridge.">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card className="p-5 lg:col-span-2">
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Mail className="h-4 w-4 text-ink-300" />
+              <h3 className="text-sm font-semibold text-ink-100">Gmail Credentials</h3>
+            </div>
+            <div className="flex items-center gap-2">
+              <StatusRow ok={!!emailSettings?.configured} label={emailSettings?.configured ? "Connected" : "Not connected"} />
+              <Button variant="secondary" onClick={testEmail} disabled={!emailSettings?.configured}>
+                Test
+              </Button>
+              <Button onClick={saveEmail} disabled={emailSaving || !emailSettings}>
+                <Save className="h-4 w-4" /> {emailSaving ? "Saving..." : emailSaved ? "Saved" : "Save"}
+              </Button>
+            </div>
+          </div>
+          <p className="mb-4 text-xs text-ink-400">
+            Enter your Gmail app password here only — not in <code className="text-ink-200">gmail_app_password.txt</code>.
+            Module6121 and the inbox both read from{" "}
+            <code className="text-ink-200">{emailSettings?.credentials_path || "cms_data/email_credentials.json"}</code> on this PC.
+          </p>
+          {emailTestMsg && <p className="mb-3 text-xs text-ink-300">{emailTestMsg}</p>}
+          {!emailSettings ? (
+            <Spinner label="Loading email settings..." />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <Field label="Gmail address" value={emailSettings.gmail_address} onChange={(v) => setEmailSettings({ ...emailSettings, gmail_address: v })} />
+              <Field label="IMAP user (usually same as Gmail)" value={emailSettings.imap_user} onChange={(v) => setEmailSettings({ ...emailSettings, imap_user: v, smtp_user: v })} />
+              <Field label="IMAP app password" type="password" placeholder={emailSettings.imap_password_set ? "•••••••• (saved — leave blank to keep)" : "16-character app password"} value={imapPassword} onChange={setImapPassword} />
+              <Field label="SMTP app password" type="password" placeholder={emailSettings.smtp_password_set ? "•••••••• (saved — leave blank to keep)" : "same app password"} value={smtpPassword} onChange={setSmtpPassword} />
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-5">
+          <div className="mb-3 flex items-center gap-2">
+            <Send className="h-4 w-4 text-ink-300" />
+            <h3 className="text-sm font-semibold text-ink-100">SMTP Replies</h3>
+          </div>
+          <StatusRow ok={!!emailSettings?.smtp_configured} label={emailSettings?.smtp_configured ? "Ready to send" : "Save credentials above"} />
+        </Card>
+
+        <Card className="p-5">
+          <div className="mb-3 flex items-center gap-2">
+            <FolderCog className="h-4 w-4 text-ink-300" />
+            <h3 className="text-sm font-semibold text-ink-100">Module6121 Bridge</h3>
+          </div>
+          <StatusRow ok label="Active at http://127.0.0.1:8000" />
+        </Card>
+
+        <Card className="p-5 lg:col-span-2">
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-ink-300" />
+              <h3 className="text-sm font-semibold text-ink-100">Training Scan (BMS + Standard)</h3>
+            </div>
+            <div className="flex items-center gap-2">
+              {(trainingStatus?.running || trainingRunning) && (
+                <Button variant="secondary" onClick={cancelTraining} disabled={cancelling}>
+                  <Square className="h-3.5 w-3.5" /> {cancelling ? "Stopping…" : "Cancel"}
+                </Button>
+              )}
+              <Button onClick={runTraining} disabled={trainingRunning || !!trainingStatus?.running}>
+                <Play className="h-4 w-4" />{" "}
+                {trainingStatus?.running
+                  ? trainingStatus.qwen_thinking
+                    ? "Qwen thinking…"
+                    : trainingStatus.phase === "xt_export"
+                      ? "SolidWorks XT…"
+                      : "Training…"
+                  : trainingRunning
+                    ? "Starting..."
+                    : "Run Training Scan"}
+              </Button>
+            </div>
+          </div>
+          <p className="mb-3 text-xs text-ink-400">
+            Scans your <strong>TRAINING</strong> folder. When a job has CAD but no{" "}
+            <code className="text-ink-300">XT_Export_CAD_Dimensions.csv</code>, SolidWorks runs the
+            dimension-export step from Module6121 automatically (leader pins, all components).
+            Optional <strong>Qwen</strong> pass runs after XT exists (slow — minutes per job).
+          </p>
+          <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Field
+              label="Training folder"
+              value={jobsRoot}
+              onChange={setJobsRoot}
+              placeholder="C:\Users\lenovo\Downloads\TRAINING"
+            />
+            <Field
+              label="Qwen model (Ollama)"
+              value={qwenModel}
+              onChange={setQwenModel}
+              placeholder="qwen3.5:9b"
+            />
+          </div>
+          <label className="mb-3 flex items-center gap-2 text-xs text-ink-400">
+            <input
+              type="checkbox"
+              checked={exportXt}
+              onChange={(e) => setExportXt(e.target.checked)}
+              className="rounded border-ink-700"
+            />
+            Auto-export XT from CAD via SolidWorks (opens each assembly — keep PC awake)
+          </label>
+          <label className="mb-3 flex items-center gap-2 text-xs text-ink-400">
+            <input
+              type="checkbox"
+              checked={useQwen}
+              onChange={(e) => setUseQwen(e.target.checked)}
+              className="rounded border-ink-700"
+            />
+            Run Qwen deep learning after XT export (slow — uncheck for fast scan only)
+          </label>
+          {((trainingStatus?.running) || trainingRunning) && trainingStatus?.phase !== "cancelled" && (
+            <div className="glass-panel-strong mb-4 overflow-hidden rounded-2xl p-4">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-200">
+                  <Loader2 className={`h-4 w-4 text-brand-400 ${trainingStatus?.qwen_thinking ? "animate-spin" : "animate-spin"}`} />
+                  {phaseLabel(trainingStatus?.phase, trainingStatus?.qwen_thinking)}
+                </div>
+                <div className="flex items-center gap-3 font-mono text-[11px] text-ink-500">
+                  <span>{formatElapsed(trainingStatus?.elapsed_sec)}</span>
+                  <span>
+                    {trainingStatus?.job_total
+                      ? `${trainingStatus.job_index ?? 0} / ${trainingStatus.job_total}`
+                      : "…"}
+                  </span>
+                </div>
+              </div>
+              <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-white/5">
+                <div
+                  className={`h-full rounded-full transition-all duration-500 ${
+                    trainingStatus?.qwen_thinking ? "bg-accent-amber" : "bg-brand-500"
+                  }`}
+                  style={{
+                    width: `${progressPct(trainingStatus?.job_index, trainingStatus?.job_total)}%`,
+                  }}
+                />
+              </div>
+              {trainingStatus?.qwen_thinking && (
+                <div className="mb-2 space-y-2">
+                  <div className="flex items-center gap-2 rounded-xl border border-accent-amber/30 bg-accent-amber/10 px-3 py-2 text-xs text-accent-amber">
+                    <Brain className="h-3.5 w-3.5 animate-pulse" />
+                    <span>
+                      Qwen is thinking
+                      {trainingStatus.qwen_elapsed_sec
+                        ? ` — ${formatElapsed(trainingStatus.qwen_elapsed_sec)} on this job`
+                        : " — loading model / generating…"}
+                      {trainingStatus.qwen_model ? ` · ${trainingStatus.qwen_model}` : ""}
+                    </span>
+                  </div>
+                  <div className="rounded-xl border border-ink-700/40 bg-ink-900/60 px-3 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+                      Live Qwen output
+                    </div>
+                    <div className="mt-1 font-mono text-[10px] text-ink-500">
+                      Open in Notepad:{" "}
+                      <span className="text-ink-300">
+                        {trainingStatus.qwen_live_output ||
+                          "C:\\CMS_AI\\geometry_classifier\\data\\training\\qwen_live_output.txt"}
+                      </span>
+                    </div>
+                    {qwenLiveText ? (
+                      <pre className="scrollbar-thin mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-ink-300">
+                        {qwenLiveText}
+                      </pre>
+                    ) : (
+                      <p className="mt-2 text-[10px] text-ink-500">
+                        Waiting for Ollama to stream text… (updates every 2s)
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div className="text-sm text-ink-100">
+                {trainingStatus?.current_job
+                  ? `Current job: ${trainingStatus.current_job}`
+                  : "Preparing…"}
+              </div>
+              <div className="mt-1 text-[12px] leading-relaxed text-ink-300">
+                {trainingStatus?.message || "Starting training scan…"}
+              </div>
+              {trainingStatus?.detail && (
+                <div className="mt-1 font-mono text-[10px] leading-relaxed text-ink-500">
+                  {trainingStatus.detail}
+                </div>
+              )}
+              <div className="mt-2 text-[10px] text-ink-600">
+                Updates every 1.5s · last: {trainingStatus?.updated_at || "—"}
+              </div>
+            </div>
+          )}
+          {trainingStatus?.phase === "cancelled" && !trainingStatus?.running && (
+            <div className="mb-3 flex items-center gap-2 rounded-xl border border-accent-amber/25 bg-accent-amber/10 px-3 py-2 text-xs text-accent-amber">
+              <Square className="h-3.5 w-3.5" /> Training cancelled
+              {trainingStatus.detail ? ` — ${trainingStatus.detail}` : ""}
+            </div>
+          )}
+          {trainingStatus?.phase === "done" && !trainingStatus?.running && (
+            <div className="mb-3 space-y-2">
+              <div className="flex items-center gap-2 rounded-xl border border-accent-green/25 bg-accent-green/10 px-3 py-2 text-xs text-accent-green">
+                <CheckCircle2 className="h-3.5 w-3.5" /> Training complete
+                {trainingStatus.detail ? ` — ${trainingStatus.detail}` : ""}
+              </div>
+              {(trainingStatus.disagreements_csv || trainingStatus.disagreements_md) && (
+                <div className="rounded-xl border border-ink-700/40 bg-ink-900/60 px-3 py-2 text-[10px] text-ink-400">
+                  <div className="font-semibold uppercase tracking-wider text-ink-500">
+                    Disagreements (steel vs rules)
+                  </div>
+                  <div className="mt-1 font-mono text-ink-300">
+                    CSV: {trainingStatus.disagreements_csv || "geometry_classifier\\data\\training\\training_disagreements.csv"}
+                  </div>
+                  <div className="mt-0.5 font-mono text-ink-300">
+                    Markdown: {trainingStatus.disagreements_md || "geometry_classifier\\data\\training\\training_disagreements.md"}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {trainingError && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-accent-rose">
+              <AlertTriangle className="h-3.5 w-3.5" /> {trainingError}
+            </p>
+          )}
+          {trainingStatus?.error && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-accent-rose">
+              <AlertTriangle className="h-3.5 w-3.5" /> {trainingStatus.error}
+            </p>
+          )}
+          {trainingStatus && (
+            <div className="mt-4 space-y-4">
+              <div className="flex flex-wrap gap-3 text-xs">
+                <Badge tone="neutral">
+                  {trainingStatus.jobs_completed ?? trainingStatus.jobs_processed ?? 0}{" "}
+                  {trainingStatus.running ? "jobs done" : "jobs scanned"}
+                  {trainingStatus.running && trainingStatus.job_total
+                    ? ` · on ${trainingStatus.job_index ?? 0}/${trainingStatus.job_total}`
+                    : ""}
+                </Badge>
+                <Badge tone="success">{trainingStatus.jobs_ok ?? 0} OK</Badge>
+                {(trainingStatus.xt_exported_jobs ?? 0) > 0 && (
+                  <Badge tone="brand">{trainingStatus.xt_exported_jobs} XT exported</Badge>
+                )}
+                <Badge tone="warning">{trainingStatus.bms_jobs ?? 0} BMS</Badge>
+                <Badge tone="neutral">{trainingStatus.standard_jobs ?? 0} standard</Badge>
+                <Badge tone={ (trainingStatus.overall_rules_accuracy_pct ?? 0) >= 90 ? "success" : "warning" }>
+                  Rules {trainingStatus.overall_rules_accuracy_pct ?? 0}%
+                </Badge>
+                {(trainingStatus.overall_qwen_accuracy_pct ?? 0) > 0 && (
+                  <Badge tone="neutral">Qwen {trainingStatus.overall_qwen_accuracy_pct}%</Badge>
+                )}
+              </div>
+
+              {trainingStatus.jobs_ok === 0 && (trainingStatus.jobs_processed ?? 0) > 0 && (
+                <p className="text-xs text-accent-amber">
+                  All jobs skipped or failed. Common fixes: install <code className="text-ink-300">xlrd</code>{" "}
+                  (<code className="text-ink-300">pip install xlrd</code>), use .xls steel sheets in each subfolder,
+                  enable <strong>Auto-export XT</strong> when CAD files are present, or add{" "}
+                  <code className="text-ink-300">XT_Export_CAD_Dimensions.csv</code> manually.
+                </p>
+              )}
+
+              {trainingStatus.results && trainingStatus.results.length > 0 && (
+                <div className="scrollbar-thin max-h-48 overflow-y-auto rounded border border-ink-700/30">
+                  <table className="w-full text-left text-xs">
+                    <thead className="sticky top-0 bg-ink-850 text-[10px] uppercase tracking-wider text-ink-500">
+                      <tr>
+                        <th className="px-3 py-2">Job</th>
+                        <th className="px-3 py-2">Type</th>
+                        <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Why / notes</th>
+                        <th className="px-3 py-2">XT</th>
+                        <th className="px-3 py-2">Rules %</th>
+                        <th className="px-3 py-2">Qwen %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {trainingStatus.results.map((r) => (
+                        <tr key={r.job_id} className="border-t border-ink-700/20">
+                          <td className="px-3 py-2 font-mono text-ink-200">{r.job_id}</td>
+                          <td className="px-3 py-2 uppercase text-ink-400">{r.base_type || "—"}</td>
+                          <td className="px-3 py-2 text-ink-400">{r.status}</td>
+                          <td className="max-w-xs truncate px-3 py-2 text-[10px] text-ink-500" title={r.reason}>
+                            {r.reason || "—"}
+                          </td>
+                          <td className="px-3 py-2 text-[10px] text-ink-400">
+                            {r.xt_export?.status === "exported"
+                              ? "new"
+                              : r.xt_export?.status === "exists"
+                                ? "yes"
+                                : r.xt_export?.status || "—"}
+                          </td>
+                          <td className="px-3 py-2 text-ink-300">
+                            {r.rules_accuracy_pct ?? r.accuracy_pct ?? "—"}
+                          </td>
+                          <td className="px-3 py-2 text-ink-300">
+                            {r.qwen_accuracy_pct ?? (r.qwen_ran === false ? "err" : "—")}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {trainingStatus.suggestions && trainingStatus.suggestions.length > 0 && (
+                <div>
+                  <div className="section-label mb-2">Rule & macro suggestions</div>
+                  <p className="mb-3 text-[11px] text-ink-500">
+                    These improve accuracy over time — not a guarantee of 100% on every mold. Apply high/critical items first.
+                  </p>
+                  <div className="space-y-2">
+                    {trainingStatus.suggestions.map((s, i) => (
+                      <div
+                        key={i}
+                        className="rounded border border-ink-700/25 bg-ink-900/40 px-3 py-2 text-xs"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Badge tone={s.priority === "critical" ? "warning" : s.priority === "high" ? "neutral" : "neutral"}>
+                            {s.priority}
+                          </Badge>
+                          <span className="font-semibold uppercase tracking-wider text-ink-300">{s.role}</span>
+                          {s.occurrences > 0 && (
+                            <span className="text-ink-600">×{s.occurrences}</span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-ink-400">{s.suggestion}</p>
+                        {s.examples && <p className="mt-1 text-[10px] text-ink-600">{s.examples}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <Card className="mt-6 p-5">
+        <div className="section-label mb-4">Purchased Component Prices (CSV)</div>
+        <p className="mb-4 text-xs text-ink-400">
+          Quote totals pull directly from Purchased Components Prices.csv and per-job Purchased Components Quote.csv.
+        </p>
+        {!rates ? (
+          <Spinner label="Loading CSV prices..." />
+        ) : Object.keys(rates).length === 0 ? (
+          <p className="text-xs text-ink-400">No prices in CSV yet.</p>
+        ) : (
+          <div className="scrollbar-thin overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="text-[10px] uppercase tracking-widest text-ink-500">
+                  <th className="px-3 py-2">Component</th>
+                  <th className="px-3 py-2">Unit Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(rates).map(([comp, spec]) => (
+                  <tr key={comp} className="border-t border-ink-800">
+                    <td className="px-3 py-2 text-ink-200">{comp}</td>
+                    <td className="px-3 py-2 text-ink-100">${spec.rate.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </Layout>
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  type = "text",
+  placeholder = "",
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+  placeholder?: string;
+}) {
+  return (
+    <label className="block text-xs text-ink-400">
+      {label}
+      <input
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className="glass-input mt-1 w-full rounded-xl px-3 py-2.5 text-sm text-ink-100 placeholder:text-ink-500"
+      />
+    </label>
+  );
+}
+
+function StatusRow({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      {ok ? <CheckCircle2 className="h-4 w-4 text-accent-green" /> : <XCircle className="h-4 w-4 text-ink-500" />}
+      <Badge tone={ok ? "success" : "neutral"}>{label}</Badge>
+    </div>
+  );
+}
+
+function phaseLabel(phase?: string, qwenThinking?: boolean) {
+  if (qwenThinking) return "Qwen thinking";
+  switch (phase) {
+    case "starting":
+      return "Starting";
+    case "scan":
+      return "Scanning jobs";
+    case "xt_export":
+      return "SolidWorks XT export";
+    case "qwen":
+      return "Qwen training";
+    case "done":
+      return "Complete";
+    case "cancelled":
+      return "Cancelled";
+    case "error":
+      return "Error";
+    default:
+      return phase ? phase.replace(/_/g, " ") : "Working";
+  }
+}
+
+function progressPct(index?: number, total?: number) {
+  if (!total || total <= 0) return 8;
+  const n = Math.max(0, Math.min(total, index ?? 0));
+  return Math.max(4, Math.round((100 * n) / total));
+}
+
+function formatElapsed(sec?: number) {
+  if (sec == null || sec < 0) return "0:00";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}

@@ -168,7 +168,7 @@ Private Const DOWNLOADS_FOLDER As String = "C:\Users\lenovo\Downloads"
 Private Const TRUSTED_FOLDER As String = "C:\Users\lenovo\Documents\Trust"
 ' Gmail SMTP for the proposal email-back (same app password as the picker script).
 Private Const GMAIL_ADDRESS As String = "cms1engineering@gmail.com"
-Private Const GMAIL_APP_PASSWORD As String = "fipw wryb aktk vtmu"
+Private Const GMAIL_APP_PASSWORD As String = ""  ' REDACTED - old password leaked to GitHub, REVOKE it and use C:\CMS_Local_Workspace\gmail_app_password.txt
 Private Const QUOTE_SHEET_NAME As String = "QuoteWorksheet"
 Private Const POTBLOCK_STEEL_TYPE As String = "#2 4140"
 ' Quote worksheet shows STOCK sizes = finished size rounded UP to the next 1/4".
