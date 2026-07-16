@@ -16,6 +16,7 @@
 ' ============================================================
 
 Const DOWNLOADS_FOLDER       = "C:\Users\lenovo\Downloads"
+Const CUSTOMER_DOWNLOADS_ROOT = "\\Mycloudex2ultra\mexico\Downloads"
 Const LOCAL_WORKSPACE_ROOT   = "C:\CMS_Local_Workspace"
 Const QUOTE_PROPOSALS_FOLDER = "\\Mycloudex2ultra\mexico\Cameron's stuff\RON'S QUOTES\Quote-Proposals-2026"
 Const JOB_ROOT_BASE          = "\\Mycloudex2ultra\mexico\Cameron's stuff\RON'S QUOTES"   ' Ron-only month folders live here
@@ -43,6 +44,10 @@ Const SW_MACRO = "C:\CMS_Local_Workspace\Module6121.swp"   ' compiled macro — 
 ' Handoff file written for Module6121 to read
 Const HANDOFF_FILE = "C:\CMS_Local_Workspace\cms_handoff.txt"
 Const TRAINING_TRIGGER = "C:\CMS_Local_Workspace\cms_training_xt.txt"
+Const MACRO_STATUS_FILE = "C:\CMS_Local_Workspace\cms_macro_status.txt"
+Const MACRO_STARTED_FILE = "C:\CMS_Local_Workspace\cms_macro_started.txt"
+Const MACRO_DONE_FILE = "C:\CMS_Local_Workspace\cms_macro_done.txt"
+Const MACRO_ERROR_FILE = "C:\CMS_Local_Workspace\cms_macro_error.txt"
 
 ' Gmail search (Python) settings
 Const USE_GMAIL_SEARCH  = True
@@ -55,19 +60,28 @@ Const EMAIL_OUTPUT_FILE = "C:\CMS_Local_Workspace\cms_email.txt"
 ' ============================================================
 Dim fso
 Set fso = CreateObject("Scripting.FileSystemObject")
-Dim gAttachDir, gPreferredCNum, gCadPath, gCustomerPrefix, gCustomerName
+Dim gAttachDir, gPreferredCNum, gCadPath, gCustomerPrefix, gCustomerName, gLocalJobFolder, gEmailCadPath
 gAttachDir = ""
 gPreferredCNum = ""
 gCadPath = ""
 gCustomerPrefix = ""
 gCustomerName = ""
+gLocalJobFolder = ""
+gEmailCadPath = ""
 
 ' Make sure the local workspace exists (handoff + email files live here)
 If Not fso.FolderExists(LOCAL_WORKSPACE_ROOT) Then fso.CreateFolder LOCAL_WORKSPACE_ROOT
+' Log FIRST so the webapp can see the process started even if later steps fail.
+LogStep "===== launcher process alive ====="
 If fso.FileExists(TRAINING_TRIGGER) Then
     fso.DeleteFile TRAINING_TRIGGER, True
     LogStep "cleared stale cms_training_xt.txt (live quote, not training)"
 End If
+' Clear stale macro launch acknowledgements from a previous cancelled/failed run.
+DeleteIfExists MACRO_STATUS_FILE
+DeleteIfExists MACRO_STARTED_FILE
+DeleteIfExists MACRO_DONE_FILE
+DeleteIfExists MACRO_ERROR_FILE
 LogStep "===== launcher started ====="
 
 ' 1. Prefer an existing C-number (e.g. BMS-851100029-C18603 → C18603).
@@ -132,6 +146,25 @@ Else
     LogStep "no existing C-number found — assigned new quote: " & quoteNum
 End If
 
+' Force the source files to come from the customer Downloads archive folder.
+' Example:
+' \\Mycloudex2ultra\mexico\Downloads\000000007. July-2026\BMS-851100038-C18605
+Dim customerSourceFolder
+customerSourceFolder = FindCustomerDownloadJobFolder(custJobNum, cNum)
+
+If customerSourceFolder <> "" Then
+    gAttachDir = customerSourceFolder
+
+    ' Do not trust any stale local/webapp CAD path.
+    ' We will restage from the authoritative customer folder.
+    gLocalJobFolder = ""
+    gEmailCadPath = ""
+
+    LogStep "using customer Downloads source folder: " & gAttachDir
+Else
+    LogStep "WARNING: customer Downloads source folder not found for CustJob=" & custJobNum & " CNum=" & cNum
+End If
+
 ' 5. Create the job folder in the current month folder and drop the
 '    downloaded CAD/BOM files (from the email) into it.
 Dim monthFolder, jobFolderName, jobFolderPath
@@ -150,16 +183,81 @@ If jobFolderPath = "" Then
     End If
 End If
 
-' 6. Find the CAD file NOW so SolidWorks can open it BEFORE the macro runs.
-gCadPath = FindBestCadInFolders(jobFolderPath, gAttachDir)
-If gCadPath <> "" Then
-    LogStep "CAD to open first: " & gCadPath
+' 5b. Pull customer files into C:\CMS_Local_Workspace\C#####.
+' If we found the official customer Downloads folder, force restage from there.
+Dim localStagePath
+localStagePath = ""
+
+If customerSourceFolder <> "" Then
+    LogStep "force-restaging from customer source folder: " & customerSourceFolder
+
+    ' Important: pass blank jobFolderPath here so stale Ron quote folder files cannot affect XT selection.
+    localStagePath = StageJobToLocalWorkspace(cNum, "", customerSourceFolder)
 Else
-    LogStep "WARNING: no CAD file found yet in job/attach folders"
+    If gLocalJobFolder <> "" And fso.FolderExists(gLocalJobFolder) Then
+        ' Do NOT call FindBestXtInFolder here — recursive XT search hangs on ZIP/SLDASM jobs.
+        localStagePath = gLocalJobFolder
+        LogStep "using existing local folder (Module6121 will find CAD): " & localStagePath
+    End If
+
+    If localStagePath = "" Then
+        localStagePath = StageJobToLocalWorkspace(cNum, jobFolderPath, gAttachDir)
+    End If
+End If
+
+If localStagePath <> "" Then
+    gLocalJobFolder = localStagePath
+    LogStep "local CMS workspace ready: " & gLocalJobFolder
+Else
+    LogStep "ERROR: could not stage customer files into local workspace for " & cNum
+End If
+
+' 6. FAST PATH:
+' Do NOT recursively search/open CAD in the launcher.
+' The launcher was hanging here on ZIP jobs that contain SLDASM/SLDPRT instead of X_T.
+' Module6121 already knows how to unzip/find/open CAD from AttachDir/JobFolder.
+gCadPath = ""
+
+' Only use CadPath if the webapp/email explicitly gave one and it exists.
+If gEmailCadPath <> "" Then
+    If fso.FileExists(gEmailCadPath) And Not IsGeneratedBaseCadPath(gEmailCadPath) Then
+        If gLocalJobFolder <> "" Then
+            gCadPath = FindLocalCopyOfFile(gLocalJobFolder, gEmailCadPath)
+        End If
+
+        If gCadPath = "" Then gCadPath = gEmailCadPath
+
+        If gCadPath <> "" Then
+            gCadPath = EnsureCadIsLocal(gCadPath, cNum)
+            LogStep "using explicit email/webapp CadPath: " & gCadPath
+        End If
+    Else
+        LogStep "explicit email/webapp CadPath missing or generated; ignoring: " & gEmailCadPath
+    End If
+End If
+
+If gCadPath = "" Then
+    LogStep "FAST: skipping launcher recursive CAD search. Module6121 will find/open CAD from handoff folders."
+    LogStep "FAST: AttachDir=" & gAttachDir
+    LogStep "FAST: LocalJobFolder=" & gLocalJobFolder
+    LogStep "FAST: JobFolderPath=" & jobFolderPath
 End If
 
 ' 7. Write the handoff file for Module6121 (includes CadPath so macro uses open model)
-WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, jobFolderName, customerPrefix, customerName, gAttachDir, gCadPath
+'    If the webapp already wrote BatchCount>1, keep that multi-job handoff.
+Dim handoffJobFolder
+handoffJobFolder = jobFolderName
+If customerSourceFolder <> "" Then
+    ' Use exact customer Downloads leaf (e.g. BMS-851100048-C18607) for output naming.
+    handoffJobFolder = fso.GetFileName(customerSourceFolder)
+End If
+If ExistingBatchCount() > 1 Then
+    LogStep "preserving webapp BatchCount handoff (" & ExistingBatchCount() & " jobs); CadPath=" & gCadPath
+    If gCadPath <> "" Then PatchBatchHandoffCadPath 1, gCadPath
+Else
+    WriteHandoff cNum, quoteNum, custJobNum, similarTo, shipDate, monthFolder, handoffJobFolder, customerPrefix, customerName, gAttachDir, gCadPath
+    LogStep "handoff AttachDir=" & gAttachDir & " JobFolder=" & handoffJobFolder
+End If
 
 Dim proposalPath
 proposalPath = ""
@@ -328,21 +426,115 @@ End Function
 ' ============================================================
 ' HANDOFF FILE  (Module6121 reads this at startup)
 ' ============================================================
+Sub DeleteIfExists(ByVal p)
+    On Error Resume Next
+    If fso.FileExists(p) Then fso.DeleteFile p, True
+    On Error GoTo 0
+End Sub
+
+Sub WriteHandoffAtomic(ByVal handoffPath, ByVal text)
+    Dim tmpPath
+    tmpPath = handoffPath & ".tmp"
+
+    DeleteIfExists tmpPath
+
+    Dim ts
+    Set ts = fso.CreateTextFile(tmpPath, True)
+    ts.Write text
+    ts.Close
+
+    DeleteIfExists handoffPath
+    fso.MoveFile tmpPath, handoffPath
+End Sub
+
 Sub WriteHandoff(cNum, quoteNum, custJobNum, similarTo, shipDate, rootPath, jobFolder, customerPrefix, customerName, attachDir, cadPath)
-    Dim f
-    Set f = fso.CreateTextFile(HANDOFF_FILE, True)
-    f.WriteLine "CNum="      & cNum
-    f.WriteLine "QuoteNum="  & quoteNum
-    f.WriteLine "CustJob="   & custJobNum
-    f.WriteLine "SimilarTo=" & similarTo
-    f.WriteLine "ShipDate="  & shipDate
-    f.WriteLine "RootPath="  & rootPath
-    f.WriteLine "JobFolder=" & jobFolder
-    f.WriteLine "CustomerPrefix=" & customerPrefix
-    f.WriteLine "CustomerName=" & customerName
-    If attachDir <> "" Then f.WriteLine "AttachDir=" & attachDir
-    If cadPath <> "" Then f.WriteLine "CadPath=" & cadPath
-    f.Close
+    Dim body
+    body = "CNum=" & cNum & vbCrLf & _
+           "QuoteNum=" & quoteNum & vbCrLf & _
+           "CustJob=" & custJobNum & vbCrLf & _
+           "SimilarTo=" & similarTo & vbCrLf & _
+           "ShipDate=" & shipDate & vbCrLf & _
+           "RootPath=" & rootPath & vbCrLf & _
+           "JobFolder=" & jobFolder & vbCrLf & _
+           "CustomerPrefix=" & customerPrefix & vbCrLf & _
+           "CustomerName=" & customerName & vbCrLf
+    If attachDir <> "" Then body = body & "AttachDir=" & attachDir & vbCrLf
+    If cadPath <> "" Then body = body & "CadPath=" & cadPath & vbCrLf
+    WriteHandoffAtomic HANDOFF_FILE, body
+End Sub
+
+Function ExistingBatchCount()
+    ExistingBatchCount = 0
+    On Error Resume Next
+    If Not fso.FileExists(HANDOFF_FILE) Then Exit Function
+    Dim ts, line, p, k, v
+    Set ts = fso.OpenTextFile(HANDOFF_FILE, 1)
+    Do Until ts.AtEndOfStream
+        line = ts.ReadLine
+        p = InStr(line, "=")
+        If p > 0 Then
+            k = UCase(Trim(Left(line, p - 1)))
+            v = Trim(Mid(line, p + 1))
+            If k = "BATCHCOUNT" Then
+                If IsNumeric(v) Then ExistingBatchCount = CLng(v)
+                Exit Do
+            End If
+        End If
+    Loop
+    ts.Close
+    On Error GoTo 0
+End Function
+
+Sub PatchBatchHandoffCadPath(ByVal jobIndex, ByVal cadPath)
+    On Error Resume Next
+    If cadPath = "" Or Not fso.FileExists(HANDOFF_FILE) Then Exit Sub
+    Dim ts, content, key, lines, i, line, p, k, outBody, replaced
+    Set ts = fso.OpenTextFile(HANDOFF_FILE, 1)
+    content = ts.ReadAll
+    ts.Close
+    key = "Job" & jobIndex & ".CadPath="
+    lines = Split(content, vbCrLf)
+    outBody = ""
+    replaced = False
+    For i = 0 To UBound(lines)
+        line = lines(i)
+        p = InStr(line, "=")
+        If p > 0 Then
+            k = Left(line, p - 1)
+            If StrComp(k, "Job" & jobIndex & ".CadPath", vbTextCompare) = 0 Then
+                line = key & cadPath
+                replaced = True
+            End If
+        End If
+        If outBody <> "" Then outBody = outBody & vbCrLf
+        outBody = outBody & line
+    Next
+    If Not replaced Then outBody = outBody & vbCrLf & key & cadPath
+    WriteHandoffAtomic HANDOFF_FILE, outBody
+    On Error GoTo 0
+End Sub
+
+' Write BatchCount=N + Job1.* / Job2.* ... for sequential multi-quote runs.
+Sub WriteBatchHandoff(ByVal jobs)
+    ' jobs is a 1-based array of dictionaries OR a Collection of Scripting.Dictionary
+    Dim i, n, body, d
+    n = UBound(jobs)
+    body = "BatchCount=" & n & vbCrLf & vbCrLf
+    For i = 1 To n
+        Set d = jobs(i)
+        body = body & "Job" & i & ".CNum=" & d("CNum") & vbCrLf
+        body = body & "Job" & i & ".QuoteNum=" & d("QuoteNum") & vbCrLf
+        body = body & "Job" & i & ".CustJob=" & d("CustJob") & vbCrLf
+        body = body & "Job" & i & ".SimilarTo=" & d("SimilarTo") & vbCrLf
+        body = body & "Job" & i & ".ShipDate=" & d("ShipDate") & vbCrLf
+        body = body & "Job" & i & ".RootPath=" & d("RootPath") & vbCrLf
+        body = body & "Job" & i & ".JobFolder=" & d("JobFolder") & vbCrLf
+        body = body & "Job" & i & ".CustomerPrefix=" & d("CustomerPrefix") & vbCrLf
+        body = body & "Job" & i & ".CustomerName=" & d("CustomerName") & vbCrLf
+        body = body & "Job" & i & ".AttachDir=" & d("AttachDir") & vbCrLf
+        body = body & "Job" & i & ".CadPath=" & d("CadPath") & vbCrLf & vbCrLf
+    Next
+    WriteHandoffAtomic HANDOFF_FILE, body
 End Sub
 
 ' Prefer C##### already present on the job (folder name, subject, attach path).
@@ -435,8 +627,300 @@ Function ExtractCNumberToken(s)
     Loop
 End Function
 
+Function SampleFolderFiles(ByVal folderPath)
+    SampleFolderFiles = ""
+    On Error Resume Next
+
+    Dim f, n, parts, sub1, f2
+    n = 0
+    parts = ""
+
+    If folderPath = "" Then
+        SampleFolderFiles = "(missing folder)"
+        Exit Function
+    End If
+
+    If Not fso.FolderExists(folderPath) Then
+        SampleFolderFiles = "(folder not found)"
+        Exit Function
+    End If
+
+    For Each f In fso.GetFolder(folderPath).Files
+        If n > 0 Then parts = parts & ", "
+        parts = parts & f.Name
+        n = n + 1
+        If n >= 6 Then Exit For
+    Next
+
+    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+        If UCase(sub1.Name) <> "BASE" Then
+            If n > 0 Then parts = parts & ", "
+            parts = parts & "[" & sub1.Name & "/"
+
+            For Each f2 In sub1.Files
+                parts = parts & f2.Name & " "
+                n = n + 1
+                If n >= 10 Then Exit For
+            Next
+
+            parts = parts & "]"
+            n = n + 1
+
+            If n >= 10 Then Exit For
+        End If
+    Next
+
+    If parts = "" Then parts = "(empty)"
+    SampleFolderFiles = parts
+
+    On Error GoTo 0
+End Function
+
+Function IsGeneratedBaseCadPath(ByVal p)
+    IsGeneratedBaseCadPath = False
+    Dim u
+    u = UCase(CStr(p))
+    If u = "" Then Exit Function
+    If InStr(u, "\BASE\") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
+    If InStr(u, "/BASE/") > 0 Then IsGeneratedBaseCadPath = True: Exit Function
+End Function
+
+' True when path/name clearly belongs to a DIFFERENT C-number or BMS job id.
+' Example: reject 851100021_MOLD_BASE....x_t when quoting 851100043-C18606.
+' Ignores Ron month-folder ids like 000000007.July 2026 in the UNC path.
+Function IsMonthFolderJobToken(ByVal digits)
+    IsMonthFolderJobToken = False
+    Dim d, n
+    d = Trim(CStr(digits))
+    If d = "" Then Exit Function
+    If Not IsNumeric(d) Then Exit Function
+    ' Month folders: 000000001 .. 000000012 (9-digit zero pad)
+    If Len(d) = 9 And Left(d, 6) = "000000" Then
+        n = CLng(d)
+        If n >= 1 And n <= 12 Then IsMonthFolderJobToken = True: Exit Function
+    End If
+    If Len(d) >= 8 And Left(d, 5) = "00000" Then IsMonthFolderJobToken = True
+End Function
+
+Function CadMismatchScanText(ByVal pathOrName)
+    ' Filename + parent folder only (skip month folders higher in the path).
+    Dim u, parts, i, n, a, b
+    CadMismatchScanText = ""
+    u = Replace(CStr(pathOrName), "/", "\")
+    If u = "" Then Exit Function
+    parts = Split(u, "\")
+    n = -1
+    For i = 0 To UBound(parts)
+        If Trim(parts(i)) <> "" Then n = n + 1
+    Next
+    If n < 0 Then Exit Function
+    ' Rebuild non-empty parts list via simple leaf/parent extract
+    a = fso.GetFileName(u)
+    b = fso.GetFileName(fso.GetParentFolderName(u))
+    If b <> "" And a <> "" Then
+        CadMismatchScanText = b & "\" & a
+    Else
+        CadMismatchScanText = a
+    End If
+End Function
+
+Function IsForeignJobCad(ByVal pathOrName)
+    IsForeignJobCad = False
+    Dim u, wantC, wantJob, tok, digits, i, ch, p, foundOtherC, foundWantC, foundOtherJob, foundWantJob
+    Dim atC, digStart
+    u = UCase(CadMismatchScanText(pathOrName))
+    If u = "" Then u = UCase(CStr(pathOrName))
+    If u = "" Then Exit Function
+    wantC = UCase(Trim(CStr(cNum)))
+    If wantC = "" Then wantC = UCase(Trim(CStr(quoteNoHyphen)))
+    wantJob = UCase(Trim(CStr(custJobNum)))
+    If wantJob <> "" Then
+        digits = ""
+        For i = 1 To Len(wantJob)
+            ch = Mid(wantJob, i, 1)
+            If ch >= "0" And ch <= "9" Then digits = digits & ch
+        Next
+        wantJob = digits
+    End If
+    If IsMonthFolderJobToken(wantJob) Then wantJob = ""
+
+    foundOtherC = False: foundWantC = False
+    foundOtherJob = False: foundWantJob = False
+
+    ' Scan for C##### tokens
+    p = 1
+    Do While p <= Len(u)
+        atC = False
+        If Mid(u, p, 1) = "C" And p < Len(u) Then
+            If Mid(u, p + 1, 1) >= "0" And Mid(u, p + 1, 1) <= "9" Then
+                If p = 1 Or Not ((Mid(u, p - 1, 1) >= "A" And Mid(u, p - 1, 1) <= "Z") Or (Mid(u, p - 1, 1) >= "0" And Mid(u, p - 1, 1) <= "9")) Then
+                    digStart = p + 1
+                    digits = ""
+                    i = digStart
+                    Do While i <= Len(u)
+                        ch = Mid(u, i, 1)
+                        If ch >= "0" And ch <= "9" Then
+                            digits = digits & ch
+                        Else
+                            Exit Do
+                        End If
+                        i = i + 1
+                    Loop
+                    If Len(digits) >= 4 And Len(digits) <= 6 Then
+                        tok = "C" & digits
+                        If wantC <> "" And tok = wantC Then
+                            foundWantC = True
+                        ElseIf wantC <> "" Then
+                            foundOtherC = True
+                        End If
+                        p = i
+                        atC = True
+                    End If
+                End If
+            End If
+        End If
+        If Not atC Then p = p + 1
+    Loop
+
+    ' Scan for 8+ digit BMS-style job numbers (851100021 vs 851100043)
+    digits = ""
+    For i = 1 To Len(u) + 1
+        If i <= Len(u) Then ch = Mid(u, i, 1) Else ch = ""
+        If ch >= "0" And ch <= "9" Then
+            digits = digits & ch
+        Else
+            If Len(digits) >= 8 Then
+                If Not IsMonthFolderJobToken(digits) Then
+                    If wantJob <> "" And digits = wantJob Then
+                        foundWantJob = True
+                    ElseIf wantJob <> "" Then
+                        foundOtherJob = True
+                    End If
+                End If
+            End If
+            digits = ""
+        End If
+    Next
+
+    If foundOtherC And Not foundWantC Then IsForeignJobCad = True: Exit Function
+    If foundOtherJob And Not foundWantJob Then IsForeignJobCad = True: Exit Function
+End Function
+
+' Find the same filename under a local staged folder (recursive one level + root).
+Function FindLocalCopyOfFile(ByVal localFolder, ByVal sourcePath)
+    FindLocalCopyOfFile = ""
+    On Error Resume Next
+    If localFolder = "" Or sourcePath = "" Then Exit Function
+    If Not fso.FolderExists(localFolder) Then Exit Function
+    Dim leaf, candidate, sub1, f
+    leaf = fso.GetFileName(sourcePath)
+    If leaf = "" Then Exit Function
+    candidate = localFolder & "\" & leaf
+    If fso.FileExists(candidate) Then FindLocalCopyOfFile = candidate: Exit Function
+    For Each f In fso.GetFolder(localFolder).Files
+        If StrComp(f.Name, leaf, vbTextCompare) = 0 Then
+            FindLocalCopyOfFile = f.Path
+            Exit Function
+        End If
+    Next
+    For Each sub1 In fso.GetFolder(localFolder).SubFolders
+        If UCase(sub1.Name) <> "BASE" Then
+            candidate = sub1.Path & "\" & leaf
+            If fso.FileExists(candidate) Then
+                FindLocalCopyOfFile = candidate
+                Exit Function
+            End If
+            For Each f In sub1.Files
+                If StrComp(f.Name, leaf, vbTextCompare) = 0 Then
+                    FindLocalCopyOfFile = f.Path
+                    Exit Function
+                End If
+            Next
+        End If
+    Next
+    On Error GoTo 0
+End Function
+
+' If CAD is still on a UNC/network path, copy it into C:\CMS_Local_Workspace\C#####.
+Function EnsureCadIsLocal(ByVal cadPath, ByVal cNumLocal)
+    EnsureCadIsLocal = cadPath
+    On Error Resume Next
+    If cadPath = "" Then Exit Function
+    If Not fso.FileExists(cadPath) Then Exit Function
+    Dim u, destFolder, destFile
+    u = UCase(cadPath)
+    If Left(u, Len(UCase(LOCAL_WORKSPACE_ROOT))) = UCase(LOCAL_WORKSPACE_ROOT) Then
+        EnsureCadIsLocal = cadPath
+        Exit Function
+    End If
+    ' Already local drive path under C:\ — still OK for OpenDoc; only force-copy UNC.
+    If Left(cadPath, 2) <> "\\" Then
+        EnsureCadIsLocal = cadPath
+        Exit Function
+    End If
+    If cNumLocal = "" Then cNumLocal = "CAD"
+    destFolder = LOCAL_WORKSPACE_ROOT & "\" & CleanFolderToken(cNumLocal)
+    EnsureFolderDeep destFolder
+    destFile = destFolder & "\" & fso.GetFileName(cadPath)
+    fso.CopyFile cadPath, destFile, True
+    If fso.FileExists(destFile) Then
+        LogStep "copied network CAD to local for OpenDoc: " & destFile
+        EnsureCadIsLocal = destFile
+    Else
+        LogStep "WARNING: could not copy network CAD locally; OpenDoc may fail: " & cadPath
+        EnsureCadIsLocal = cadPath
+    End If
+    On Error GoTo 0
+End Function
+
+' Open the XT (or STEP/IGES/SLD*) in SolidWorks. Capture the returned ModelDoc2.
+Function OpenCadInSolidWorks(ByVal swApp, ByVal cadPath)
+    OpenCadInSolidWorks = False
+    On Error Resume Next
+    Dim ext, errs, warns, importErrors, mdl
+    If cadPath = "" Then Exit Function
+    If Not fso.FileExists(cadPath) Then
+        LogStep "XT/CAD file missing: " & cadPath
+        Exit Function
+    End If
+
+    ext = LCase(fso.GetExtensionName(cadPath))
+    errs = 0: warns = 0: importErrors = 0
+    Set mdl = Nothing
+    Err.Clear
+    swApp.Visible = True
+    swApp.UserControl = True
+    swApp.CommandInProgress = False
+    Err.Clear
+
+    ' XT / STEP / IGES: LoadFile4 (this is how SolidWorks opens foreign files)
+    If ext = "x_t" Or ext = "x_b" Or ext = "step" Or ext = "stp" Or ext = "igs" Or ext = "iges" Then
+        Set mdl = swApp.LoadFile4(cadPath, "", Nothing, importErrors)
+        If mdl Is Nothing Then
+            Err.Clear
+            Set mdl = swApp.LoadFile4(cadPath, "r", Nothing, importErrors)
+        End If
+    ElseIf ext = "sldasm" Then
+        Set mdl = swApp.OpenDoc6(cadPath, 2, 1, "", errs, warns)
+    ElseIf ext = "sldprt" Then
+        Set mdl = swApp.OpenDoc6(cadPath, 1, 1, "", errs, warns)
+    Else
+        Set mdl = swApp.LoadFile4(cadPath, "", Nothing, importErrors)
+    End If
+
+    If Not mdl Is Nothing Then
+        OpenCadInSolidWorks = True
+        LogStep "opened XT/CAD OK: " & cadPath
+    Else
+        LogStep "WARNING: could not open XT/CAD (LoadFile4 returned Nothing) importErrors=" & importErrors & " — macro will try: " & cadPath
+    End If
+    Err.Clear
+    On Error GoTo 0
+End Function
+
 ' Rank CAD files: strongly prefer the assembly that matches this job's C-number.
 ' Example: 863700126-C18614.sldasm beats 863700102_RFQ_MB_ASM_....sldasm
+' Never prefer previously exported \base\*.SLDASM outputs.
 Function CadPriority(ext, fileName)
     Dim e, bonus, u
     e = LCase(ext)
@@ -448,49 +932,261 @@ Function CadPriority(ext, fileName)
     If quoteNoHyphen <> "" Then
         If InStr(u, UCase(quoteNoHyphen)) > 0 Then bonus = bonus + 400
     End If
+    If custJobNum <> "" Then
+        If InStr(u, UCase(custJobNum)) > 0 Then bonus = bonus + 500
+    End If
     If jobFolderName <> "" Then
         If InStr(u, UCase(jobFolderName)) > 0 Then bonus = bonus + 200
     End If
     If InStr(u, "MOLDBASE") > 0 Or InStr(u, "MOLD_BASE") > 0 Then
         bonus = bonus + 30
-    ElseIf InStr(u, "BASE") > 0 And InStr(u, "DATABASE") = 0 Then
+    ElseIf InStr(u, "BASE") > 0 And InStr(u, "DATABASE") = 0 And InStr(u, "MOLDBASE") = 0 Then
         bonus = bonus + 10
     End If
     If InStr(u, "RFQ") > 0 And bonus < 400 Then bonus = bonus - 40
+    If InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0 Then
+        bonus = bonus + 60
+    End If
     Select Case e
-        Case "sldasm": CadPriority = 100 + bonus
-        Case "step", "stp": CadPriority = 80 + bonus
-        Case "x_t", "x_b": CadPriority = 75 + bonus
-        Case "igs", "iges": CadPriority = 70 + bonus
-        Case "sldprt": CadPriority = 50 + bonus
-        Case "prt": CadPriority = 45 + bonus
+        Case "x_t", "x_b": CadPriority = 200 + bonus
+        Case "step", "stp": CadPriority = 110 + bonus
+        Case "sldasm": CadPriority = 105 + bonus
+        Case "igs", "iges": CadPriority = 90 + bonus
+        Case "sldprt": CadPriority = 55 + bonus
+        Case "prt", "asm": CadPriority = 50 + bonus
         Case Else: CadPriority = 0
     End Select
     If CadPriority < 0 Then CadPriority = 0
+End Function
+
+' Extra score when CAD lives under an unzipped mold-base subfolder.
+Function CadFolderBonus(ByVal folderPath)
+    Dim u
+    CadFolderBonus = 0
+    u = UCase(CStr(folderPath))
+    If InStr(u, "MOLD_BASE") > 0 Or InStr(u, "MOLDBASE") > 0 Or InStr(u, "OUTSOURCE") > 0 Then
+        CadFolderBonus = 90
+    End If
+End Function
+
+' Score only importable CAD (XT/STEP/IGES) — used when staging to local workspace.
+Function XtCadPriority(ext, fileName)
+    Dim e
+    e = LCase(ext)
+    Select Case e
+        Case "x_t", "x_b", "step", "stp", "igs", "iges"
+            XtCadPriority = CadPriority(ext, fileName)
+        Case Else
+            XtCadPriority = 0
+    End Select
+End Function
+
+Function FindBestXtInFolder(folderPath)
+    FindBestXtInFolder = ""
+    If folderPath = "" Then Exit Function
+    If Not fso.FolderExists(folderPath) Then Exit Function
+    If UCase(fso.GetFileName(folderPath)) = "BASE" Then Exit Function
+    If IsGeneratedBaseCadPath(folderPath) Then Exit Function
+
+    Dim bestPath, bestScore, f, sub1, score, hit
+    bestPath = "": bestScore = 0
+    On Error Resume Next
+    For Each f In fso.GetFolder(folderPath).Files
+        If Not IsGeneratedBaseCadPath(f.Path) Then
+            score = XtCadPriority(fso.GetExtensionName(f.Name), f.Name) + CadFolderBonus(folderPath)
+            If score > bestScore Then
+                bestScore = score
+                bestPath = f.Path
+            End If
+        End If
+    Next
+    For Each sub1 In fso.GetFolder(folderPath).SubFolders
+        If UCase(Left(sub1.Name, 1)) <> "_" Then
+            If UCase(sub1.Name) <> "BASE" Then
+                hit = FindBestXtInFolder(sub1.Path)
+                If hit <> "" Then
+                    If Not IsGeneratedBaseCadPath(hit) Then
+                        score = XtCadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit)) + CadFolderBonus(fso.GetParentFolderName(hit))
+                        If score > bestScore Then
+                            bestScore = score
+                            bestPath = hit
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next
+    On Error GoTo 0
+    FindBestXtInFolder = bestPath
+End Function
+
+Function FindBestXtInFolders(jobFolder, attachDir)
+    Dim a, b, sa, sb
+    a = FindBestXtInFolder(jobFolder)
+    b = FindBestXtInFolder(attachDir)
+    If a = "" Then FindBestXtInFolders = b: Exit Function
+    If b = "" Then FindBestXtInFolders = a: Exit Function
+    sa = XtCadPriority(fso.GetExtensionName(a), fso.GetFileName(a))
+    sb = XtCadPriority(fso.GetExtensionName(b), fso.GetFileName(b))
+    If sb > sa Then FindBestXtInFolders = b Else FindBestXtInFolders = a
+End Function
+
+' Copy AttachDir (Downloads BMS folder with zip / unzipped mold CAD) AND the
+' month job folder into C:\CMS_Local_Workspace\C#####, then expand ZIPs and
+' search nested unzipped folders (e.g. 851100021_MOLD_BASE_OUTSOURCE_QUOTE_...).
+Function StageJobToLocalWorkspace(cNumLocal, jobFolderPath, attachDir)
+    StageJobToLocalWorkspace = ""
+    On Error Resume Next
+    If cNumLocal = "" Then Exit Function
+    Dim dest, n, n2
+    dest = LOCAL_WORKSPACE_ROOT & "\" & CleanFolderToken(cNumLocal)
+    If dest = "" Or dest = LOCAL_WORKSPACE_ROOT & "\" Then Exit Function
+
+    If fso.FolderExists(dest) Then
+        fso.DeleteFolder dest, True
+        Err.Clear
+    End If
+    EnsureFolderDeep dest
+    If Not fso.FolderExists(dest) Then Exit Function
+
+    n = 0
+    ' 1) AttachDir first — usually has the ZIP + already-unzipped mold folder with .sldasm
+    If attachDir <> "" And fso.FolderExists(attachDir) Then
+        If UCase(attachDir) <> UCase(dest) Then
+            n = CopyDirContents(attachDir, dest)
+            LogStep "staged " & n & " file(s) from AttachDir: " & attachDir
+        End If
+    End If
+    ' 2) Merge month/job folder (BOM extras, etc.) without wiping AttachDir CAD
+    If jobFolderPath <> "" And fso.FolderExists(jobFolderPath) Then
+        If UCase(jobFolderPath) <> UCase(dest) And UCase(jobFolderPath) <> UCase(attachDir) Then
+            n2 = CopyDirContents(jobFolderPath, dest)
+            n = n + n2
+            LogStep "merged " & n2 & " file(s) from job folder: " & jobFolderPath
+        End If
+    End If
+    If n = 0 Then LogStep "stage skipped — no source folder for " & dest
+
+    ' Expand ZIPs so nested mold folders / XT / SLDASM are visible to FindBestCad.
+    ExtractZipsInFolder dest
+    ' Wait a beat for Shell.NameSpace extract to finish writing nested folders.
+    WScript.Sleep 2000
+    On Error GoTo 0
+    If fso.FolderExists(dest) Then StageJobToLocalWorkspace = dest
+End Function
+
+' Unzip *.zip recursively (Shell.NameSpace). Non-fatal on failure.
+Sub ExtractZipsInFolder(ByVal folderPath)
+    On Error Resume Next
+
+    If folderPath = "" Then Exit Sub
+    If Not fso.FolderExists(folderPath) Then Exit Sub
+
+    Dim sh, n
+    Set sh = CreateObject("Shell.Application")
+
+    n = ExtractZipsRecursive(folderPath, sh, 0)
+
+    If n > 0 Then
+        LogStep "zip extract count=" & n
+        WScript.Sleep 2500
+    Else
+        LogStep "no zip files needed extraction in: " & folderPath
+    End If
+
+    On Error GoTo 0
+End Sub
+
+Function ExtractZipsRecursive(ByVal folderPath, ByVal sh, ByVal depth)
+    ExtractZipsRecursive = 0
+
+    On Error Resume Next
+
+    If depth > 8 Then Exit Function
+    If folderPath = "" Then Exit Function
+    If Not fso.FolderExists(folderPath) Then Exit Function
+    If UCase(fso.GetFileName(folderPath)) = "BASE" Then Exit Function
+
+    Dim folder, f, sub1, zipNs, destNs, marker, ts, n
+    n = 0
+
+    Set folder = fso.GetFolder(folderPath)
+
+    ' Extract ZIPs in this folder.
+    For Each f In folder.Files
+        If LCase(fso.GetExtensionName(f.Name)) = "zip" Then
+            marker = f.Path & ".cms_unzipped"
+
+            If Not fso.FileExists(marker) Then
+                Set zipNs = sh.NameSpace(f.Path)
+                Set destNs = sh.NameSpace(folderPath)
+
+                If Not zipNs Is Nothing And Not destNs Is Nothing Then
+                    LogStep "extracting zip: " & f.Path
+
+                    ' 16 = YesToAll, 4 = NoProgressDialog, 512 = NoConfirmMakeDir
+                    destNs.CopyHere zipNs.Items, 16 + 4 + 512
+
+                    WScript.Sleep 2000
+
+                    Set ts = fso.CreateTextFile(marker, True)
+                    ts.WriteLine Now & " extracted"
+                    ts.Close
+
+                    n = n + 1
+                Else
+                    LogStep "WARNING: Shell.NameSpace could not open zip: " & f.Path
+                End If
+            End If
+        End If
+    Next
+
+    ' Recurse into subfolders, including folders that were just extracted.
+    For Each sub1 In folder.SubFolders
+        If UCase(sub1.Name) <> "BASE" Then
+            n = n + ExtractZipsRecursive(sub1.Path, sh, depth + 1)
+        End If
+    Next
+
+    ExtractZipsRecursive = n
+
+    On Error GoTo 0
 End Function
 
 Function FindBestCadInFolder(folderPath)
     FindBestCadInFolder = ""
     If folderPath = "" Then Exit Function
     If Not fso.FolderExists(folderPath) Then Exit Function
+
+    ' Never search generated CMS output folders.
+    If UCase(fso.GetFileName(folderPath)) = "BASE" Then Exit Function
+    If IsGeneratedBaseCadPath(folderPath) Then Exit Function
+
     Dim bestPath, bestScore, f, sub1, score, hit
     bestPath = "": bestScore = 0
     On Error Resume Next
     For Each f In fso.GetFolder(folderPath).Files
-        score = CadPriority(fso.GetExtensionName(f.Name), f.Name)
-        If score > bestScore Then
-            bestScore = score
-            bestPath = f.Path
+        If Not IsGeneratedBaseCadPath(f.Path) Then
+            score = CadPriority(fso.GetExtensionName(f.Name), f.Name) + CadFolderBonus(folderPath)
+            If score > bestScore Then
+                bestScore = score
+                bestPath = f.Path
+            End If
         End If
     Next
     For Each sub1 In fso.GetFolder(folderPath).SubFolders
         If UCase(Left(sub1.Name, 1)) <> "_" Then
-            hit = FindBestCadInFolder(sub1.Path)
-            If hit <> "" Then
-                score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit))
-                If score > bestScore Then
-                    bestScore = score
-                    bestPath = hit
+            If UCase(sub1.Name) <> "BASE" Then
+                ' Always recurse into unzipped mold folders (may or may not exist).
+                hit = FindBestCadInFolder(sub1.Path)
+                If hit <> "" Then
+                    If Not IsGeneratedBaseCadPath(hit) Then
+                        score = CadPriority(fso.GetExtensionName(hit), fso.GetFileName(hit)) + CadFolderBonus(sub1.Path)
+                        If score > bestScore Then
+                            bestScore = score
+                            bestPath = hit
+                        End If
+                    End If
                 End If
             End If
         End If
@@ -503,12 +1199,28 @@ Function FindBestCadInFolders(jobFolder, attachDir)
     Dim a, b, sa, sb
     a = FindBestCadInFolder(jobFolder)
     b = FindBestCadInFolder(attachDir)
+    If a <> "" And IsGeneratedBaseCadPath(a) Then a = ""
+    If b <> "" And IsGeneratedBaseCadPath(b) Then b = ""
     If a = "" Then FindBestCadInFolders = b: Exit Function
     If b = "" Then FindBestCadInFolders = a: Exit Function
-    sa = CadPriority(fso.GetExtensionName(a), fso.GetFileName(a))
-    sb = CadPriority(fso.GetExtensionName(b), fso.GetFileName(b))
+    sa = CadPriority(fso.GetExtensionName(a), fso.GetFileName(a)) + CadFolderBonus(fso.GetParentFolderName(a))
+    sb = CadPriority(fso.GetExtensionName(b), fso.GetFileName(b)) + CadFolderBonus(fso.GetParentFolderName(b))
     If sb > sa Then FindBestCadInFolders = b Else FindBestCadInFolders = a
 End Function
+
+' Force-close every SolidWorks process so the next quote gets a clean COM session.
+Sub KillSolidWorksProcesses()
+    Dim shell
+    Set shell = CreateObject("WScript.Shell")
+    LogStep "force-closing any running SolidWorks before quote..."
+    On Error Resume Next
+    shell.Run "taskkill /F /IM SLDWORKS.exe /T", 0, True
+    shell.Run "taskkill /F /IM sldworks.exe /T", 0, True
+    shell.Run "taskkill /F /IM SLDWORKS_FCE.exe /T", 0, True
+    On Error GoTo 0
+    WScript.Sleep 5000
+    LogStep "SolidWorks force-close done — starting a fresh session"
+End Sub
 
 ' Open SolidWorks 2023 → open the CAD part/assembly → THEN run Module6121.swp.
 ' This matches how you work manually and avoids the empty welcome-screen hang.
@@ -536,9 +1248,13 @@ Function LaunchSolidWorksOpenCadThenMacro()
 
     LogStep "sw exe: " & SW_EXE & "  progid: " & SW_PROGID
 
+    ' Always start from a clean SolidWorks process. Reusing an open session
+    ' (especially after a stuck/batch quote) leaves the webapp waiting forever.
+    KillSolidWorksProcesses
+
     On Error Resume Next
-    Set sw = GetObject(, SW_PROGID)
-    If sw Is Nothing Then Set sw = CreateObject(SW_PROGID)
+    Set sw = Nothing
+    Set sw = CreateObject(SW_PROGID)
     On Error GoTo 0
 
     If sw Is Nothing Then
@@ -562,7 +1278,7 @@ Function LaunchSolidWorksOpenCadThenMacro()
         End If
         LogStep "connected to SolidWorks 2023"
     Else
-        LogStep "using existing SolidWorks 2023 session"
+        LogStep "created fresh SolidWorks 2023 session"
     End If
 
     On Error Resume Next
@@ -582,38 +1298,25 @@ Function LaunchSolidWorksOpenCadThenMacro()
     sw.CommandInProgress = False
     On Error GoTo 0
 
-    ' ---- OPEN THE CAD FIRST ----
+    ' ---- OPEN THE CAD FIRST, IF THE LAUNCHER HAS AN EXPLICIT CAD PATH ----
     opened = False
-    If gCadPath <> "" And fso.FileExists(gCadPath) Then
-        ext = LCase(fso.GetExtensionName(gCadPath))
-        errs = 0: warns = 0: importErrors = 0
-        LogStep "opening CAD before macro: " & gCadPath
+
+    If gCadPath = "" Then
+        LogStep "FAST: no launcher CadPath; closing any existing SolidWorks documents so Module6121 opens the handoff job itself."
         On Error Resume Next
-        If ext = "sldasm" Then
-            sw.OpenDoc6 gCadPath, 2, 1, "", errs, warns   ' swDocASSEMBLY=2, Silent=1
-            If Err.Number = 0 Then opened = True
-        ElseIf ext = "sldprt" Then
-            sw.OpenDoc6 gCadPath, 1, 1, "", errs, warns   ' swDocPART=1
-            If Err.Number = 0 Then opened = True
-        Else
-            ' STEP / X_T / IGES — LoadFile4
-            sw.LoadFile4 gCadPath, "r", Nothing, importErrors
-            If Err.Number = 0 Then opened = True
-            If Not opened Then
-                Err.Clear
-                sw.LoadFile4 gCadPath, "", Nothing, importErrors
-                If Err.Number = 0 Then opened = True
-            End If
-            If Not opened Then
-                Err.Clear
-                sw.OpenDoc6 gCadPath, 2, 1, "", errs, warns
-                If Err.Number = 0 Then opened = True
-            End If
-        End If
+        sw.CloseAllDocuments True
         Err.Clear
         On Error GoTo 0
+    End If
+
+    If gCadPath <> "" And IsGeneratedBaseCadPath(gCadPath) Then
+        LogStep "WARNING: refusing to open generated \base\ assembly before macro: " & gCadPath
+        gCadPath = ""
+    End If
+    If gCadPath <> "" And fso.FileExists(gCadPath) Then
+        LogStep "opening CAD before macro: " & gCadPath
+        opened = OpenCadInSolidWorks(sw, gCadPath)
         If opened Then
-            LogStep "CAD opened successfully — waiting for model to settle"
             WScript.Sleep 3000
             tries = 0
             Do While tries < 60
@@ -627,54 +1330,185 @@ Function LaunchSolidWorksOpenCadThenMacro()
             sw.CommandInProgress = False
             sw.Visible = True
             On Error GoTo 0
-        Else
-            LogStep "WARNING: OpenDoc/LoadFile failed for " & gCadPath & " — macro will try to open it"
         End If
     Else
-        LogStep "WARNING: no CAD path to open first — macro will search job folder"
+        LogStep "FAST: no launcher CadPath to open — Module6121 will search handoff folders"
     End If
 
-    ' ---- THEN RUN THE .SWP MACRO ----
-    ' Always start RunFromLauncher (reads handoff C-number). That entry point
-    ' detects an already-open CAD and quotes from it via RunActiveAssemblyWithHandoff.
-    modNames = Array("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
-    procNames = Array("RunFromLauncher", "main", "RunActiveAssembly")
-    ran = False
+    ' ---- THEN RUN THE .SWP MACRO WITH STARTED ACKNOWLEDGEMENT ----
+    ' Prefer main() — it routes to RunFromLauncher when cms_handoff.txt exists.
+    ' Wait for cms_macro_started.txt so we do not assume a failed launch succeeded.
+    If Not fso.FileExists(HANDOFF_FILE) Then
+        LogStep "ERROR: Quote cancelled before launch: handoff file was not created: " & HANDOFF_FILE
+        Exit Function
+    End If
 
+    WaitSeconds 3
+
+    ran = False
     For mpIdx = 0 To pathCount - 1
         macroPath = macroPaths(mpIdx)
-        LogStep "running macro: " & macroPath
-        For pi = 0 To UBound(procNames)
-            For mi = 0 To UBound(modNames)
-                okRun = False
-                macroErr = 0
-                On Error Resume Next
-                sw.CommandInProgress = True
-                okRun = sw.RunMacro(macroPath, modNames(mi), procNames(pi))
-                If Err.Number = 0 And okRun <> True Then
-                    okRun = sw.RunMacro2(macroPath, modNames(mi), procNames(pi), 1, macroErr)
-                End If
-                sw.CommandInProgress = False
-                If Err.Number = 0 And okRun = True Then
-                    On Error GoTo 0
-                    ran = True
-                    LogStep "macro started: module=" & modNames(mi) & " proc=" & procNames(pi)
-                    Exit For
-                End If
-                LogStep "RunMacro(2) failed module=" & modNames(mi) & " proc=" & procNames(pi) & " err=" & Err.Number & " macroErr=" & macroErr
-                Err.Clear
-                On Error GoTo 0
-            Next
-            If ran Then Exit For
-        Next
-        If ran Then Exit For
+        LogStep "running macro with retry: " & macroPath
+        If RunMacroWithRetry(sw, macroPath, 90) Then
+            ran = True
+            Exit For
+        End If
     Next
 
     If Not ran Then
-        LogStep "ERROR: could not start Module6121.swp after opening CAD"
+        LogStep "ERROR: SolidWorks opened, but Module6121 did not acknowledge launch (no cms_macro_started.txt)."
+        LogStep "HINT: Recompile Module6121.bas -> Module6121.swp in SolidWorks VBA, save to C:\CMS_Local_Workspace\Module6121.swp"
+        LogStep "HINT: Close SolidWorks dialogs, then retry. Check cms_macro_error.txt and CMS_Quote_Log.txt"
     End If
     LaunchSolidWorksOpenCadThenMacro = ran
 End Function
+
+' Try known Module61211/Module6121 entry points first.
+' NEVER set CommandInProgress=True before RunMacro.
+' Skip GetMacroMethods — it can hang SolidWorks COM with no further log lines.
+' If COM still fails, fall back to SLDWORKS.EXE /m "macro.swp".
+Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
+    RunMacroWithRetry = False
+
+    Dim startTime, attempt, runOk, runErr, waitStart
+    Dim pairs, pi, moduleName, procName, vbaErr
+    Dim shell
+
+    On Error Resume Next
+    Dim f
+    Set f = fso.GetFile(macroPath)
+    LogStep "macro file size=" & f.Size & " modified=" & f.DateLastModified
+    If f.Size < 1000 Then
+        LogStep "WARNING: Module6121.swp looks too small — recompile Module6121.bas -> .swp"
+    End If
+    On Error GoTo 0
+
+    ' Known entry points only (avoid GetMacroMethods hang).
+    pairs = "Module61211" & Chr(1) & "main" & "|" & _
+            "Module61211" & Chr(1) & "RunFromLauncher" & "|" & _
+            "Module6121" & Chr(1) & "main" & "|" & _
+            "Module6121" & Chr(1) & "RunFromLauncher" & "|" & _
+            "Module1" & Chr(1) & "main"
+    LogStep "RunMacro using known entry points (skipped GetMacroMethods)"
+
+    Dim pairArr, pairParts
+    pairArr = Split(pairs, "|")
+
+    startTime = Timer
+    attempt = 0
+
+    Do
+        attempt = attempt + 1
+        DeleteIfExists MACRO_STARTED_FILE
+        DeleteIfExists MACRO_ERROR_FILE
+
+        On Error Resume Next
+        swApp.CommandInProgress = False
+        swApp.UserControl = True
+        On Error GoTo 0
+
+        For pi = 0 To UBound(pairArr)
+            pairParts = Split(pairArr(pi), Chr(1))
+
+            If UBound(pairParts) >= 1 Then
+                moduleName = pairParts(0)
+                procName = pairParts(1)
+                runOk = False
+                runErr = CLng(0)
+                vbaErr = 0
+
+                On Error Resume Next
+                Err.Clear
+
+                ' Prefer RunMacro (no ByRef) — avoids err=0 false negatives.
+                runOk = swApp.RunMacro(macroPath, moduleName, procName)
+                vbaErr = Err.Number
+
+                If runOk = False Or vbaErr <> 0 Then
+                    Err.Clear
+                    runErr = CLng(0)
+                    runOk = swApp.RunMacro2(macroPath, moduleName, procName, 0, runErr)
+                    vbaErr = Err.Number
+                End If
+
+                If runOk = False Or vbaErr <> 0 Then
+                    Err.Clear
+                    runErr = CLng(0)
+                    runOk = swApp.RunMacro2(macroPath, moduleName, procName, 1, runErr)
+                    vbaErr = Err.Number
+                End If
+
+                On Error GoTo 0
+
+                LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
+                        " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
+
+                waitStart = Timer
+
+                Do
+                    If fso.FileExists(MACRO_STARTED_FILE) Then
+                        LogStep "macro acknowledged STARTED (module=" & moduleName & " proc=" & procName & ")"
+                        RunMacroWithRetry = True
+                        Exit Function
+                    End If
+
+                    If fso.FileExists(MACRO_ERROR_FILE) Then
+                        LogStep "macro wrote ERROR file quickly: " & MACRO_ERROR_FILE
+                        RunMacroWithRetry = True
+                        Exit Function
+                    End If
+
+                    WaitSeconds 1
+
+                    If Timer < waitStart Then Exit Do
+                    If Timer - waitStart >= 8 Then Exit Do
+                Loop
+            End If
+        Next
+
+        WaitSeconds 2
+        If Timer < startTime Then Exit Do
+        If Timer - startTime >= (timeoutSeconds - 30) Then Exit Do
+    Loop
+
+    ' Fallback: SLDWORKS.EXE /m "macro.swp"
+    LogStep "COM RunMacro failed — falling back to SLDWORKS.EXE /m"
+    DeleteIfExists MACRO_STARTED_FILE
+    DeleteIfExists MACRO_ERROR_FILE
+    On Error Resume Next
+    Set shell = CreateObject("WScript.Shell")
+    shell.Run """" & SW_EXE & """ /m """ & macroPath & """", 1, False
+    On Error GoTo 0
+    waitStart = Timer
+    Do
+        If fso.FileExists(MACRO_STARTED_FILE) Then
+            LogStep "macro acknowledged STARTED via /m fallback"
+            RunMacroWithRetry = True
+            Exit Function
+        End If
+        If fso.FileExists(MACRO_ERROR_FILE) Then
+            LogStep "macro wrote ERROR via /m fallback: " & MACRO_ERROR_FILE
+            RunMacroWithRetry = True
+            Exit Function
+        End If
+        WaitSeconds 1
+        If Timer < waitStart Then Exit Do
+        If Timer - waitStart >= 45 Then Exit Do
+    Loop
+
+    LogStep "HINT: Recompile Module6121.bas -> Module6121.swp in SolidWorks VBA, save to " & LOCAL_WORKSPACE_ROOT
+    LogStep "HINT: Tools > Options > System Options > Macro — enable macros / trusted path"
+End Function
+
+Sub WaitSeconds(ByVal sec)
+    Dim t
+    t = Timer
+    Do
+        WScript.Sleep 250
+        If Timer < t Then Exit Do
+        If Timer - t >= sec Then Exit Do
+    Loop
+End Sub
 
 ' Legacy name kept for any external callers — routes to open-CAD-first path.
 Function LaunchSolidWorksAndMacro()
@@ -756,6 +1590,8 @@ Function RunGmailSearch(ByRef custJob, ByRef similar, ByRef ship)
                 Case "SIMILARTO": similar = v
                 Case "SHIPDATE":  ship = v
                 Case "ATTACHDIR": gAttachDir = v
+                Case "LOCALJOBFOLDER": gLocalJobFolder = v
+                Case "CADPATH":   gEmailCadPath = v
                 Case "CUSTOMERPREFIX": gCustomerPrefix = v
                 Case "CUSTOMERNAME": gCustomerName = v
                 Case "ERROR":     errMsg = v
@@ -838,9 +1674,18 @@ End Function
 ' Append a line to the Downloads log so the whole run is recorded.
 Sub LogStep(msg)
     On Error Resume Next
-    Dim f
-    Set f = fso.OpenTextFile(DOWNLOADS_FOLDER & "\CMS_Quote_Log.txt", 8, True)  ' 8 = append, create
-    f.WriteLine "[" & Now & "] launcher: " & msg
+    Dim f, line
+    line = "[" & Now & "] launcher: " & msg
+    ' Always mirror into CMS_Local_Workspace so the webapp can show why launch stuck.
+    Set f = fso.OpenTextFile(LOCAL_WORKSPACE_ROOT & "\CMS_Quote_Log.txt", 8, True)
+    f.WriteLine line
+    f.Close
+    Set f = fso.OpenTextFile(DOWNLOADS_FOLDER & "\CMS_Quote_Log.txt", 8, True)
+    f.WriteLine line
+    f.Close
+    ' Tiny status file the webapp polls (last step only).
+    Set f = fso.OpenTextFile(LOCAL_WORKSPACE_ROOT & "\cms_launcher_status.txt", 2, True)
+    f.WriteLine line
     f.Close
 End Sub
 
@@ -868,6 +1713,98 @@ Function MonthFolderName(d)
     m = Month(d)
     y = Year(d)
     MonthFolderName = Right("00000000" & m, 9) & "." & MonthName(m) & " " & y
+End Function
+
+Function DownloadsMonthFolderName(ByVal d)
+    ' Example: 000000007. July-2026
+    DownloadsMonthFolderName = Right("00000000" & Month(d), 9) & ". " & MonthName(Month(d)) & "-" & Year(d)
+End Function
+
+Function NormalizeCFolder(ByVal s)
+    s = UCase(Trim(CStr(s)))
+    s = Replace(s, "-", "")
+
+    If s = "" Then
+        NormalizeCFolder = ""
+        Exit Function
+    End If
+
+    If Left(s, 1) = "C" Then
+        NormalizeCFolder = s
+    Else
+        NormalizeCFolder = "C" & ExtractDigits(s)
+    End If
+End Function
+
+Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
+    FindCustomerDownloadJobFolder = ""
+
+    On Error Resume Next
+
+    Dim cTok, jobTok
+    cTok = NormalizeCFolder(cLocal)
+    jobTok = CleanFolderToken(custJob)
+
+    If jobTok = "" Or cTok = "" Then Exit Function
+    If Not fso.FolderExists(CUSTOMER_DOWNLOADS_ROOT) Then
+        LogStep "customer Downloads root not found: " & CUSTOMER_DOWNLOADS_ROOT
+        Exit Function
+    End If
+
+    Dim monthPath, candidate, prefixes, i, p, expected
+    monthPath = CUSTOMER_DOWNLOADS_ROOT & "\" & DownloadsMonthFolderName(Date)
+
+    ' Fast exact check first:
+    ' \\Mycloudex2ultra\mexico\Downloads\000000007. July-2026\BMS-851100038-C18605
+    prefixes = Array(gCustomerPrefix, "BMS", "")
+
+    If fso.FolderExists(monthPath) Then
+        For i = 0 To UBound(prefixes)
+            p = CleanFolderToken(prefixes(i))
+
+            If p <> "" Then
+                expected = p & "-" & jobTok & "-" & cTok
+            Else
+                expected = jobTok & "-" & cTok
+            End If
+
+            candidate = monthPath & "\" & expected
+
+            If fso.FolderExists(candidate) Then
+                FindCustomerDownloadJobFolder = candidate
+                On Error GoTo 0
+                Exit Function
+            End If
+        Next
+    Else
+        LogStep "current customer Downloads month folder not found: " & monthPath
+    End If
+
+    ' Fallback: search all month folders one level deep.
+    Dim root, mon, sub1, u, best
+    best = ""
+
+    Set root = fso.GetFolder(CUSTOMER_DOWNLOADS_ROOT)
+
+    For Each mon In root.SubFolders
+        For Each sub1 In mon.SubFolders
+            u = UCase(sub1.Name)
+
+            If InStr(u, UCase(jobTok)) > 0 And InStr(u, UCase(cTok)) > 0 Then
+                If InStr(u, "BMS-") > 0 Then
+                    FindCustomerDownloadJobFolder = sub1.Path
+                    On Error GoTo 0
+                    Exit Function
+                End If
+
+                If best = "" Then best = sub1.Path
+            End If
+        Next
+    Next
+
+    If best <> "" Then FindCustomerDownloadJobFolder = best
+
+    On Error GoTo 0
 End Function
 
 ' Create  <monthFolder>\<jobName>\  and copy the downloaded email files into it.

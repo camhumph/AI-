@@ -84,6 +84,8 @@ BMS_FOLDER_MARKERS = (
     "pot-block",
     "potblock",
     "pot_block",
+    "tempcraft",
+    "howmet",
 )
 
 # File-level hints only used when folder name is ambiguous.
@@ -94,6 +96,11 @@ BMS_FILE_MARKERS = (
     "pot block",
     "pot-block",
     "potblock",
+    "rfq_mb_asm",
+    "mb_asm",
+    "smed",
+    "holder block",
+    "pot block material",
 )
 
 STANDARD_FILE_MARKERS = (

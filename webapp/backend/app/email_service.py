@@ -630,18 +630,10 @@ def _write_email_handoff(info: dict, attach_dir: Path, attach_count: int) -> Non
 
 def _launch_quote_flow() -> bool:
     """Start CMS_Launcher.vbs /usemail on Windows when available."""
-    candidates = [
-        LOCAL_WORKSPACE / "CMS_Launcher.vbs",
-        Path(__file__).resolve().parent.parent.parent.parent / "CMS_Launcher.vbs",
-    ]
-    for vbs in candidates:
-        if vbs.exists():
-            try:
-                subprocess.Popen(["wscript", str(vbs), "/usemail"], close_fds=True)
-                return True
-            except Exception:
-                pass
-    return False
+    from . import quote_pipeline
+
+    proc, how = quote_pipeline._start_cms_launcher()
+    return proc is not None
 
 
 def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
@@ -723,4 +715,55 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
         "launcher_started": launched,
         "email_handoff": str(EMAIL_OUTPUT_FILE),
         "poll_url": f"/api/quote/status/{quote_id}",
+    }
+
+
+def quote_from_messages(message_ids: list[str], launch_macro: bool = True) -> dict:
+    """Prepare multiple email quotes, then launch them as one sequential SolidWorks batch."""
+    if not message_ids:
+        return {"launched": False, "error": "No message ids", "results": []}
+
+    prepared: list[dict] = []
+    results: list[dict] = []
+
+    for mid in message_ids:
+        mid = str(mid).strip()
+        if not mid:
+            continue
+        # Prepare attachments/handoff fields without launching each one separately.
+        one = quote_from_message(mid, launch_macro=False)
+        results.append(one)
+        prepared.append(
+            {
+                "quote_id": one.get("quote_id") or one.get("job_id") or mid,
+                "attach_dir": one.get("attach_dir") or "",
+                "c_number": one.get("c_number") or "",
+                "email_info": {
+                    "subject": one.get("subject") or "",
+                    "cust_job": one.get("cust_job") or "",
+                    "c_number": one.get("c_number") or "",
+                    "similar_to": "",
+                    "ship_date": "",
+                },
+            }
+        )
+
+    if not prepared:
+        return {"launched": False, "error": "No quotes prepared", "results": results}
+
+    if not launch_macro:
+        return {
+            "launched": False,
+            "batch": True,
+            "batch_count": len(prepared),
+            "results": results,
+            "quote_ids": [p["quote_id"] for p in prepared],
+        }
+
+    from . import quote_pipeline
+
+    batch = quote_pipeline.launch_batch_quotes(prepared)
+    return {
+        **batch,
+        "results": results,
     }

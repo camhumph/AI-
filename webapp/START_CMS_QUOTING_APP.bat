@@ -2,6 +2,14 @@
 rem ============================================================
 rem CMS AI Quoting - LOCAL-ONLY start script
 rem
+rem Start sequence (rebuild UI + start):
+rem   cd C:\CMS_AI\webapp\frontend
+rem   npm run build
+rem   cd C:\CMS_AI\webapp
+rem   START_CMS_QUOTING_APP.bat
+rem
+rem Or double-click:  webapp\START_SEQUENCE.bat
+rem
 rem Binds to 127.0.0.1 so the app is reachable ONLY from this
 rem machine (never the network/internet). Module6121 talks to it
 rem at http://127.0.0.1:8000 on the same PC.
@@ -9,6 +17,13 @@ rem
 rem First-time setup (once):
 rem   cd webapp\backend  and run:  pip install -r requirements.txt
 rem   cd webapp\frontend and run:  npm install && npm run build
+rem
+rem Launcher diagnostics (if a quote gets stuck):
+rem   C:\CMS_Local_Workspace\CMS_Quote_Log.txt
+rem   C:\CMS_Local_Workspace\cms_launcher_status.txt
+rem   C:\CMS_Local_Workspace\cms_macro_started.txt
+rem   C:\CMS_Local_Workspace\cms_macro_error.txt
+rem   C:\CMS_Local_Workspace\cms_macro_status.txt
 rem ============================================================
 cd /d "%~dp0backend"
 
@@ -32,7 +47,13 @@ set CMS_SOLIDWORKS_EXE=C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS (3)\SLDWORKS.
 set CMS_SOLIDWORKS_PROGID=SldWorks.Application.31
 
 echo.
-echo CMS AI Quoting - checking Python...
+echo CMS AI Quoting - start sequence reminder:
+echo   cd C:\CMS_AI\webapp\frontend
+echo   npm run build
+echo   cd C:\CMS_AI\webapp
+echo   START_CMS_QUOTING_APP.bat
+echo.
+echo Checking Python...
 where python >nul 2>&1
 if errorlevel 1 (
   where py >nul 2>&1
@@ -57,9 +78,10 @@ if errorlevel 1 (
 
 if not exist "..\frontend\dist\index.html" (
   echo.
-  echo WARNING: Frontend not built yet. Run once:
-  echo   cd webapp\frontend
-  echo   npm install ^&^& npm run build
+  echo WARNING: Frontend not built yet. Run:
+  echo   cd C:\CMS_AI\webapp\frontend
+  echo   npm run build
+  echo Or double-click: webapp\START_SEQUENCE.bat
   echo.
   echo The API will still work at http://127.0.0.1:8000/api/health
   echo.
@@ -67,6 +89,8 @@ if not exist "..\frontend\dist\index.html" (
 
 echo Starting CMS AI Quoting on http://127.0.0.1:8000 (local machine only)...
 echo The browser opens automatically once the server is ready.
+echo If a quote sticks, open the red status text in the app or:
+echo   C:\CMS_Local_Workspace\CMS_Quote_Log.txt
 echo Press Ctrl+C in this window to stop the server.
 echo.
 %PYTHON% start_cms.py

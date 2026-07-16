@@ -61,6 +61,7 @@ export interface JobDetail {
 
 export interface QuoteLineItem {
   index: string;
+  section?: "steel" | "pullcore" | "purchased" | "classified";
   component: string;
   role: string;
   role_label: string;
@@ -69,15 +70,45 @@ export interface QuoteLineItem {
   quote: boolean;
   price: number;
   price_source?: string;
-  thickness?: number;
-  width?: number;
-  length?: number;
+  thickness?: number | null;
+  width?: number | null;
+  length?: number | null;
+  qty?: number | null;
+  cu_in?: number | null;
+  hours?: number | null;
+  vendor?: string;
+  part_number?: string;
+  unit_price?: number | null;
+  material?: string;
+  category?: string;
+}
+
+export interface QuoteSummary {
+  total_hours?: number | null;
+  total_price_rough?: number | null;
+  total_price_finish?: number | null;
+  commission_pct?: number | null;
+  commission_rough?: number | null;
+  commission_finish?: number | null;
+  grand_total_rough?: number | null;
+  grand_total_finish?: number | null;
 }
 
 export interface QuoteSheet {
   job_id: string;
   line_items: QuoteLineItem[];
+  sections?: {
+    steel?: QuoteLineItem[];
+    pullcore?: QuoteLineItem[];
+    purchased?: QuoteLineItem[];
+    classified?: QuoteLineItem[];
+  };
+  steel_plates?: QuoteLineItem[];
+  pullcore_components?: QuoteLineItem[];
+  purchased_components?: QuoteLineItem[];
+  summary?: QuoteSummary;
   total_price: number;
+  section_total_price?: number;
   quoted_part_count: number;
   total_part_count: number;
   csv_priced_count?: number;
@@ -141,9 +172,28 @@ export interface EmailSettings {
 export interface QuoteRunStatus {
   phase: string;
   message?: string;
+  warning?: string;
+  cad_job_mismatch?: boolean;
+  stuck_reason?: string;
+  diagnostics?: {
+    stuck_reason?: string;
+    launcher_last_step?: string;
+    launcher_log_tail?: string;
+    macro_status?: string;
+    macro_error_text?: string;
+    job_log_tail?: string;
+    macro_started?: boolean;
+    macro_done?: boolean;
+    macro_error?: boolean;
+    cad_job_mismatch?: boolean;
+    cad_job_mismatch_text?: string;
+    warning?: string;
+  };
   job_id?: string;
   c_number?: string;
   quote_id?: string;
+  cad_path?: string;
+  local_folder?: string;
 }
 
 export interface QuoteEmailResult {
@@ -273,6 +323,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ folder_path, run_quote }),
     }),
+  importFoldersBatch: (folder_paths: string[], run_quote = true) =>
+    req<{
+      launched: boolean;
+      batch?: boolean;
+      batch_count?: number;
+      quote_ids: string[];
+      c_numbers?: string[];
+      jobs?: { job_id: string; quote_id: string; folder_path: string; display_name: string }[];
+      errors?: string[];
+      error?: string | null;
+    }>("/jobs/import-folders-batch", {
+      method: "POST",
+      body: JSON.stringify({ folder_paths, run_quote }),
+    }),
   quoteStatus: (quoteId: string) => req<QuoteRunStatus>(`/quote/status/${encodeURIComponent(quoteId)}`),
   cancelQuote: (quoteId: string) =>
     req<QuoteRunStatus>(`/quote/cancel/${encodeURIComponent(quoteId)}`, { method: "POST", body: "{}" }),
@@ -324,6 +388,20 @@ export const api = {
     req<QuoteEmailResult>(`/email/messages/${encodeURIComponent(id)}/quote`, {
       method: "POST",
       body: JSON.stringify({ launch_macro: launchMacro }),
+    }),
+  quoteEmailBatch: (messageIds: string[], launchMacro = true) =>
+    req<{
+      launched?: boolean;
+      batch?: boolean;
+      batch_count?: number;
+      quote_ids?: string[];
+      c_numbers?: string[];
+      error?: string;
+      results?: QuoteEmailResult[];
+      macro_started?: boolean;
+    }>("/email/quote-batch", {
+      method: "POST",
+      body: JSON.stringify({ message_ids: messageIds, launch_macro: launchMacro }),
     }),
   replyEmail: (id: string, to: string, subject: string, body: string, in_reply_to = "") =>
     req(`/email/messages/${encodeURIComponent(id)}/reply`, {

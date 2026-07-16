@@ -3,21 +3,122 @@
     [Parameter(Mandatory=$true)][string]$SwExe,
     [Parameter(Mandatory=$true)][string]$ProgId,
     [string]$LogFile = "C:\Users\lenovo\Downloads\CMS_Quote_Log.txt",
-    [string]$Procedure = "RunFromLauncher"
+    [string]$Procedure = "main",
+    [int]$TimeoutSeconds = 120
 )
 
 $ErrorActionPreference = "Continue"
 
+$LocalWorkspace = "C:\CMS_Local_Workspace"
+$MacroStatusFile = "$LocalWorkspace\cms_macro_status.txt"
+$MacroStartedFile = "$LocalWorkspace\cms_macro_started.txt"
+$MacroDoneFile = "$LocalWorkspace\cms_macro_done.txt"
+$MacroErrorFile = "$LocalWorkspace\cms_macro_error.txt"
+$TrainingTrigger = "$LocalWorkspace\cms_training_xt.txt"
+$HandoffFile = "$LocalWorkspace\cms_handoff.txt"
+
 function Write-LauncherLog {
     param([string]$Message)
-    try {
-        $folder = Split-Path -Parent $LogFile
-        if ($folder -and -not (Test-Path -LiteralPath $folder)) {
-            New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    # Keep tag in sync with RunModule6121.vbs so webapp diagnostics do not
+    # treat this as the old "macro-runner:" (pre-v3) launcher.
+    $line = ("[{0}] macro-runner-v3: {1}" -f (Get-Date), $Message)
+    foreach ($target in @(
+        $LogFile,
+        "$LocalWorkspace\CMS_Quote_Log.txt"
+    )) {
+        try {
+            $folder = Split-Path -Parent $target
+            if ($folder -and -not (Test-Path -LiteralPath $folder)) {
+                New-Item -ItemType Directory -Force -Path $folder | Out-Null
+            }
+            Add-Content -LiteralPath $target -Value $line
+        } catch {
         }
-        Add-Content -LiteralPath $LogFile -Value ("[{0}] macro-runner: {1}" -f (Get-Date), $Message)
+    }
+    try {
+        Set-Content -LiteralPath "$LocalWorkspace\cms_launcher_status.txt" -Value $line -Encoding UTF8
     } catch {
     }
+}
+
+function Remove-IfExists {
+    param([string]$Path)
+    try {
+        if ($Path -and (Test-Path -LiteralPath $Path)) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+    }
+}
+
+function Wait-ForMacroAck {
+    param([int]$Seconds = 12)
+    $until = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $until) {
+        if (Test-Path -LiteralPath $MacroStartedFile) {
+            Write-LauncherLog "macro acknowledged STARTED via $MacroStartedFile"
+            return $true
+        }
+        if (Test-Path -LiteralPath $MacroErrorFile) {
+            Write-LauncherLog "macro wrote ERROR file: $MacroErrorFile"
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Get-MacroEntryPoints {
+    param($Sw, [string]$Path)
+    $entries = New-Object System.Collections.Generic.List[object]
+    try {
+        # swMethodsWithoutArguments = 1 (SW 2020+); try 0 and 1
+        foreach ($opt in @(1, 0, 2)) {
+            try {
+                $methods = $Sw.GetMacroMethods($Path, $opt)
+                if ($null -eq $methods) { continue }
+                foreach ($m in @($methods)) {
+                    if (-not $m) { continue }
+                    $parts = [string]$m -split "\.", 2
+                    if ($parts.Count -ge 2) {
+                        $entries.Add([pscustomobject]@{ Module = $parts[0]; Proc = $parts[1]; Raw = [string]$m }) | Out-Null
+                    }
+                }
+                if ($entries.Count -gt 0) { break }
+            } catch {
+            }
+        }
+    } catch {
+        Write-LauncherLog ("GetMacroMethods failed: " + $_.Exception.Message)
+    }
+    return $entries
+}
+
+function Invoke-RunMacroCom {
+    param($Sw, [string]$Path, [string]$Module, [string]$Proc)
+    $ok = $false
+    $errCode = [int]0
+
+    # 1) RunMacro (no ByRef) — most reliable from PowerShell
+    try {
+        $ok = [bool]$Sw.RunMacro($Path, $Module, $Proc)
+    } catch {
+        $ok = $false
+        Write-LauncherLog ("RunMacro exception module='$Module' proc='$Proc': " + $_.Exception.Message)
+    }
+    if ($ok) { return @{ Ok = $true; Err = 0; Via = "RunMacro" } }
+
+    # 2) RunMacro2 with explicit Int32 ByRef (PowerShell often breaks Long ByRef)
+    foreach ($opt in @([int]0, [int]1)) {
+        try {
+            $errCode = [int]0
+            $ok = [bool]$Sw.RunMacro2($Path, $Module, $Proc, $opt, [ref]$errCode)
+            if ($ok) { return @{ Ok = $true; Err = $errCode; Via = "RunMacro2 opt=$opt" } }
+        } catch {
+            Write-LauncherLog ("RunMacro2 exception module='$Module' proc='$Proc' opt=$opt: " + $_.Exception.Message)
+        }
+    }
+    return @{ Ok = $false; Err = $errCode; Via = "none" }
 }
 
 Add-Type -TypeDefinition @"
@@ -65,12 +166,34 @@ public class OleMessageFilter : IOleMessageFilter {
 
 try {
     [OleMessageFilter]::Register()
-    Write-LauncherLog "starting; macro=$MacroPath"
+    Write-LauncherLog "starting; macro=$MacroPath procedure=$Procedure"
 
     if (-not (Test-Path -LiteralPath $MacroPath)) {
         Write-LauncherLog "macro file not found: $MacroPath"
         exit 2
     }
+
+    try {
+        $fi = Get-Item -LiteralPath $MacroPath
+        Write-LauncherLog ("macro file size={0} bytes modified={1}" -f $fi.Length, $fi.LastWriteTime)
+        if ($fi.Length -lt 1000) {
+            Write-LauncherLog "WARNING: Module6121.swp looks too small — recompile Module6121.bas to .swp in SolidWorks VBA editor"
+        }
+        # Detect accidental text/.swb renamed to .swp
+        $head = Get-Content -LiteralPath $MacroPath -TotalCount 1 -ErrorAction SilentlyContinue
+        if ($head -match "Attribute VB_Name|VERSION 5\.00|Begin\s+\{") {
+            Write-LauncherLog "ERROR: $MacroPath looks like text/.swb source, not a compiled .swp. Recompile in SolidWorks (File > Save as .swp)."
+        }
+    } catch {
+    }
+
+    if (Test-Path -LiteralPath $HandoffFile) {
+        Remove-IfExists $TrainingTrigger
+    }
+    Remove-IfExists $MacroStatusFile
+    Remove-IfExists $MacroStartedFile
+    Remove-IfExists $MacroDoneFile
+    Remove-IfExists $MacroErrorFile
 
     $sw = $null
     try {
@@ -105,59 +228,83 @@ try {
     }
 
     try { $sw.Visible = $true } catch {}
-    Start-Sleep -Milliseconds 750
+    try { $sw.UserControl = $true } catch {}
+    try { $sw.CommandInProgress = $false } catch {}
+    Start-Sleep -Seconds 2
 
-    $moduleNames = @("Module6121", "Module61211", "Module612111", "Module1", "main", "Module2", "Module3")
-    $ext = [System.IO.Path]::GetExtension($MacroPath).ToLowerInvariant()
-    # Same procedure order as RunTrainingXtLauncher / CMS_Launcher:
-    # requested procedure first, then main (which routes via handoff files).
-    $procedureNames = @($Procedure, "main", "RunFromLauncher")
-    if ($ext -eq ".swp" -and $Procedure -eq "RunFromLauncher") {
-        $procedureNames = @("RunFromLauncher", "main")
+    # Discover real module/proc names from the .swp (beats guessing Module61211 etc.)
+    $discovered = @(Get-MacroEntryPoints -Sw $sw -Path $MacroPath)
+    if ($discovered.Count -gt 0) {
+        foreach ($e in $discovered) {
+            Write-LauncherLog ("GetMacroMethods entry: {0}.{1}" -f $e.Module, $e.Proc)
+        }
+    } else {
+        Write-LauncherLog "GetMacroMethods returned no entry points — .swp may be corrupt/stale or macros disabled in SolidWorks options"
     }
 
-    $ran = $false
-    foreach ($procName in $procedureNames) {
-        foreach ($moduleName in $moduleNames) {
-            try {
-                try { $sw.CommandInProgress = $true } catch {}
-                $ok = $sw.RunMacro($MacroPath, $moduleName, $procName)
-                try { $sw.CommandInProgress = $false } catch {}
-                if ($ok -eq $true) {
-                    Write-LauncherLog "macro started via RunMacro module '$moduleName' procedure '$procName'"
-                    $ran = $true
-                    break
-                }
-            } catch {
-                try { $sw.CommandInProgress = $false } catch {}
-                Write-LauncherLog ("RunMacro module '$moduleName' procedure '$procName' failed: " + $_.Exception.Message)
-            }
-
-            if (-not $ran) {
-                try {
-                    try { $sw.CommandInProgress = $true } catch {}
-                    $macroErr = 0
-                    $ok2 = $sw.RunMacro2($MacroPath, $moduleName, $procName, 1, [ref]$macroErr)
-                    try { $sw.CommandInProgress = $false } catch {}
-                    if ($ok2 -eq $true) {
-                        Write-LauncherLog "macro started via RunMacro2 module '$moduleName' procedure '$procName' err=$macroErr"
-                        $ran = $true
-                        break
-                    } else {
-                        Write-LauncherLog "RunMacro2 returned false for module '$moduleName' procedure '$procName' err=$macroErr"
-                    }
-                } catch {
-                    try { $sw.CommandInProgress = $false } catch {}
-                    Write-LauncherLog ("RunMacro2 module '$moduleName' procedure '$procName' failed: " + $_.Exception.Message)
-                }
-            }
-            Start-Sleep -Milliseconds 300
+    $pairs = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $discovered) {
+        $pairs.Add([pscustomobject]@{ Module = $e.Module; Proc = $e.Proc }) | Out-Null
+    }
+    # Prefer main / RunFromLauncher from discovered list first, then guesses.
+    foreach ($procName in @($Procedure, "main", "RunFromLauncher") | Select-Object -Unique) {
+        foreach ($moduleName in @("Module61211", "Module6121", "Module1")) {
+            $pairs.Add([pscustomobject]@{ Module = $moduleName; Proc = $procName }) | Out-Null
         }
-        if ($ran) { break }
+    }
+
+    $deadline = (Get-Date).AddSeconds([Math]::Max(30, $TimeoutSeconds - 25))
+    $ran = $false
+    $attempt = 0
+    $seen = @{}
+
+    while ((Get-Date) -lt $deadline -and -not $ran) {
+        $attempt++
+        Remove-IfExists $MacroStartedFile
+        Remove-IfExists $MacroErrorFile
+        try { $sw.CommandInProgress = $false } catch {}
+
+        foreach ($pair in $pairs) {
+            $key = "$($pair.Module)|$($pair.Proc)"
+            if ($attempt -eq 1 -and $seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+
+            $result = Invoke-RunMacroCom -Sw $sw -Path $MacroPath -Module $pair.Module -Proc $pair.Proc
+            Write-LauncherLog ("attempt={0} via={1} module='{2}' proc='{3}' ok={4} err={5}" -f `
+                $attempt, $result.Via, $pair.Module, $pair.Proc, $result.Ok, $result.Err)
+
+            if (Wait-ForMacroAck -Seconds 8) {
+                $ran = $true
+                break
+            }
+        }
+
+        if (-not $ran) {
+            Start-Sleep -Seconds 2
+        }
+    }
+
+    # Fallback: command-line /m (new or same SW) — works when COM RunMacro is blocked.
+    if (-not $ran -and (Test-Path -LiteralPath $SwExe)) {
+        Write-LauncherLog "COM RunMacro failed — falling back to SLDWORKS.EXE /m"
+        Remove-IfExists $MacroStartedFile
+        Remove-IfExists $MacroErrorFile
+        try {
+            Start-Process -FilePath $SwExe -ArgumentList @("/m", $MacroPath) | Out-Null
+            if (Wait-ForMacroAck -Seconds 45) {
+                $ran = $true
+            } else {
+                Write-LauncherLog "SLDWORKS.EXE /m did not produce cms_macro_started.txt within 45s"
+            }
+        } catch {
+            Write-LauncherLog ("SLDWORKS.EXE /m failed: " + $_.Exception.Message)
+        }
     }
 
     if (-not $ran) {
-        Write-LauncherLog "RunMacro/RunMacro2 could not start allowed procedure(s) for any known module name"
+        Write-LauncherLog "SolidWorks opened, but Module6121 did not acknowledge launch within ${TimeoutSeconds}s"
+        Write-LauncherLog "FIX: In SolidWorks VBA editor, import Module6121.bas, Debug>Compile, File>Save As Module6121.swp into C:\CMS_Local_Workspace\"
+        Write-LauncherLog "FIX: Tools>Options>System Options>Macro — allow macros / trusted locations"
         exit 4
     }
 } finally {

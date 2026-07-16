@@ -8,7 +8,7 @@ import Layout from "../components/Layout";
 import { Card, Button, Spinner, EmptyState } from "../components/ui";
 import PartsTable from "../components/PartsTable";
 import ImageGallery from "../components/ImageGallery";
-import { api, type JobDetail, type QuoteSheet } from "../api/client";
+import { api, type JobDetail, type QuoteSheet, type QuoteLineItem } from "../api/client";
 
 const StlViewer = lazy(() => import("../components/StlViewer"));
 
@@ -80,8 +80,21 @@ export default function QuoteDetailPage() {
     );
   }
 
-  const priceByIndex: Record<string, QuoteSheet["line_items"][number]> = {};
-  quote?.line_items.forEach((li) => (priceByIndex[li.index] = li));
+  // Prefer sectioned macro breakdown (steel + pull cores + purchased) when present.
+  const sectionItems: QuoteLineItem[] = [
+    ...(quote?.sections?.steel || quote?.steel_plates || []),
+    ...(quote?.sections?.pullcore || quote?.pullcore_components || []),
+    ...(quote?.sections?.purchased || quote?.purchased_components || []),
+    ...(quote?.sections?.classified || []),
+  ];
+  const displayItems: QuoteLineItem[] =
+    sectionItems.length > 0
+      ? sectionItems
+      : (quote?.line_items || []).map((li) => ({
+          ...li,
+          role_group: li.role_group || "Other Hardware",
+        }));
+  const partsCount = displayItems.length;
 
   return (
     <Layout
@@ -106,7 +119,8 @@ export default function QuoteDetailPage() {
 
       {job.base_type === "bms" && (
         <div className="mb-4 border border-accent-amber/30 px-4 py-3 text-xs text-accent-amber">
-          BMS base — BOM-driven by Module6121. AI classification disabled.
+          BMS / pot-block base — Parts & Pricing shows steel plates, pull cores & keys, and purchased
+          components from the Module6121 quote workbook / CSVs. AI A/B/rail classification is disabled.
         </div>
       )}
 
@@ -123,15 +137,28 @@ export default function QuoteDetailPage() {
             ${(quote?.total_price ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </div>
           <div className="mt-2 text-xs text-ink-400">
-            {quote?.csv_priced_count ?? 0} priced from CSV
+            {quote?.csv_priced_count ?? 0} priced from workbook/CSV
             {(quote?.missing_csv_price_count ?? 0) > 0 && (
-              <span className="text-accent-amber"> · {quote?.missing_csv_price_count} need CSV price</span>
+              <span className="text-accent-amber"> · {quote?.missing_csv_price_count} need price</span>
             )}
           </div>
           <p className="mt-3 text-[10px] leading-relaxed text-ink-500">
             {quote?.pricing_source || "Purchased Components Prices.csv"}
             {quote?.has_steel_sheet_dims && " · Steel sheet dimensions applied"}
           </p>
+          {quote?.summary?.total_hours != null && (
+            <p className="mt-2 text-xs text-ink-300">
+              Total Hours {quote.summary.total_hours}
+              {quote.summary.commission_pct != null && (
+                <span className="text-ink-500">
+                  {" "}· Commission {quote.summary.commission_pct}%
+                  {quote.summary.commission_finish != null
+                    ? ` ($${Number(quote.summary.commission_finish).toLocaleString()})`
+                    : ""}
+                </span>
+              )}
+            </p>
+          )}
         </Card>
         <Card className="p-5 sm:col-span-2">
           <div className="section-label">Quote Summary</div>
@@ -141,8 +168,8 @@ export default function QuoteDetailPage() {
               <div className="mt-1 text-ink-100">{job.job_id}</div>
             </div>
             <div>
-              <div className="text-ink-500">Parts</div>
-              <div className="mt-1 text-ink-100">{quote?.total_part_count ?? 0}</div>
+              <div className="text-ink-500">Line Items</div>
+              <div className="mt-1 text-ink-100">{quote?.total_part_count ?? partsCount}</div>
             </div>
             <div>
               <div className="text-ink-500">Quoted</div>
@@ -153,6 +180,13 @@ export default function QuoteDetailPage() {
               <div className="mt-1 text-ink-100">{job.base_type === "bms" ? "BMS" : "Standard"}</div>
             </div>
           </div>
+          {(job.images.length === 0 || job.models.length === 0) && (
+            <p className="mt-3 text-[10px] text-ink-500">
+              {job.models.length === 0 ? "No STL in registry yet — " : ""}
+              {job.images.length === 0 ? "No ISO images in registry yet. " : ""}
+              Re-sync the job folder after the macro finishes (job-complete), or re-import the C-number folder.
+            </p>
+          )}
         </Card>
       </div>
 
@@ -160,7 +194,7 @@ export default function QuoteDetailPage() {
         <div className="tab-bar inline-flex min-w-max">
           {[
             { id: "overview", label: "Overview", icon: Layers },
-            { id: "parts", label: "Parts & Pricing", icon: FileText },
+            { id: "parts", label: `Parts & Pricing (${partsCount})`, icon: FileText },
             { id: "images", label: `Images (${job.images.length})`, icon: ImageIcon },
             { id: "model", label: `3D (${job.models.length})`, icon: Box },
             { id: "documents", label: `Docs (${job.documents.length})`, icon: FileText },
@@ -180,7 +214,9 @@ export default function QuoteDetailPage() {
         <Card className="p-5">
           <div className="section-label mb-3">Module6121 Bridge</div>
           <p className="mb-4 text-xs leading-relaxed text-ink-400">
-            Part names export to the macro at 127.0.0.1 after classification.
+            {job.base_type === "bms"
+              ? "BMS jobs stay BOM-driven in the macro. Parts & Pricing mirrors the quote workbook: steel plates, pull cores & keys, and purchased components."
+              : "Part names export to the macro at 127.0.0.1 after classification."}
           </p>
           <div className="flex flex-wrap gap-2">
             <a href={api.bridgeCsvUrl(job.job_id)} download>
@@ -190,7 +226,7 @@ export default function QuoteDetailPage() {
         </Card>
       )}
 
-      {tab === "parts" && <PartsTable parts={job.parts} prices={priceByIndex} />}
+      {tab === "parts" && <PartsTable items={displayItems} />}
 
       {tab === "images" && (
         job.images.length === 0 ? (
