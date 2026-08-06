@@ -1,4 +1,18 @@
-venv/ 
-__pycache__/ 
-*.swp 
+venv/
+__pycache__/
+*.swp
 geometry_classifier/data/training/
+
+# Local credentials. These hold the Gmail app password the webapp Settings page
+# writes, and they were NOT ignored until now -- webapp/.env and
+# webapp/.env.bak_20260715_100500 both carried a live CMS_IMAP_PASSWORD /
+# CMS_SMTP_PASSWORD and were one `git add -A` away from being published.
+#
+# A password has already leaked from this repo once (see the SECURITY section in
+# webapp/README.md). Credentials belong in
+# C:\CMS_Local_Workspace\cms_data\email_credentials.json, which lives outside the
+# repo, or in the environment -- never in a tracked file.
+.env
+.env.*
+*.env
+!.env.example
