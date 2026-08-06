@@ -3,6 +3,7 @@ import csv
 import json
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -1237,11 +1238,31 @@ def _ask_qwen_json(prompt, model, timeout_minutes, label, fallback=None, schema=
     """
     print(f"[{label}] prompt {len(prompt):,} chars; sending to {model} ...", flush=True)
     started = time.time()
-    if ollama_api_available():
-        raw = run_ollama_api(prompt, model, timeout_minutes, schema=schema)
-    else:
-        print(f"[{label}] Ollama HTTP API not reachable; falling back to the CLI.", flush=True)
-        raw = run_ollama(prompt, model, timeout_minutes)
+    try:
+        if ollama_api_available():
+            raw = run_ollama_api(prompt, model, timeout_minutes, schema=schema)
+        else:
+            print(f"[{label}] Ollama HTTP API not reachable; falling back to the CLI.", flush=True)
+            raw = run_ollama(prompt, model, timeout_minutes)
+    except Exception as exc:
+        # A pass that cannot run must cost only that pass. Timeouts are the
+        # common case -- qwen3.5:9b on CPU did not finish this prompt inside 40
+        # minutes -- and letting one escape here killed the whole run and threw
+        # away the mesh measurements with it. Everything downstream is built to
+        # carry on from `fallback`.
+        elapsed = time.time() - started
+        print(
+            f"[{label}] {type(exc).__name__} after {elapsed:.0f}s: {exc}. "
+            f"Falling back and carrying on.",
+            flush=True,
+        )
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            print(
+                f"[{label}] The model did not answer within {timeout_minutes} minutes. "
+                f"Use --timeout-minutes 0 to wait indefinitely, or a smaller model.",
+                flush=True,
+            )
+        return (fallback if fallback is not None else {"classifications": []}), False
     print(f"[{label}] {len(raw):,} chars back in {time.time() - started:.0f}s.", flush=True)
     try:
         return extract_json(raw), True
