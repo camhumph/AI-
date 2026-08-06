@@ -1,0 +1,70 @@
+{
+  "job_id": "C18595",
+  "plates": [
+    {
+      "sheet_name": "Leader Pins",
+      "role": "leader_pin",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Top Clamp Plate",
+      "role": "top_clamp_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Support Plate",
+      "role": "support_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Bottom Clamp Plate",
+      "role": "bottom_clamp_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Rails",
+      "role": "rail",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Pin Plate",
+      "role": "pin_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Ejector Plate",
+      "role": "ejector_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Support Pillars",
+      "role": "support_pillar",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    }
+  ],
+  "sheet": "C:\\Users\\lenovo\\Downloads\\TRAINING\\Dynacast-2223488-C18595\\Quote Steel Grinding.xls"
+}

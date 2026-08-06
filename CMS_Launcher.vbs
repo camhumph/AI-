@@ -1372,7 +1372,7 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
 
     Dim startTime, attempt, runOk, runErr, waitStart
     Dim pairs, pi, moduleName, procName, vbaErr
-    Dim shell
+    Dim shell, launched
 
     On Error Resume Next
     Dim f
@@ -1443,6 +1443,24 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
                 LogStep "RunMacro attempt " & attempt & " module=" & moduleName & " proc=" & procName & _
                         " ok=" & CStr(runOk) & " macroErr=" & runErr & " vbaErr=" & vbaErr
 
+                ' NEVER LAUNCH A SECOND COPY OF A MACRO THAT IS ALREADY RUNNING.
+                '
+                ' This loop used to wait 8 seconds for cms_macro_started.txt and then
+                ' fall through to the NEXT entry point -- calling RunMacro again. But
+                ' Module61211 and Module6121 are the SAME code under two names, so the
+                ' second call starts a second complete run against the same job folder.
+                '
+                ' C18599 is the case: 405 components, the marker took longer than 8s to
+                ' appear, and the log shows every single step twice ~3-9s apart, two
+                ' "TOTAL ACTIVE RUN TIME" lines (1862s and 1868s), two Quote workbooks,
+                ' two STEEL SHEETs, and every .SLDPRT written twice. Double the work,
+                ' double the wall clock, and two processes writing the same files.
+                '
+                ' A RunMacro call that returns success has already invoked the macro.
+                ' There is nothing to retry: wait out the real timeout for the marker,
+                ' and either way stop here rather than firing another entry point.
+                launched = (runOk <> False) And (vbaErr = 0)
+
                 waitStart = Timer
 
                 Do
@@ -1461,8 +1479,22 @@ Function RunMacroWithRetry(ByVal swApp, ByVal macroPath, ByVal timeoutSeconds)
                     WaitSeconds 1
 
                     If Timer < waitStart Then Exit Do
-                    If Timer - waitStart >= 8 Then Exit Do
+                    If launched Then
+                        ' Big assemblies need far longer than 8s just to open before the
+                        ' macro can write its marker. Give it the caller's real budget.
+                        If Timer - waitStart >= (timeoutSeconds - 10) Then Exit Do
+                    Else
+                        If Timer - waitStart >= 8 Then Exit Do
+                    End If
                 Loop
+
+                If launched Then
+                    LogStep "RunMacro reported success for " & moduleName & "." & procName & _
+                            " - treating as launched and NOT trying further entry points " & _
+                            "(a second RunMacro would run the whole job twice)."
+                    RunMacroWithRetry = True
+                    Exit Function
+                End If
             End If
         Next
 

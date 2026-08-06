@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Save, Mail, Send, FolderCog, CheckCircle2, XCircle, Brain, Play, AlertTriangle, Loader2, Square } from "lucide-react";
 import Layout from "../components/Layout";
 import { Card, Badge, Button, Spinner } from "../components/ui";
-import { api, type EmailSettings, type TrainingReport } from "../api/client";
+import { api, type EmailSettings, type LearnedPlateName, type TrainingReport } from "../api/client";
 
 type Rate = { mode: string; rate: number; minimum: number };
 
@@ -465,6 +465,8 @@ export default function SettingsPage() {
         </Card>
       </div>
 
+      <LearnedNamesCard />
+
       <Card className="mt-6 p-5">
         <div className="section-label mb-4">Purchased Component Prices (CSV)</div>
         <p className="mb-4 text-xs text-ink-400">
@@ -496,6 +498,128 @@ export default function SettingsPage() {
         )}
       </Card>
     </Layout>
+  );
+}
+
+/**
+ * What renaming plates has taught the app.
+ *
+ * A learned label changes the name on EVERY future job of that base type, from
+ * a single rename — see backend/app/name_learning.py for why one example is the
+ * right threshold for a name. That is only safe if the estimator can see the
+ * list and take one back, which is what this card is for. A global default you
+ * cannot inspect is a default you cannot trust.
+ */
+function LearnedNamesCard() {
+  const [labels, setLabels] = useState<Record<string, LearnedPlateName> | null>(null);
+  const [review, setReview] = useState<Array<Record<string, unknown>>>([]);
+  const [busy, setBusy] = useState("");
+
+  const load = () =>
+    api
+      .learnedNames()
+      .then((r) => {
+        setLabels(r.labels || {});
+        setReview(r.review || []);
+      })
+      .catch(() => setLabels({}));
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  const forget = async (l: LearnedPlateName) => {
+    setBusy(`${l.base_type}:${l.role}`);
+    try {
+      await api.forgetLearnedName(l.base_type, l.role);
+      await load();
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const rows = Object.values(labels || {});
+
+  return (
+    <Card className="mt-6 p-5">
+      <div className="section-label mb-2">Plate Names Learned From Your Renames</div>
+      <p className="mb-4 text-xs leading-relaxed text-ink-400">
+        Every time you rename a plate, the app records why the old name was wrong and uses the new
+        one on every future job of that base type. Renaming changes the label only — the plate keeps
+        its quote row and its price.
+      </p>
+
+      {labels === null ? (
+        <Spinner label="Loading learned names..." />
+      ) : rows.length === 0 ? (
+        <p className="text-xs text-ink-400">
+          Nothing learned yet. Rename a plate on the Parts &amp; Pricing tab and it will appear here.
+        </p>
+      ) : (
+        <div className="scrollbar-thin overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-widest text-ink-500">
+                <th className="px-3 py-2">Base</th>
+                <th className="px-3 py-2">Role</th>
+                <th className="px-3 py-2">Now called</th>
+                <th className="px-3 py-2">Was</th>
+                <th className="px-3 py-2">Why</th>
+                <th className="px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((l) => (
+                <tr key={`${l.base_type}:${l.role}`} className="border-t border-ink-800 align-top">
+                  <td className="px-3 py-2 text-[11px] uppercase text-ink-400">
+                    {l.base_type === "bms" ? "BMS" : "Standard"}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-[11px] text-ink-400">{l.role}</td>
+                  <td className="px-3 py-2 text-ink-100">{l.label}</td>
+                  <td className="px-3 py-2 text-ink-500 line-through">{l.replaces}</td>
+                  <td className="max-w-md px-3 py-2 text-[11px] leading-relaxed text-ink-400">
+                    <span className="text-ink-300">{l.reason}</span>
+                    {l.samples > 1 && (
+                      <span className="text-ink-500"> · {l.samples} jobs</span>
+                    )}
+                    {l.role_suspect && (
+                      <span className="ml-1 rounded bg-accent-amber/20 px-1 py-0.5 text-[9px] font-semibold text-accent-amber">
+                        check the role
+                      </span>
+                    )}
+                    <div>{l.fix}</div>
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      onClick={() => forget(l)}
+                      disabled={busy === `${l.base_type}:${l.role}`}
+                      className="rounded border border-white/10 px-2 py-1 text-[10px] text-ink-400 transition hover:border-accent-rose/50 hover:text-accent-rose"
+                      title="Stop using this name. The role goes back to its built-in label; the history is kept."
+                    >
+                      Forget
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {review.length > 0 && (
+        <div className="mt-4 rounded-lg border border-accent-amber/30 bg-accent-amber/5 px-3 py-2 text-xs leading-relaxed text-accent-amber">
+          <strong>{review.length} rename{review.length === 1 ? "" : "s"} may be a wrong role, not a
+          wrong name.</strong>{" "}
+          <span className="text-ink-300">
+            The new name shares no word with the old one, which usually means the plate was
+            identified as the wrong kind of plate. The label is fixed, but the plate keeps its quote
+            row and price — so if the role really is wrong, the price still is too. Check the role
+            on the Parts tab and re-run classification.
+          </span>
+        </div>
+      )}
+    </Card>
   );
 }
 

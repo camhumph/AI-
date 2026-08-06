@@ -1,0 +1,172 @@
+{
+  "job_analysis": {
+    "stack_axis": "CenterY",
+    "base_type": "bms",
+    "rules_for_this_job": [
+      "Pot-block / BMS geometry detected \u2014 skipped standard A/B/rail classify. Use Module6121 BOM-driven TCP / Holder / Pot / BCP fill."
+    ]
+  },
+  "classifications": [
+    {
+      "index": "1",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "2",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "3",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "4",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "5",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "6",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "7",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "8",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "9",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "10",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "11",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "12",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "13",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "14",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "15",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "16",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "17",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "18",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "19",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "20",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "21",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "22",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    },
+    {
+      "index": "23",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Pot-block job: AI standard-stack roles disabled; macro BOM owns plate naming.",
+      "quote": false
+    }
+  ]
+}

@@ -48,12 +48,22 @@ def write_bridge_files(job_id: str, quote_sheet: dict, job_analysis: dict) -> di
     rows = []
     for item in quote_sheet.get("line_items", []):
         role = item.get("role", "")
+        # A user rename must survive into the bridge file, because this CSV is
+        # what Module6121 reads back on its next run to name the quote-sheet and
+        # steel-sheet rows. If ResolvedName still held the default label, the
+        # next macro run would quietly undo every rename the user made.
+        override = (item.get("name_override") or "").strip()
+        # Call _resolved_name ALWAYS, even when overridden, because it advances
+        # the per-role counter that numbers repeating parts. Short-circuiting on
+        # the override would skip the increment, so renaming "Rail 1" would leave
+        # the next rail also called "Rail 1".
+        default_name = _resolved_name(role, role_counts)
         rows.append(
             {
                 "Index": item.get("index"),
                 "Component": item.get("component"),
                 "Role": role,
-                "ResolvedName": _resolved_name(role, role_counts),
+                "ResolvedName": override or default_name,
                 "Confidence": (item.get("confidence") or "MEDIUM").upper(),
                 "Quote": "TRUE" if item.get("quote") else "FALSE",
                 "Price": item.get("price", 0.0),

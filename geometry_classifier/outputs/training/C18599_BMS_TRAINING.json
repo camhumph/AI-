@@ -1,0 +1,75 @@
+{
+  "job_id": "C18599",
+  "base_type": "bms",
+  "folder": "C:\\Users\\lenovo\\Downloads\\TRAINING\\IndustrialMold-Mach-8418-C18599",
+  "bom_files": [],
+  "steel_sheet": "C:\\Users\\lenovo\\Downloads\\TRAINING\\IndustrialMold-Mach-8418-C18599\\Quote Steel Grinding.xls",
+  "quote_sheet": "C:\\Users\\lenovo\\Downloads\\TRAINING\\IndustrialMold-Mach-8418-C18599\\Quote Steel Grinding.xls",
+  "plates_from_sheet": [
+    {
+      "sheet_name": "Leader Pins",
+      "role": "leader_pin",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "BOTTOM Clamp Plate",
+      "role": "bottom_clamp_plate",
+      "thickness": 1.0,
+      "width": 1.375,
+      "length": 17.875,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Support Plate",
+      "role": "support_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Rails",
+      "role": "rail",
+      "thickness": 2.0,
+      "width": 10.0,
+      "length": 1.875,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Pin Plate",
+      "role": "pin_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Ejector Plate",
+      "role": "ejector_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Support Pillars",
+      "role": "support_pillar",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    },
+    {
+      "sheet_name": "Top Clamp Plate",
+      "role": "top_clamp_plate",
+      "thickness": 0.0,
+      "width": 0.0,
+      "length": 0.0,
+      "source_sheet": "QuoteWorksheet"
+    }
+  ],
+  "macro_guidance": "Use BOM-driven pot-block flow in Module6121. RunAiBridgeClassification must skip classify and call AiBridgeNotifyBms only."
+}

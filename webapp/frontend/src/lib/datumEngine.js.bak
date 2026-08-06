@@ -1,0 +1,83 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   DATUM ENGINE — STUB
+   ---------------------------------------------------------------------------
+   THIS IS A PLACEHOLDER. It is not the real engine.
+
+   Why it exists: datumAdapter.ts imports this path statically, so if the file
+   is absent the whole bundle fails to build with UNRESOLVED_IMPORT — one
+   missing file taking down the entire app. This stub guarantees the build
+   always succeeds. At runtime parseSTL throws immediately, the adapter catches
+   it, every plate comes back skipped, part_count is 0, and MachiningPanel
+   falls back to the server's pattern estimate. Degraded, not broken.
+
+   TO INSTALL THE REAL ENGINE
+       python C:\CMS_AI\install_datum_engine.py
+
+   It finds datum-engine.js (Downloads, Desktop, C:\CMS_AI, or the Claude
+   session folder), verifies it is the engine and not the console demo, and
+   overwrites this file. START_CMS_QUOTING_APP.bat also runs it with
+   --if-missing, which replaces this stub because it is under 10 KB.
+
+   Everything below matches the real engine's export surface (see
+   datumEngine.d.ts) so tsc and the bundler are both satisfied.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const NOT_INSTALLED =
+  "Datum engine is not installed — this is the stub. " +
+  "Run: python C:\\CMS_AI\\install_datum_engine.py";
+
+/** True when this is the placeholder rather than the real engine. */
+export const IS_STUB = true;
+
+export function parseSTL() {
+  throw new Error(NOT_INSTALLED);
+}
+
+export function analyze() {
+  throw new Error(NOT_INSTALLED);
+}
+
+export function extract() {
+  throw new Error(NOT_INSTALLED);
+}
+
+export function makeStock(ext = [0, 0, 0]) {
+  return { stock: [...ext], faces: [0, 1, 2], mode: "block", short: false };
+}
+
+export function plan() {
+  throw new Error(NOT_INSTALLED);
+}
+
+export function cost() {
+  return { lines: [], subtotal: 0, risk: 0, total: 0, stockKg: 0, hours: { cycle: 0, setup: 0, total: 0 } };
+}
+
+export function materialByName() {
+  return MATERIALS[0];
+}
+
+export function fmtMin(min = 0) {
+  const m = Math.max(0, Math.floor(min));
+  return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
+}
+
+export function money(v = 0) {
+  return `$${(Number(v) || 0).toFixed(2)}`;
+}
+
+/* Shapes only — enough that anything reading these does not crash before
+   parseSTL has had a chance to throw. */
+export const MATERIALS = [
+  { id: "4140", name: "4140 PH", cls: "Alloy steel", rho: 7.85, kg: 4.8, vc: 140, fz: 0.1, k: 2.6, tc: 24 },
+];
+
+export const TOLS = [
+  { v: 0.25, label: "±0.25", name: "As milled", fin: 1.0, passes: 1, insp: 6, scrap: 0.005, gauge: "" },
+  { v: 0.1, label: "±0.10", name: "General", fin: 1.22, passes: 1, insp: 14, scrap: 0.01, gauge: "" },
+  { v: 0.05, label: "±0.05", name: "Close", fin: 1.55, passes: 2, insp: 32, scrap: 0.02, gauge: "" },
+];
+
+export const ALLOW = 3.0;
+export const DUTY = 0.35;
+export const RPM_MAX = 12000;

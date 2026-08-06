@@ -36,8 +36,19 @@ set CMS_DATA_DIR=C:\CMS_Local_Workspace\cms_data
 rem Folder browser for C-number quote jobs (month folders live under Downloads)
 set CMS_WORKSPACE_ROOT=\\Mycloudex2ultra\mexico\Downloads
 
-rem Point the app at the real job folders on this machine (uncomment to use):
-rem set CMS_JOBS_ROOT=C:\CMS_Local_Workspace\AI_Jobs
+rem PIN the job registry explicitly.
+rem
+rem This must never be left to the default. config.py derives JOBS_ROOT from
+rem CMS_DATA_DIR when CMS_JOBS_ROOT is unset, so starting the backend any other
+rem way (plain "python start_cms.py", an IDE, a service) silently pointed the
+rem Quotes list at webapp\backend\data\jobs -- 3 folders instead of the 13 in
+rem cms_data\jobs. Every job "disappeared" and nothing had been deleted.
+rem
+rem Do NOT set this to C:\CMS_Local_Workspace itself. That is the macro's
+rem staging root, and quote_pipeline.stage_job_to_local_workspace rmtree's
+rem C:\CMS_Local_Workspace\C##### on every re-quote -- which would delete the
+rem registry folder, meta.json, classification.json, images and models with it.
+set CMS_JOBS_ROOT=C:\CMS_Local_Workspace\cms_data\jobs
 
 rem Training scan folder (BMS + standard jobs for Settings ^> Run Training Scan)
 set CMS_TRAINING_ROOT=C:\Users\lenovo\Downloads\TRAINING
@@ -75,6 +86,14 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+
+rem The Datum STL engine is a single JS file that has to sit at
+rem webapp\frontend\src\lib\datumEngine.js for the bundle to resolve it.
+rem --if-missing makes this a no-op once installed, so it is safe on every start.
+rem If the file cannot be found it warns and continues: the app still runs, and
+rem the Machining tab falls back to the server's coarse pattern estimate.
+echo Checking Datum STL engine...
+%PYTHON% "%~dp0..\install_datum_engine.py" --if-missing
 
 if not exist "..\frontend\dist\index.html" (
   echo.

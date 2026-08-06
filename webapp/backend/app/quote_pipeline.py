@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import config, jobs
+from . import config, job_housekeeping, jobs
 
 LOCAL_WORKSPACE = Path(os.environ.get("CMS_LOCAL_WORKSPACE", r"C:\CMS_Local_Workspace"))
 HANDOFF_FILE = LOCAL_WORKSPACE / "cms_handoff.txt"
@@ -1151,6 +1151,27 @@ def sync_completed_job(job_id: str, folder_path: str, base_type: str = "standard
         except Exception:
             pass
 
+    # Tidy the shop folder: render each diagnostic CSV to PDF, then move the CSVs
+    # and the macro's run logs into pdf\, leaving only deliverables in the root.
+    #
+    # Runs here rather than being a manual step because every finished job needs
+    # it -- C18640 came out of the macro with ten CSVs and two logs loose in the
+    # root and an empty pdf\ folder. Ordered AFTER import_from_folder so the
+    # webapp has copied what it needs, and after classify so the classifier has
+    # read the raw CSV from the root. Never fatal: a tidy failure must not mark a
+    # finished quote as failed.
+    try:
+        tidy = job_housekeeping.tidy_job(folder)
+        moved = len(tidy.get("csvs", {}).get("moved", [])) + len(tidy.get("logs", {}).get("moved", []))
+        if moved:
+            _append_quote_log(f"Tidied {folder.name}: {moved} file(s) moved into "
+                              f"{job_housekeeping.DIAGNOSTICS_DIR}\\")
+        for section in ("diagnostics", "csvs", "logs"):
+            for err in tidy.get(section, {}).get("errors", []):
+                _append_quote_log(f"Tidy warning ({section}): {err}")
+    except Exception as e:
+        _append_quote_log(f"Tidy skipped for {folder.name}: {type(e).__name__}: {e}")
+
     job = jobs.get_job(job_id)
 
     set_status(
@@ -1535,14 +1556,22 @@ def poll_completion(quote_id: str) -> dict:
 
     local = find_local_job_folder(job_id)
     if local:
-        has_xt = (local / "XT_Export_CAD_Dimensions.csv").exists()
+        has_xt = job_housekeeping.job_file_exists(local, "XT_Export_CAD_Dimensions.csv")
         has_quote = any(local.glob("*quote*.xls*")) or any(local.glob("*Quote*.xls*"))
-        has_purchased = (local / "Purchased Components Quote.csv").exists()
+        has_purchased = job_housekeeping.job_file_exists(local, "Purchased Components Quote.csv")
         has_steel = any(local.glob("*steel*.xls*")) or any(local.glob("*J000*.xls*"))
         has_done_log = _macro_log_says_done(local)
-        # Standard jobs may write steel/quote under slightly different names;
-        # also accept DONE log so the UI does not stay on "running" forever.
-        ready = has_xt and (has_quote or has_purchased or has_steel or has_done_log)
+        # IMPORTANT: has_done_log is the *authoritative* signal that Module6121
+        # actually finished — it's written by ProcessOneJob's final "DONE JOB ...
+        # TOTAL JOB TIME:" log line, only after every CSV/workbook is fully
+        # written and closed. The quote/purchased/steel files below can exist
+        # on disk *while the macro is still writing them*, so treating their
+        # mere presence as "ready" (the old `... or has_done_log`) let the
+        # webapp sync and pull in partial/incomplete data before the macro was
+        # truly done. The DONE log is now required; the file checks just
+        # confirm something was actually produced (handles standard-job
+        # naming variance) rather than substituting for the DONE signal.
+        ready = has_xt and has_done_log and (has_quote or has_purchased or has_steel)
         if ready:
             if status.get("phase") != "completed":
                 try:

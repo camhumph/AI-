@@ -1,4 +1,3 @@
-Attribute VB_Name = "Module61211"
 Option Explicit
 
 ' ============================================================
@@ -54,13 +53,68 @@ Private Const DISABLE_MAIN_VIEWPORT_GRAPHICS As Boolean = True
 ' STL always exports a combined one-file mesh (merge when PartCount allows).
 Private Const FAST_QUOTE_MODE As Boolean = True
 Private Const CREATE_ISO_JPEGS As Boolean = True
-Private Const FAST_ISO_JPEG_CAPTURE As Boolean = True
 Private Const RUN_VISUAL_MOLD_INSPECTION As Boolean = False
 Private Const CREATE_DIM_DXF As Boolean = False   ' DIM DXF removed per request
-Private Const EXPORT_PER_PLATE_STLS As Boolean = False
+' One STL per quoted plate, written into <job>\stl and hoisted into the web
+' app's models\ folder on import. Standard bases name each file from the
+' standard quote row (A Plate, B Plate, Rails 1..n, Ejector Plate, ...);
+' BMS/pot jobs keep the six-role naming (TCP, BCP, ID/OD Holder, ID/OD Pot).
+' Every file is written through SaveStlWithMainBaseOrientation, so all plates
+' share the same corrected CMS Top/Front frame as the full-assembly STL and
+' overlay cleanly in the 3D tab.
+Private Const EXPORT_PER_PLATE_STLS As Boolean = True
+
+' On a standard/PCS base, also export EVERY remaining steel part -- not just the
+' ones that earned a quote row.
+'
+' The per-row pass below walks StdCount, so it only ever writes an STL for a
+' plate the quoting logic recognised AND matched to a CAD index. Anything else
+' -- an unquoted plate, a plate whose BOM row never matched, a second support
+' plate, an interlock block, a wear plate -- was silently absent from the 3D
+' tab, the Geometry tab and the machining estimate, with only a line in the log
+' to say so. This second pass sweeps the leftovers so the gallery shows the
+' whole mold in steel. Hardware and insulation are still excluded.
+Private Const EXPORT_ALL_STEEL_PART_STLS As Boolean = True
+
+' Below this the part is a chip, not a plate: fasteners and inserts that slipped
+' past the hardware name list. Cubic inches of bounding box.
+Private Const MIN_STEEL_STL_BBOX_CUIN As Double = 0.75
+
+' Filename tag for a steel part no naming rule recognised.
+'
+' NO LONGER EMITTED. The leftover sweep now skips anything it cannot name as a
+' structural plate, because exporting every interlock, wear pad and slide detail
+' was the slowest step in a run and buried the real plates in the 3D gallery.
+'
+' Kept declared, and the matching "STEEL PART" kind kept in componentKind.ts,
+' because jobs quoted before this change still have files with this tag in their
+' names and must still classify rather than falling into OTHER.
+Private Const STEEL_PART_STL_TAG As String = "Steel Part"
+
 ' Heavy neutrals are slow on 200+ part STEP imports; off in fast mode.
 Private Const EXPORT_HEAVY_NEUTRALS As Boolean = False
 Private Const EXPORT_BASE_DXF As Boolean = True
+
+' === CMS PATCH SEPARATE ENGRAVING TOP DXFS START ===
+' Creates three separate one-view engraving DXFs:
+'   <J#>_ID HOLDER ENG_<customer job>_<date>.dxf
+'   <J#>_OD HOLDER ENG_<customer job>_<date>.dxf
+'   <J#>_TCP ENG_<customer job>_<date>.dxf
+' Each file uses the corrected top view only and Hidden Lines Removed display.
+' BMS role matching is driven by measured size + mass from the CAD scan, not by
+' the hardcoded LIGHT/HEAVY assumption in GetMassPreferenceForQuoteName. Set
+' False only to restore the old BOM-preference-first behaviour.
+Private Const GEOMETRY_WINS_OVER_BOM_MASS_PREFERENCE As Boolean = True
+
+' OFF: not needed, and this pass is what took SolidWorks down on C18609 --
+' it opens and closes three extra drawing documents, and when one of them
+' fails the whole COM session dies ("The object invoked has disconnected
+' from its clients"), killing every export that runs after it.
+Private Const EXPORT_SEPARATE_ENGRAVING_TOP_DXFS As Boolean = False
+Private Const CMS_ENG_DXF_HIDDEN_LINES_REMOVED As Long = 1
+Private Const CMS_ENG_DXF_SINGLE_VIEW_SCALE_SAFETY As Double = 0.95
+' === CMS PATCH SEPARATE ENGRAVING TOP DXFS END ===
+
 ' Above this count, do NOT assembly->temp-part->Combine.
 ' Export assembly STL directly as one file instead. Much faster for BMS/PCS jobs.
 Private Const STL_MERGE_MAX_PARTS As Long = 50
@@ -106,6 +160,50 @@ Private Const FORCE_BINARY_STL_EXPORT As Boolean = True
 ' If your SW version uses a different enum, this harmlessly no-ops under On Error Resume Next.
 Private Const swSTLBinaryFormat As Long = 69
 
+' Force STL export units to INCHES.
+'
+' STL files carry no unit tag, so whatever this preference is set to on the
+' machine is what the mesh coordinates mean. Left at the SolidWorks default of
+' millimetres, an 18.000 in plate exports as 457.20 and its volume comes out
+' 25.4^3 (~16,387x) too big -- which is how the web app's 3D tab reported a
+' clamping plate at 1.7 million lb. The web app also normalises defensively
+' (normalizeGeometryToInches), so a wrong enum here is not fatal, just untidy.
+' swUserPreferenceIntegerValue_e.swExportStlUnits / swLengthUnit_e.swINCHES.
+' Force a FINE tessellation on STL export.
+'
+' This is the single biggest lever on how accurately the web app can read the
+' geometry back. SolidWorks default ("Coarse") turns a 0.201" tap-drill hole into
+' roughly a 12-sided prism, and the least-squares circle fit then inherits that
+' facet error -- which is why measured diameters come back as Ø5.11 mm instead of
+' a clean 5.106 mm (0.2010"), and why small holes can fragment into arcs and read
+' as fillets instead of holes.
+'
+' Custom deviation 0.0004 in (~0.01 mm) and angle 5 deg is the recommended
+' setting: about 18+ segments around a small hole, which is the threshold below
+' which cylinder fitting starts to degrade.
+'
+' Cost is file size and export time. A plate goes from ~30k to ~200k triangles.
+' Worth it -- the alternative is guessing at hole sizes.
+'
+' swUserPreferenceIntegerValue_e / swUserPreferenceDoubleValue_e:
+'   swSTLQuality        = 66   (1 = Coarse, 2 = Fine, 3 = Custom)
+'   swSTLDeviation      = 67   (double, metres)
+'   swSTLAngleTolerance = 68   (double, radians)
+' Enums vary a little between releases; all three are set under
+' On Error Resume Next so a wrong value no-ops rather than aborting the export.
+Private Const FORCE_FINE_STL_TESSELLATION As Boolean = True
+Private Const swSTLQuality As Long = 66
+Private Const swSTLDeviation As Long = 67
+Private Const swSTLAngleTolerance As Long = 68
+Private Const swSTLQuality_Custom As Long = 3
+' 0.01 mm in metres, and 5 degrees in radians.
+Private Const CMS_STL_DEVIATION_M As Double = 0.00001
+Private Const CMS_STL_ANGLE_RAD As Double = 0.0872665
+
+Private Const FORCE_INCH_STL_EXPORT As Boolean = True
+Private Const swExportStlUnits As Long = 58
+Private Const swStlUnitInches As Long = 3
+
 Private Const CMS_TOP_VIEW_NAME As String = "CMS_TOP"
 Private Const CMS_FRONT_VIEW_NAME As String = "CMS_FRONT"
 Private Const CMS_BASE_TOP_VIEW_NAME As String = "*Bottom"
@@ -132,8 +230,23 @@ Private Const E_SHEET_WIDTH_IN As Double = 44#
 Private Const E_SHEET_HEIGHT_IN As Double = 34#
 Private Const DXF_MARGIN_IN As Double = 1#
 Private Const DXF_MAX_SCALE As Double = 1#
-Private Const DXF_PROJECTED_VIEW_GAP_IN As Double = 2.25
+' Clear space between the parent TOP view and each projected view. Was 2.25,
+' which on a 21" tall mold base put the side views almost touching the top view.
+Private Const DXF_PROJECTED_VIEW_GAP_IN As Double = 6#
 Private Const MULTIVIEW_FIT_SAFETY As Double = 0.9
+
+' TRUE SCALE ON THE BASE DXF.
+'
+' The four-view layout of a mold base does not fit an E sheet at 1:1 -- on C17267
+' it needs about 71 x 83 inches against the 42 x 32 usable, so
+' CalculateProjectedFourViewDxfScale returned 0.385 and every view came out at
+' just over a third size. Anyone measuring off that DXF measures wrong.
+'
+' A DXF has no paper, so there is no reason to shrink the geometry to fit one.
+' Grow the sheet to the layout instead and keep the views at 1:1.
+Private Const DXF_BASE_FORCE_1TO1 As Boolean = True
+' Cap so a runaway dimension cannot ask for a mile-wide sheet.
+Private Const DXF_MAX_SHEET_IN As Double = 400#
 Private Const FREEZE_DXF_DRAWING_GRAPHICS As Boolean = True
 
 Private Const DIM_DECIMALS As Long = 3
@@ -222,12 +335,37 @@ Private FinalStlCoordM(0 To 8) As Double
 Private gJobIsStandardBase As Boolean
 
 ' ============================================================
+' ALL-PDF KNOWLEDGE GLOBALS
+' ============================================================
+Private gPdfAllText As String
+Private gPdfAllNormText As String
+Private gPdfPartTokenDict As Object      ' token -> evidence line
+Private gPdfRoleByToken As Object        ' token -> role
+Private gPdfSourceByToken As Object      ' token -> source PDF
+Private gPdfDimsByRole As Object         ' NormalizeKey(role) -> thickness/dim evidence
+Private gPdfEvidenceRows As Collection   ' CSV lines for PDF_Knowledge_Evidence.csv
+Private gPdfKnowledgeReady As Boolean
+Private gPdfKnowledgeStart As Date
+
+
+
+' ============================================================
 ' POT-BLOCK ENGINE ADDITIONS  (scan + BOM read/match + Excel fill)
 ' ============================================================
 
 ' --- BOM reading ---
 Private Const READ_PDF_BOM_WITH_PDFTOTEXT As Boolean = True
 Private Const PDFTOTEXT_EXE As String = "C:\Users\lenovo\Downloads\New folder (9)\poppler-26.02.0\Library\bin\pdftotext.exe"
+
+' --- All-PDF drawing/BOM knowledge pass ---
+' Reads every customer PDF in the job folder with pdftotext -layout, caches text,
+' and uses drawing/BOM text as naming evidence for standard mold bases.
+Private Const PDF_KNOWLEDGE_ENABLED As Boolean = True
+Private Const PDF_KNOWLEDGE_MAX_SECONDS As Long = 20
+Private Const PDF_TEXT_CACHE_DIR As String = "C:\CMS_Local_Workspace\pdf_text_cache"
+Private Const WRITE_PDF_KNOWLEDGE_EVIDENCE As Boolean = True
+
+
 Private Const TURBO_READ_ONLY_BOM_SHEET As Boolean = True
 Private Const TURBO_BOM_SHEET_NAME As String = "BOM"
 Private Const BOM_HEADER_SEARCH_MAX_ROWS As Long = 150
@@ -242,11 +380,17 @@ Private Const SAME_SIZE_PAIR_TOL As Double = 0.125
 Private Const DIM_MAX_MATCH_TOTAL_DIFF As Double = 5#
 Private Const MIN_STEEL_VOLUME_CUIN As Double = 1#
 Private Const CUIN_PER_CUBIC_METER As Double = 61023.7440947323
+' Used only when SolidWorks reports no material/density assigned (mass property
+' comes back 0), to convert an exact analytical volume into a real mass instead
+' of silently treating volume as mass. Matches the ~0.283 lb/in^3 steel figure
+' already assumed elsewhere in this file's sanity checks.
+Private Const DEFAULT_TOOL_STEEL_DENSITY_LB_PER_CUIN As Double = 0.283
 Private Const HIDE_QUARTER_INCH_THICKNESS As Boolean = False
 Private Const QUARTER_INCH_THICKNESS As Double = 0.25
 ' Steel stock allowance: add this to the finished thickness on the QUOTE sheet,
 ' then round up to the nearest 0.0001". The STEEL ORDER sheet keeps finished dims.
-Private Const STEEL_THICKNESS_ALLOWANCE As Double = 0.25
+Private Const STEEL_THICKNESS_ALLOWANCE As Double = 0#
+Private Const STEEL_WIDTH_LENGTH_ALLOWANCE As Double = 0.25
 Private Const QUARTER_INCH_TOLERANCE As Double = 0.01
 
 ' --- Excel fill toggles ---
@@ -346,7 +490,7 @@ Private Type ExportInfo
     BomWidth As Double
     BomLength As Double
     HasBomDims As Boolean
-    Status As String
+    status As String
 End Type
 
 ' --- Globals ---
@@ -383,13 +527,46 @@ Private Const STD_RAIL_MIN_LENGTH_FRAC As Double = 0.6
 Private Const STD_RAIL_MAX_WIDTH_FRAC As Double = 0.65
 Private Const STD_RAIL_MIN_THICK As Double = 1#
 Private Const STD_EJECTOR_MIN_FOOT_FRAC As Double = 0.15
+' Below this plate count the classifier tries its later fallbacks and warns on the
+' result. It is a "try harder" threshold ONLY -- a 1- or 2-plate answer is still
+' quoted (see ClassifyStandardBasePlates), because plenty of real jobs are an
+' insert, a single plate, or a two-plate base.
+Private Const STD_MIN_GOOD_PLATES As Long = 3
 Private Const STD_A_B_GRADE As String = "P20"        ' A & B plates default to P20 (#3 block)
+
+' ONE GRADE FOR THE WHOLE BASE, unless a BOM/CAD material says otherwise.
+'
+' The shop quotes a standard base as a single material. Both hand quotes checked
+' against this macro -- C18597 (ITW Medical) and C18619 (Dynacast 2223602) -- put
+' EVERY plate in the #2 block on the Steel Order, while the macro split them
+' P20/A-36 per plate role and came out with a different steel cost. The per-role
+' split is a modelling assumption; the estimator's sheet is the shop's practice.
+'
+' Set to "" to restore the old per-role split (STD_A_B_GRADE for A/B/X/Y/manifold/
+' stripper, A-36 for everything else). Any explicit grade from the BOM or the CAD
+' material still wins over this -- see ResolveStdGrade, which only calls
+' DefaultStandardGradeForSlot when no usable grade hint was supplied.
+Private Const STD_DEFAULT_GRADE_ALL As String = "4140"
 Private Const STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK As Boolean = False
+
+' --- Premium ("thick plate") pricing bands ---------------------------------
+' Declared here, with every other module-level constant, and NOT beside the
+' StdThickMinFor / StdIsThickPlate functions that use them. VBA only accepts
+' module-level declarations in the declarations section, above the first
+' procedure; these three were the only ones in the module sitting below it, and
+' the module would not compile -- "Variable not defined" on THICK_EPS. The
+' functions and the long note explaining the bands stay where they were.
+Private Const THICK_MIN_A36 As Double = 2#
+Private Const THICK_MIN_OTHER As Double = 5.875
+' The sizes are typed as decimal inches and compared against measured geometry,
+' so a plate the shop calls 5.875 can arrive as 5.874999. Half a thou of slack
+' keeps that on the premium side without ever reaching the next 1/64.
+Private Const THICK_EPS As Double = 0.0005
 
 ' For PCS / standard mold bases, quote only the primary steel stack:
 ' A Plate, B Plate, 2 Rails, Ejector Plate, and Ejector Retainer/Backup Plate.
-Private Const STD_QUOTE_PRIMARY_PCS_STACK_ONLY As Boolean = True
-Private Const STD_QUOTE_INCLUDE_CLAMP_PLATES As Boolean = False
+Private Const STD_QUOTE_PRIMARY_PCS_STACK_ONLY As Boolean = False
+Private Const STD_QUOTE_INCLUDE_CLAMP_PLATES As Boolean = True
 Private Const STD_QUOTE_RAIL_QTY As Long = 2
 Private Const STD_QUOTE_KEEP_ONE_A_PLATE As Boolean = True
 Private Const STD_QUOTE_KEEP_ONE_B_PLATE As Boolean = True
@@ -407,12 +584,52 @@ Private Const PULLCORE_PRICE_FILE As String = "Pullcore Prices.csv"
 
 ' --- Purchased components (DME / McMaster / Jaco hardware) ---
 Private Const FILL_PURCHASED_COMPONENTS As Boolean = True
+' Purchased components on STANDARD (non-BMS) jobs.
+'
+' These used to be switched off for anything that was not a pot-block job, by two
+' hard `If gJobIsStandardBase Then Exit` gates: one in
+' CaptureStandardPurchasedFromCadIfNeeded, one in the pricing pass. So a standard
+' base captured no hardware at all, the Components block of the quote workbook was
+' left blank, and the web app showed leader pins and bushings with no price --
+' C18517 is exactly that: 3 purchased lines, every one of them "--".
+'
+' The classifier for standard CAD hardware already existed
+' (TryClassifyStandardCadPurchased); only the gates stopped it running. Both now
+' respect this flag instead, so DME / McMaster / Jaco parts price the same way on
+' every base type.
+'
+' TURNED BACK OFF 2026-08-06, by decision, because what it produced was worse
+' than a blank. C18638 (Hewitt 25-424) is the record: its BOM lists 13 purchased
+' lines / 49 pieces, and Purchased Components Quote.csv came out with
+'   - Progressive RP62L5.06 (a RETURN pin) priced as a "Leader Pin" at $6.85
+'   - Progressive LP75L3.75 (an EJECTOR GUIDE pin) also priced as a "Leader Pin"
+'   - a McMaster snap ring 99142A520 that appears nowhere in the BOM
+'   - no support pillars (SP125L3 x6, SP125L3-CB x2), no stop discs (SD68 x6),
+'     no tubular dowels (TD75L2.37 x2), no side locks (SL50X125 x4 + male x4)
+'   - a TOTAL row of 0.00
+' Three of eight lines misidentified and two thirds of the hardware missing is a
+' wrong number on a quote, which costs more than an empty block an estimator can
+' see is empty. Blank prices (C18517) were a visible gap; these are invisible
+' errors.
+'
+' The hardware is NOT lost from the job: EXPORT_COMPONENTS_ONLY_PACKAGE below
+' still writes "<job> component.easm" / "<job> component.stl" with the quoted
+' plates hidden, so everything this flag stops pricing is still there to look at.
+' BMS / pot-block jobs are unaffected -- both gates test gJobIsStandardBase.
+'
+' Flip back to True only with TryClassifyStandardCadPurchased fixed and checked
+' against a BOM this size.
+Private Const STD_ENABLE_PURCHASED_COMPONENTS As Boolean = False
+' Write "<job> component.easm" and "<job> component.stl": the assembly with every
+' quoted steel plate hidden, so what is left is the hardware the steel sheet does
+' not cover. See ExportComponentsOnlyPackage.
+Private Const EXPORT_COMPONENTS_ONLY_PACKAGE As Boolean = True
 ' Live web price lookup for purchased components (DME store / Bing). Needs internet.
 ' Pricing is handled by the Python tool (cms_price_lookup.py), which renders the
 ' DME page and writes prices into the CSV. The macro just reads the CSV, so its
 ' own web lookup is OFF. (Flip to True only if you want the VBA fallback back.)
 Private Const ENABLE_ONLINE_PRICE_LOOKUP As Boolean = False
-Private Const ENABLE_PYTHON_PRICE_LOOKUP As Boolean = False
+Private Const ENABLE_PYTHON_PRICE_LOOKUP As Boolean = True
 Private Const ENABLE_ASSISTED_PRICE_PROMPT As Boolean = False
 Private Const PYTHON_EXE As String = "python"
 Private Const PURCHASED_PRICE_FILE As String = "Purchased Components Prices.csv"
@@ -465,6 +682,13 @@ Private gDiagBomPath As String           ' BOM file the macro used (for the end-
 Private gEmailStatus As String           ' result of the proposal email step
 Private gLastJobDiag As String           ' summary of BOM/components/email for the popup
 Private gProcessingHandoff As Boolean     ' True while launcher-supplied quote/job info must be preserved
+' True when the CAD being quoted names itself as one half of the mold (A side /
+' B side / cavity half / core half). Set once in the run header; used to explain a
+' short plate list instead of leaving it looking like a small mold base.
+Private gActiveCadIsPartialSide As Boolean
+' Model axis (1=X, 2=Y, 3=Z) the plates stack along, resolved from geometry before
+' classification. Quoted thickness is measured along this axis. 0 = unresolved.
+Private gQuoteStackAxis As Integer
 
 Private stdName() As String
 Private StdT() As Double
@@ -478,6 +702,10 @@ Private StdCount As Long
 Private gStdRoleByPart() As String
 Private gStdStackAxis As Integer
 Private gStdTopIsFirst As Boolean
+' HIGH / MEDIUM / LOW confidence that the stack is the right way up. LOW means
+' nothing anchored it and the plate names may be inverted -- written into
+' Stack_LeaderPin_Analysis.csv so a reviewer can filter on it.
+Private gStdOrientationConfidence As String
 Private gStdDmeStackFamily As String
 Private gStdPartingLineAxis As Integer
 Private gStdPartingLinePos As Double
@@ -494,6 +722,51 @@ Private gStdLeaderPinReversed As Boolean     ' Seated in B area running toward A
 Private gStdSequencedLatchLock As Boolean    ' PLC / latch-lock / safety-strap base
 Private gStdStackRules As String             ' Pipe-separated rules_for_this_job text
 Private gStdPartingLineText As String
+
+' ------------------------------------------------------------
+' BEST-SO-FAR SNAPSHOT OF THE STANDARD PLATE LIST.
+'
+' ClassifyStandardBasePlates runs a cascade: geometry, then AI bridge, then BOM,
+' then CAD names, then one-off. Each stage used to call StdResetArrays BEFORE
+' trying, and nothing ever put the previous answer back. So a stage that produced
+' a good-but-short list had that list destroyed by the next stage, and if every
+' later stage declined the run ended with NOTHING.
+'
+' That is exactly what wrecked C18621: geometry correctly named a Top Clamp Plate
+' and a Bottom Clamp Plate, the "< 3 plates" test decided that was too few, the
+' AI bridge declined ("only 2 plate roles"), BOM and CAD-name found nothing, and
+' the quote fell through to the one-off path -- one row called IMPORTED_4-1 in
+' place of a ten-plate steel order.
+'
+' These arrays hold the best (highest-count) list any stage has produced, so a
+' fallback can only ever IMPROVE the answer, never erase it.
+' ------------------------------------------------------------
+Private stdBakName() As String
+Private stdBakT() As Double
+Private stdBakW() As Double
+Private stdBakL() As Double
+Private stdBakQty() As Long
+Private stdBakGrade() As String
+Private stdBakQuoteRow() As Long
+Private stdBakCadIndex() As Long
+Private stdBakCount As Long
+Private stdBakSource As String
+Private stdBakRoleByPart() As String
+Private stdBakLeaderPinSetByPart() As String
+Private stdBakStackAxis As Integer
+Private stdBakTopIsFirst As Boolean
+Private stdBakOrientationConfidence As String
+Private stdBakDmeStackFamily As String
+Private stdBakPartingLineAxis As Integer
+Private stdBakPartingLinePos As Double
+Private stdBakCavityCadIndex As Long
+Private stdBakCoreCadIndex As Long
+Private stdBakLeaderPinFromTop As Boolean
+Private stdBakLeaderPinFromKnown As Boolean
+Private stdBakLeaderPinReversed As Boolean
+Private stdBakSequencedLatchLock As Boolean
+Private stdBakStackRules As String
+Private stdBakPartingLineText As String
 
 ' ============================================================
 ' AI BRIDGE (CMS AI Quoting local web app / geometry classifier)
@@ -518,6 +791,111 @@ Private Const AI_BRIDGE_FILE_DIR As String = "C:\CMS_Local_Workspace\AI_Bridge"
 ' over the macro's own geometry pass.
 Private Const AI_BRIDGE_MIN_PLATES As Long = 3
 
+' ============================================================
+' B-REP HOLE SIGNATURE -- module-level state
+'
+' THESE 11 LINES MUST STAY IN THE DECLARATIONS SECTION, above Sub main().
+' VBA only registers module-level declarations that appear before the first
+' procedure; anywhere else they compile as "Variable not defined" under Option
+' Explicit. If you sync this file into the .swp by pasting a REGION rather than
+' importing the whole module, this block is the part that gets left behind.
+'
+' The tuning constants deliberately do NOT live here. Every one of them is used
+' by exactly one procedure, so each is a local Const next to the logic it
+' governs -- which keeps the threshold documented where it matters AND means a
+' partial paste can no longer break the tuning values.
+'
+' These arrays cannot be local: MeasureHoleSignaturesForPlates fills them and
+' WritePartDimensionCsv reads them.
+' ============================================================
+Private HsThru() As Long         ' distinct through-thickness hole axes
+Private HsCbore() As Long        ' coaxial groups with a shallow wider seat
+Private HsCross() As Long        ' deep holes running across the thickness (water)
+Private HsMaxBore() As Double    ' largest cylinder diameter on the part
+Private HsSig() As String        ' "1.2400x4|0.5000x8" diameter-bucket signature
+Private HsPockets() As Long      ' inset pocket floors above the area gate
+Private HsPocketArea() As Double ' total pocket floor area, in^2
+Private HsPocketDepth() As Double ' deepest pocket, inches
+' Same pockets, split by WHICH FACE they were cut from. The thickness axis from
+' HoleSigThicknessAxis is always a POSITIVE unit vector, so "Up" means the +axis
+' face and "Dn" the -axis face, consistently across every part in the assembly.
+'
+' This is what finds the A/B pair: the cavity and the core face each other across
+' the parting line, so the A plate carries a big recess on its DOWN face and the B
+' plate a big recess on its UP face. No other adjacent pair in a mold base has
+' large openings facing each other -- that gap is where the moulded part sits.
+Private HsPocketAreaUp() As Double   ' floor area cut from the +thickness face, in^2
+Private HsPocketAreaDn() As Double   ' floor area cut from the -thickness face, in^2
+Private HsPocketDepthUp() As Double  ' deepest pocket opening +thickness, inches
+Private HsPocketDepthDn() As Double  ' deepest pocket opening -thickness, inches
+Private HsFillPct() As Double    ' solid volume / bounding-box volume, 0-100
+Private HsReady As Boolean
+Private HsFacesWalked As Long    ' instrumentation: how much work the pass did
+
+' ============================================================
+' BMS POT/HOLDER FEATURE EVIDENCE -- measured along the ASSEMBLY STACK AXIS
+'
+' WHY A SECOND SET OF POCKET NUMBERS EXISTS.
+'
+' The Hs* arrays above split their pockets along HoleSigThicknessAxis, which is
+' the part's own SMALLEST box extent. For a mold plate that is the right axis --
+' a 1.375 x 15.875 x 18.375 TCP is thin in exactly the direction the stack runs.
+' For a pot block it is the WRONG axis, and wrong in the way this shop already
+' documents: bms_steel_dim_rules.md warns "holder/pot Thickness is often the
+' LARGEST size". A 5.500 x 5.500 x 6.875 ID Pot is smallest across 5.500 -- two
+' axes tied, neither of them the stack -- so HsPocketAreaUp/Dn for a pot describe
+' openings in its SIDE, not the molding face. Reading those as "which way does
+' this block open" is how a pot/holder pair gets assigned upside down.
+'
+' These arrays re-measure the same faces against ONE axis handed in from the
+' assembly (the axis TCP and BCP separate along), so every part in the job is
+' measured in the same frame and the numbers are comparable between parts. That
+' comparability is the whole point: the parting line is found by two blocks whose
+' openings FACE EACH OTHER, which is only a meaningful test when both were
+' measured against a shared axis.
+'
+' Filled by MeasureBmsPotFeaturesAlongStackAxis, read by
+' RefineBmsRolesFromFeatureEvidence. Both no-op unless the geometry pass actually
+' found pot blocks, so a standard base never pays for this.
+' ============================================================
+Private BpOpenPlus() As Double    ' opening area facing +stackAxis, in^2
+Private BpOpenMinus() As Double   ' opening area facing -stackAxis, in^2
+Private BpDeepPlus() As Double    ' deepest opening toward +stackAxis, inches
+Private BpDeepMinus() As Double   ' deepest opening toward -stackAxis, inches
+Private BpBoreDia() As Double     ' largest bore coaxial with the stack axis (the pot bore)
+Private BpBoreThru() As Boolean   ' that bore runs the full stack depth of the part
+Private BpWaterLines() As Long    ' deep holes running ACROSS the stack axis (cooling)
+Private BpStackExtent() As Double ' the part's own size along the stack axis
+Private BpMeasured() As Boolean   ' this part was actually walked
+Private BpStackAxis As Integer    ' 1=X 2=Y 3=Z, the axis all of the above use
+Private BpReady As Boolean
+' Own face counter. This pass runs BEFORE MeasureHoleSignaturesForPlates, whose
+' HoleSigReset zeroes HsFacesWalked -- borrowing that counter would report this
+' pass's work and then throw it away.
+Private BpFacesWalked As Long
+
+' ── per-plate STL isolation session ──────────────────────────────────────────
+' Hide the assembly ONCE, then show/hide a single component per plate.
+'
+' ExportOnePlateStl used to isolate from scratch every time: walk all components,
+' Select4 each one it wanted hidden, HideComponent2, export, then walk and select
+' them all again to restore. On a 405-component assembly that is ~800 COM calls
+' PER PLATE, and C18599 spent 84-105s on each of 13 plates -- 1301s of a 1871s
+' run, 70% of the job, doing the same hide over and over.
+'
+' Held open across the whole plate loop instead: one hide pass up front, then two
+' COM calls per plate. Same isolation, same corrected orientation, ~25x less work.
+Private gPlateIsoActive As Boolean
+Private gPlateIsoHidden As Collection   ' component names this session hid
+Private gPlateIsoComps As Object        ' Dictionary: lcase Name2 -> Component2
+
+' ── plates whose solid did not survive the CAD import ────────────────────────
+' Held so a role that lost EVERY copy can be recovered from its bounding box
+' rather than vanishing from the quote. See RecoverRolesWithNoSurvivingPlate.
+Private gDeadIdx() As Long
+Private gDeadRole() As String
+Private gDeadCount As Long
+
 Private gAiRoleByPart() As String       ' AI role key per CAD part index ("a_plate", ...)
 Private gAiConfByPart() As String       ' "HIGH" / "MEDIUM" / "LOW"
 Private gAiRoleCount As Long            ' rows parsed from the bridge
@@ -526,17 +904,17 @@ Private gAiSequencedLatchLock As Boolean ' True when the AI flagged a latch-lock
 
 ' Handoff file written by CMS_Launcher.vbs and read at startup
 Private Type HandoffInfo
-    CNum     As String
+    cnum     As String
     QuoteNum As String
-    CustJob  As String
+    custJob  As String
     SimilarTo As String
     ShipDate As String
-    RootPath As String
-    JobFolder As String
+    rootPath As String
+    jobFolder As String
     CustomerPrefix As String
     CustomerName As String
     AttachDir As String
-    CadPath As String
+    cadPath As String
 End Type
 
 Private Const HANDOFF_FILE As String = "C:\CMS_Local_Workspace\cms_handoff.txt"
@@ -548,7 +926,7 @@ Private Const MACRO_DONE_FILE As String = "C:\CMS_Local_Workspace\cms_macro_done
 Private Const MACRO_ERROR_FILE As String = "C:\CMS_Local_Workspace\cms_macro_error.txt"
 
 Private Type TrainingXtHandoff
-    JobFolder As String
+    jobFolder As String
     JobId As String
     OutputCsv As String
     DoneFile As String
@@ -748,6 +1126,31 @@ On Error GoTo ErrHandler
         End If
     End If
 
+    ' Quoting one HALF of a mold is a silent way to lose most of the steel order.
+    '
+    ' C18621 shipped as three CAD packages: the whole base, plus "A Side" and
+    ' "B Side" subassemblies under \new files\. The A-side was what happened to be
+    ' open, so the run scanned 16 components holding 2 full plates and quoted 2
+    ' plates. The hand quote for the same job is 10 plates. Nothing in the run said
+    ' the CAD was half a mold -- it just looked like a very small mold base.
+    '
+    ' Not fatal and not auto-switched: a side-only quote is sometimes exactly what
+    ' is wanted, and picking a different file unattended is worse than saying so.
+    gActiveCadIsPartialSide = IsPartialSideAssemblyName(modelTitle)
+    If Not gActiveCadIsPartialSide Then
+        gActiveCadIsPartialSide = IsPartialSideAssemblyName(GetFileBaseName(modelPath))
+    End If
+
+    If gActiveCadIsPartialSide Then
+        LogLine "*** WARNING: ACTIVE CAD LOOKS LIKE ONE SIDE OF THE MOLD, NOT THE WHOLE BASE ***"
+        LogLine "    Active CAD: " & modelTitle
+        If modelPath <> "" Then LogLine "    Active path: " & modelPath
+        LogLine "    The name marks this as an A-side / B-side / cavity-half / core-half subassembly."
+        LogLine "    Only the plates present in THIS file can be quoted, so the steel order will be"
+        LogLine "    short by whatever lives on the other half of the mold."
+        LogLine "    If a whole-base file exists for this job, open that instead and re-run."
+    End If
+
     JobBaseName = CleanFileName(GetFileBaseName(modelTitle))
     If JobBaseName = "" Then JobBaseName = CleanFileName(modelTitle)
     If JobBaseName = "" Then JobBaseName = "ActiveCad"
@@ -853,7 +1256,35 @@ On Error GoTo ErrHandler
     Set swAssy = Nothing
     ScanActiveSolidWorksDocument
     SortPartsByVolumeDescending
+
+    ' ------------------------------------------------------------------
+    ' SQUARE THE GEOMETRY BEFORE MEASURING ANYTHING.
+    '
+    ' swComp.GetBox returns an AXIS-ALIGNED box. On a tilted import that is the
+    ' plate's shadow, not the plate. A 1.375 x 15.875 x 18.375 TCP tilted 54 deg
+    ' measures 10.443 x 18.375 x 13.651, because
+    '     15.875*cos54 + 1.375*sin54 = 10.44
+    '     15.875*sin54 + 1.375*cos54 = 13.65
+    ' Those inflated numbers then flow into the steel sheet, the quote, the
+    ' pullcore volumes and the per-plate STL stock -- every downstream figure.
+    '
+    ' Straightening first makes every later measurement real. Geometry moves, so
+    ' re-scan immediately.
+    ' ------------------------------------------------------------------
+    If StraightenAssemblyFromPlateTransform(swModel) Then
+        LogStart "Re-scan CAD after straightening"
+        ScanActiveSolidWorksDocument
+        SortPartsByVolumeDescending
+        LogLine "CAD PartCount=" & PartCount & " (after straightening)"
+        LogDone "Re-scan CAD after straightening"
+    End If
+
     ClassifyPotBlockPlatesFromCad
+
+    ' Hole evidence BEFORE the CSV is written, so the AI bridge and the macro's
+    ' own geometry pass both see it. Reads B-rep faces only -- no STL.
+    MeasureHoleSignaturesForPlates
+
     LogLine "CAD PartCount=" & PartCount
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
     WriteAllCadComponentsDebugCsv CurrentJobFolder & "\CAD_All_Components_Debug_PRE_ORIENT.csv"
@@ -897,6 +1328,21 @@ On Error GoTo ErrHandler
     End If
     LogLine "BomCount=" & BomCount
     LogDone "Find + read BOM (active CAD path)"
+
+    If PDF_KNOWLEDGE_ENABLED Then
+        LogStart "Read all PDF drawing/BOM text knowledge"
+
+        ' Always scan the local job folder first. Attach/network folders may be
+        ' different, empty, or already moved by the launcher.
+        If CurrentJobFolder <> "" Then CollectAllPdfTextKnowledge CurrentJobFolder
+        If NetworkJobFolder <> "" Then CollectAllPdfTextKnowledge NetworkJobFolder
+        If gHandoffAttachDir <> "" Then CollectAllPdfTextKnowledge gHandoffAttachDir
+
+        If WRITE_PDF_KNOWLEDGE_EVIDENCE Then
+            WritePdfKnowledgeEvidenceCsv CurrentJobFolder & "\PDF_Knowledge_Evidence.csv"
+        End If
+        LogDone "Read all PDF drawing/BOM text knowledge"
+    End If
 
     BuildExportRowsFromBom
     WriteExportCheckCsv CurrentJobFolder & "\XT_Export_BOM_Match_Report.csv"
@@ -1010,7 +1456,7 @@ On Error GoTo ErrHandler
     LogStart "Assign CMS view-frame dims after DXF"
     ApplyCmsTopView swModel
     StabilizeActiveView swModel, 50
-    CaptureCmsViewFrameFromModel swModel
+    CaptureCmsViewFrameWithRetry swModel
     ApplyCmsViewDimsToAllParts
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
 
@@ -1036,10 +1482,20 @@ On Error GoTo ErrHandler
         LogDone "Fill J000 steel sheet from active CAD"
     End If
 
+    WritePricingReadyMarkerV8
+
+    WritePricingReadyMarkerV8B
+
     AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
 
-    LogLine "DONE ACTIVE CAD QUOTE. Output folder: "
-    WriteMacroLaunchStatus "DONE", "RunActiveAssembly completed" & CurrentJobFolder
+    ' The folder was missing from this line -- it logged "Output folder: " and then
+    ' nothing. That blank is not cosmetic: the webapp parses this line to find the
+    ' folder to sync, and an empty value is what took C17267 down (a blank path
+    ' resolves to "." and the import derives an empty job id, see jobs.py
+    ' _job_dir). Log the folder, and say so plainly when there is not one.
+    LogLine "DONE ACTIVE CAD QUOTE. Output folder: " & _
+            IIf(CurrentJobFolder = "", "(NONE - job folder was never set)", CurrentJobFolder)
+    WriteMacroLaunchStatus "DONE", "RunActiveAssembly completed " & CurrentJobFolder
     LogLine "TOTAL ACTIVE RUN TIME: " & DateDiff("s", JobStartTime, Now) & "s   (log: " & RunLogPath & ")"
     If Not SUPPRESS_USER_PROMPTS Then
         MsgBox "Active CAD quote finished." & vbCrLf & _
@@ -1091,14 +1547,14 @@ Sub RunTrainingXtExport()
 On Error GoTo ErrHandler
     Dim h As TrainingXtHandoff
     h = ReadTrainingXtHandoff()
-    If h.JobFolder = "" Then
+    If h.jobFolder = "" Then
         WriteTrainingXtDone h.DoneFile, "ERROR", "", "Training handoff missing JobFolder"
         Exit Sub
     End If
 
     Set swApp = Application.SldWorks
     MacroStartTime = Now
-    CurrentJobFolder = h.JobFolder
+    CurrentJobFolder = h.jobFolder
     CurrentJobNumber = h.JobId
     If CurrentJobNumber = "" Then CurrentJobNumber = GetFolderLeafName(CurrentJobFolder)
     If CurrentJobNumber = "" Then CurrentJobNumber = "TRAINING"
@@ -1164,6 +1620,12 @@ On Error GoTo ErrHandler
     ScanActiveSolidWorksDocument
     SortPartsByVolumeDescending
     ClassifyPotBlockPlatesFromCad
+
+    ' Training scans feed the dataset audit, so they want the same hole columns
+    ' the live quote path produces -- otherwise CORRECT_ME.csv corrections are
+    ' scored against a narrower feature set than production uses.
+    MeasureHoleSignaturesForPlates
+
     LogLine "CAD PartCount=" & PartCount
 
     Dim outCsv As String
@@ -1205,7 +1667,7 @@ On Error GoTo eh
             k = Trim(Left(line, p - 1))
             v = Trim(Mid(line, p + 1))
             Select Case UCase(k)
-                Case "JOBFOLDER": ReadTrainingXtHandoff.JobFolder = v
+                Case "JOBFOLDER": ReadTrainingXtHandoff.jobFolder = v
                 Case "JOBID": ReadTrainingXtHandoff.JobId = v
                 Case "OUTPUTCSV": ReadTrainingXtHandoff.OutputCsv = v
                 Case "DONEFILE": ReadTrainingXtHandoff.DoneFile = v
@@ -1290,8 +1752,8 @@ On Error GoTo ErrHandler
 
     firstHandoff = batch(1)
 
-    If firstHandoff.RootPath <> "" Then
-        gRootJobPath = firstHandoff.RootPath
+    If firstHandoff.rootPath <> "" Then
+        gRootJobPath = firstHandoff.rootPath
     Else
         gRootJobPath = CurrentMonthJobFolder()
     End If
@@ -1305,10 +1767,10 @@ On Error GoTo ErrHandler
     Dim bi As Long
     For bi = 1 To batchCount
         LogLine "Batch handoff " & bi & "/" & batchCount & _
-                ": CNum=" & batch(bi).CNum & _
+                ": CNum=" & batch(bi).cnum & _
                 " QuoteNum=" & batch(bi).QuoteNum & _
-                " CustJob=" & batch(bi).CustJob & _
-                " JobFolder=" & batch(bi).JobFolder
+                " CustJob=" & batch(bi).custJob & _
+                " JobFolder=" & batch(bi).jobFolder
     Next bi
 
     WriteMacroLaunchStatus "STARTED", "RunFromLauncher batch count=" & batchCount
@@ -1318,17 +1780,17 @@ On Error GoTo ErrHandler
         Dim handoff As HandoffInfo
         handoff = batch(1)
 
-        LogLine "Job from launcher: " & UCase$(Trim$(handoff.CNum))
+        LogLine "Job from launcher: " & UCase$(Trim$(handoff.cnum))
         If handoff.QuoteNum <> "" Then LogLine "Assigned quote #:  " & handoff.QuoteNum
-        If handoff.CustJob <> "" Then LogLine "Customer job #:    " & handoff.CustJob
+        If handoff.custJob <> "" Then LogLine "Customer job #:    " & handoff.custJob
         If handoff.SimilarTo <> "" Then LogLine "Similar to:        " & handoff.SimilarTo
         If handoff.ShipDate <> "" Then LogLine "Ship date:         " & handoff.ShipDate
-        If handoff.CadPath <> "" Then LogLine "CadPath from handoff: " & handoff.CadPath
+        If handoff.cadPath <> "" Then LogLine "CadPath from handoff: " & handoff.cadPath
 
-        If handoff.CadPath <> "" And IsGeneratedBaseCadPath(handoff.CadPath) Then
+        If handoff.cadPath <> "" And IsGeneratedBaseCadPath(handoff.cadPath) Then
             LogLine "WARNING: handoff CadPath is a generated \base\ assembly — ignoring it and searching for original XT/STEP."
-            LogLine "  Bad CadPath: " & handoff.CadPath
-            handoff.CadPath = ""
+            LogLine "  Bad CadPath: " & handoff.cadPath
+            handoff.cadPath = ""
         End If
 
         If ActiveCadIsOpen() Then
@@ -1349,11 +1811,11 @@ On Error GoTo ErrHandler
             End If
         End If
 
-        If handoff.CadPath <> "" Then
-            If fsoTrain.FileExists(handoff.CadPath) Then
-                LogLine "Opening CadPath from handoff before ProcessOneJob: " & handoff.CadPath
+        If handoff.cadPath <> "" Then
+            If fsoTrain.FileExists(handoff.cadPath) Then
+                LogLine "Opening CadPath from handoff before ProcessOneJob: " & handoff.cadPath
 
-                Set swModel = OpenCadFile(handoff.CadPath)
+                Set swModel = OpenCadFile(handoff.cadPath)
 
                 If Not swModel Is Nothing Then
                     MainCadOpenedByMacro = True
@@ -1391,7 +1853,7 @@ On Error GoTo ErrHandler
 
     For bi = 1 To batchCount
 
-        jobText = UCase$(Trim$(batch(bi).CNum))
+        jobText = UCase$(Trim$(batch(bi).cnum))
 
         If jobText <> "" Then
 
@@ -1401,8 +1863,8 @@ On Error GoTo ErrHandler
             LogLine "BATCH QUOTE " & bi & "/" & batchCount & ": " & jobText
             LogLine "========================================"
 
-            If batch(bi).RootPath <> "" Then
-                gRootJobPath = batch(bi).RootPath
+            If batch(bi).rootPath <> "" Then
+                gRootJobPath = batch(bi).rootPath
             ElseIf gRootJobPath = "" Then
                 gRootJobPath = CurrentMonthJobFolder()
             End If
@@ -1468,25 +1930,25 @@ End Sub
 Private Sub RunActiveAssemblyWithHandoff(ByRef h As HandoffInfo)
 On Error GoTo ErrHandler
     AssignedQuoteNumber = h.QuoteNum
-    CustomerJobNumber = h.CustJob
+    CustomerJobNumber = h.custJob
     CustomerPrefix = h.CustomerPrefix
     CustomerDisplayName = h.CustomerName
     SimilarToJob = h.SimilarTo
     ShipDateText = h.ShipDate
-    gExactJobFolderName = h.JobFolder
+    gExactJobFolderName = h.jobFolder
     gHandoffAttachDir = h.AttachDir
     gProcessingHandoff = True
 
-    If h.CNum <> "" Then
-        CurrentJobNumber = UCase(Trim(h.CNum))
+    If h.cnum <> "" Then
+        CurrentJobNumber = UCase(Trim(h.cnum))
     End If
 
     ' Prefer the staged job folder / attach dir as output root when available.
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
-    If h.RootPath <> "" And h.JobFolder <> "" Then
+    If h.rootPath <> "" And h.jobFolder <> "" Then
         Dim cand As String
-        cand = h.RootPath & "\" & h.JobFolder
+        cand = h.rootPath & "\" & h.jobFolder
         If fso.FolderExists(cand) Then
             NetworkJobFolder = cand
         End If
@@ -1521,17 +1983,17 @@ On Error GoTo eh
             k = Trim(Left(line, p - 1))
             v = Trim(Mid(line, p + 1))
             Select Case UCase(k)
-                Case "CNUM":      ReadHandoffFile.CNum     = v
+                Case "CNUM":      ReadHandoffFile.cnum = v
                 Case "QUOTENUM":  ReadHandoffFile.QuoteNum = v
-                Case "CUSTJOB":   ReadHandoffFile.CustJob  = v
+                Case "CUSTJOB":   ReadHandoffFile.custJob = v
                 Case "SIMILARTO": ReadHandoffFile.SimilarTo = v
-                Case "SHIPDATE":  ReadHandoffFile.ShipDate  = v
-                Case "ROOTPATH":  ReadHandoffFile.RootPath  = v
-                Case "JOBFOLDER": ReadHandoffFile.JobFolder = v
+                Case "SHIPDATE":  ReadHandoffFile.ShipDate = v
+                Case "ROOTPATH":  ReadHandoffFile.rootPath = v
+                Case "JOBFOLDER": ReadHandoffFile.jobFolder = v
                 Case "CUSTOMERPREFIX": ReadHandoffFile.CustomerPrefix = v
                 Case "CUSTOMERNAME": ReadHandoffFile.CustomerName = v
                 Case "ATTACHDIR": ReadHandoffFile.AttachDir = v
-                Case "CADPATH": ReadHandoffFile.CadPath = v
+                Case "CADPATH": ReadHandoffFile.cadPath = v
             End Select
         End If
     Loop
@@ -1574,17 +2036,17 @@ Private Sub ApplyHandoffField(ByRef h As HandoffInfo, ByVal keyName As String, B
     valueText = Trim$(valueText)
 
     Select Case keyName
-        Case "CNUM": h.CNum = valueText
+        Case "CNUM": h.cnum = valueText
         Case "QUOTENUM": h.QuoteNum = valueText
-        Case "CUSTJOB": h.CustJob = valueText
+        Case "CUSTJOB": h.custJob = valueText
         Case "SIMILARTO": h.SimilarTo = valueText
         Case "SHIPDATE": h.ShipDate = valueText
-        Case "ROOTPATH": h.RootPath = valueText
-        Case "JOBFOLDER": h.JobFolder = valueText
+        Case "ROOTPATH": h.rootPath = valueText
+        Case "JOBFOLDER": h.jobFolder = valueText
         Case "CUSTOMERPREFIX": h.CustomerPrefix = valueText
         Case "CUSTOMERNAME": h.CustomerName = valueText
         Case "ATTACHDIR": h.AttachDir = valueText
-        Case "CADPATH": h.CadPath = valueText
+        Case "CADPATH": h.cadPath = valueText
     End Select
 End Sub
 
@@ -1608,13 +2070,13 @@ Private Function HandoffFromDictIndexed(ByVal dict As Object, ByVal idx As Long,
     Dim v As String
 
     v = BatchField(dict, idx, "CNUM")
-    If v <> "" Then HandoffFromDictIndexed.CNum = v
+    If v <> "" Then HandoffFromDictIndexed.cnum = v
 
     v = BatchField(dict, idx, "QUOTENUM")
     If v <> "" Then HandoffFromDictIndexed.QuoteNum = v
 
     v = BatchField(dict, idx, "CUSTJOB")
-    If v <> "" Then HandoffFromDictIndexed.CustJob = v
+    If v <> "" Then HandoffFromDictIndexed.custJob = v
 
     v = BatchField(dict, idx, "SIMILARTO")
     If v <> "" Then HandoffFromDictIndexed.SimilarTo = v
@@ -1623,10 +2085,10 @@ Private Function HandoffFromDictIndexed(ByVal dict As Object, ByVal idx As Long,
     If v <> "" Then HandoffFromDictIndexed.ShipDate = v
 
     v = BatchField(dict, idx, "ROOTPATH")
-    If v <> "" Then HandoffFromDictIndexed.RootPath = v
+    If v <> "" Then HandoffFromDictIndexed.rootPath = v
 
     v = BatchField(dict, idx, "JOBFOLDER")
-    If v <> "" Then HandoffFromDictIndexed.JobFolder = v
+    If v <> "" Then HandoffFromDictIndexed.jobFolder = v
 
     v = BatchField(dict, idx, "CUSTOMERPREFIX")
     If v <> "" Then HandoffFromDictIndexed.CustomerPrefix = v
@@ -1638,11 +2100,11 @@ Private Function HandoffFromDictIndexed(ByVal dict As Object, ByVal idx As Long,
     If v <> "" Then HandoffFromDictIndexed.AttachDir = v
 
     v = BatchField(dict, idx, "CADPATH")
-    If v <> "" Then HandoffFromDictIndexed.CadPath = v
+    If v <> "" Then HandoffFromDictIndexed.cadPath = v
 End Function
 
 Private Sub AddHandoffToArray(ByRef arr() As HandoffInfo, ByRef n As Long, ByRef h As HandoffInfo)
-    If Trim$(h.CNum) = "" Then Exit Sub
+    If Trim$(h.cnum) = "" Then Exit Sub
 
     n = n + 1
 
@@ -1701,9 +2163,9 @@ On Error GoTo ErrHandler
     defaults = HandoffFromDictUnprefixed(dict)
 
     Dim batchCount As Long
-    batchCount = CLng(Val(DictGetText(dict, "BATCHCOUNT")))
+    batchCount = CLng(val(DictGetText(dict, "BATCHCOUNT")))
 
-    If batchCount <= 0 Then batchCount = CLng(Val(DictGetText(dict, "JOBCOUNT")))
+    If batchCount <= 0 Then batchCount = CLng(val(DictGetText(dict, "JOBCOUNT")))
 
     Dim n As Long
     n = 0
@@ -1716,8 +2178,8 @@ On Error GoTo ErrHandler
         For i = 1 To batchCount
             h = HandoffFromDictIndexed(dict, i, defaults)
 
-            If Trim$(h.CNum) <> "" Then
-                If Trim$(h.QuoteNum) = "" Then h.QuoteNum = h.CNum
+            If Trim$(h.cnum) <> "" Then
+                If Trim$(h.QuoteNum) = "" Then h.QuoteNum = h.cnum
                 AddHandoffToArray jobs, n, h
             End If
         Next i
@@ -1728,7 +2190,7 @@ On Error GoTo ErrHandler
     End If
 
     Dim cList As Collection
-    Set cList = ParseJobInputList(defaults.CNum)
+    Set cList = ParseJobInputList(defaults.cnum)
 
     If cList Is Nothing Or cList.Count = 0 Then
         ReadHandoffBatchFile = 0
@@ -1738,20 +2200,20 @@ On Error GoTo ErrHandler
     If cList.Count = 1 Then
 
         h = defaults
-        h.CNum = CStr(cList(1))
-        If Trim$(h.QuoteNum) = "" Then h.QuoteNum = h.CNum
+        h.cnum = CStr(cList(1))
+        If Trim$(h.QuoteNum) = "" Then h.QuoteNum = h.cnum
         AddHandoffToArray jobs, n, h
 
     Else
 
         For i = 1 To cList.Count
             h = defaults
-            h.CNum = CStr(cList(i))
-            h.QuoteNum = h.CNum
+            h.cnum = CStr(cList(i))
+            h.QuoteNum = h.cnum
 
-            h.CustJob = ""
-            h.JobFolder = ""
-            h.CadPath = ""
+            h.custJob = ""
+            h.jobFolder = ""
+            h.cadPath = ""
             h.AttachDir = ""
 
             AddHandoffToArray jobs, n, h
@@ -1784,18 +2246,18 @@ End Function
 ' Wrapper that injects launcher info into the job globals before processing
 Private Function ProcessOneJobWithHandoff(ByVal jobText As String, ByRef h As HandoffInfo) As Boolean
     AssignedQuoteNumber = h.QuoteNum
-    CustomerJobNumber   = h.CustJob
-    CustomerPrefix      = h.CustomerPrefix
+    CustomerJobNumber = h.custJob
+    CustomerPrefix = h.CustomerPrefix
     CustomerDisplayName = h.CustomerName
-    SimilarToJob        = h.SimilarTo
-    ShipDateText        = h.ShipDate
-    gExactJobFolderName = h.JobFolder
+    SimilarToJob = h.SimilarTo
+    ShipDateText = h.ShipDate
+    gExactJobFolderName = h.jobFolder
     gHandoffAttachDir = h.AttachDir
-    gHandoffCadPath = h.CadPath
+    gHandoffCadPath = h.cadPath
     If IsGeneratedBaseCadPath(gHandoffCadPath) Then
         LogLine "ProcessOneJobWithHandoff: clearing generated \base\ CadPath: " & gHandoffCadPath
         gHandoffCadPath = ""
-        h.CadPath = ""
+        h.cadPath = ""
     End If
     gProcessingHandoff = True
     ProcessOneJobWithHandoff = ProcessOneJob(jobText)
@@ -1886,6 +2348,12 @@ On Error GoTo ErrHandler
     LogStart "Prepare local job workspace"
     Dim stagedLocal As String
     stagedLocal = LOCAL_WORKSPACE_ROOT & "\" & CleanFileName(CurrentJobNumber)
+
+    ' Wipe anything a previous run left behind, BEFORE staging fresh source.
+    ' Otherwise stale outputs survive: an old plate STL the web app still reads,
+    ' a DXF from a previous orientation, a quote workbook with last week's sizes.
+    ' Source files are left alone -- only what this macro generates is removed.
+    CleanPriorRunOutputs stagedLocal
     If gHandoffCadPath <> "" Then
         If IsGeneratedBaseCadPath(gHandoffCadPath) Then
             LogLine "WARNING: clearing generated \\base\\ CadPath before staging: " & gHandoffCadPath
@@ -2034,7 +2502,35 @@ On Error GoTo ErrHandler
     Set swAssy = Nothing
     ScanActiveSolidWorksDocument
     SortPartsByVolumeDescending
+
+    ' ------------------------------------------------------------------
+    ' SQUARE THE GEOMETRY BEFORE MEASURING ANYTHING.
+    '
+    ' swComp.GetBox returns an AXIS-ALIGNED box. On a tilted import that is the
+    ' plate's shadow, not the plate. A 1.375 x 15.875 x 18.375 TCP tilted 54 deg
+    ' measures 10.443 x 18.375 x 13.651, because
+    '     15.875*cos54 + 1.375*sin54 = 10.44
+    '     15.875*sin54 + 1.375*cos54 = 13.65
+    ' Those inflated numbers then flow into the steel sheet, the quote, the
+    ' pullcore volumes and the per-plate STL stock -- every downstream figure.
+    '
+    ' Straightening first makes every later measurement real. Geometry moves, so
+    ' re-scan immediately.
+    ' ------------------------------------------------------------------
+    If StraightenAssemblyFromPlateTransform(swModel) Then
+        LogStart "Re-scan CAD after straightening"
+        ScanActiveSolidWorksDocument
+        SortPartsByVolumeDescending
+        LogLine "CAD PartCount=" & PartCount & " (after straightening)"
+        LogDone "Re-scan CAD after straightening"
+    End If
+
     ClassifyPotBlockPlatesFromCad
+
+    ' Hole evidence BEFORE the CSV is written, so the AI bridge and the macro's
+    ' own geometry pass both see it. Reads B-rep faces only -- no STL.
+    MeasureHoleSignaturesForPlates
+
     LogLine "CAD PartCount=" & PartCount
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
     WriteAllCadComponentsDebugCsv CurrentJobFolder & "\CAD_All_Components_Debug_PRE_ORIENT.csv"
@@ -2060,6 +2556,15 @@ On Error GoTo ErrHandler
     End If
     LogLine "BomCount=" & BomCount
     LogDone "Find + read BOM"
+
+    If PDF_KNOWLEDGE_ENABLED Then
+        LogStart "Read all PDF drawing/BOM text knowledge"
+        CollectAllPdfTextKnowledge CurrentJobFolder
+        If WRITE_PDF_KNOWLEDGE_EVIDENCE Then
+            WritePdfKnowledgeEvidenceCsv CurrentJobFolder & "\PDF_Knowledge_Evidence.csv"
+        End If
+        LogDone "Read all PDF drawing/BOM text knowledge"
+    End If
 
     ' Re-activate the base (scan may have loaded component part docs) before export.
     Dim reErrs As Long
@@ -2190,7 +2695,7 @@ On Error GoTo ErrHandler
     LogStart "Assign CMS view-frame dims after DXF"
     ApplyCmsTopView swModel
     StabilizeActiveView swModel, 50
-    CaptureCmsViewFrameFromModel swModel
+    CaptureCmsViewFrameWithRetry swModel
     ApplyCmsViewDimsToAllParts
     WritePartDimensionCsv CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv"
 
@@ -2230,6 +2735,10 @@ On Error GoTo ErrHandler
     CloseAllDocumentsSafely
     MoveLooseSolidWorksPartsToBaseFolder
     SyncCompletedJobToNetworkFolder
+
+    WritePricingReadyMarkerV8
+
+    WritePricingReadyMarkerV8B
 
     AiBridgeNotifyJobComplete IIf(isStd, "standard", "bms")
 
@@ -2421,7 +2930,7 @@ On Error GoTo ErrHandler
           " /MIR /XD " & Chr(34) & excludeExtract & Chr(34) & _
           " /R:1 /W:1 /MT:16 /NFL /NDL /NJH /NJS /NP"
     Dim rc As Long
-    rc = sh.Run(cmd, 0, True)
+    rc = sh.run(cmd, 0, True)
     LogLine "robocopy exit code: " & rc
     If rc < 8 Then CopyFolderWithRobocopy = True
     Exit Function
@@ -2518,7 +3027,7 @@ On Error GoTo ErrHandler
     cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command " & Chr(34) & _
           "Expand-Archive -LiteralPath " & PowerShellQuote(zipPath) & _
           " -DestinationPath " & PowerShellQuote(destFolder) & " -Force" & Chr(34)
-    ExtractZipUsingPowerShell = (sh.Run(cmd, 0, True) = 0)
+    ExtractZipUsingPowerShell = (sh.run(cmd, 0, True) = 0)
     Exit Function
 ErrHandler:
     ExtractZipUsingPowerShell = False
@@ -2536,7 +3045,7 @@ On Error GoTo ErrHandler
         ExtractZipUsingShell = False
         Exit Function
     End If
-    d.CopyHere z.Items, 16 + 4
+    d.CopyHere z.items, 16 + 4
     WaitMilliseconds 8000
     ExtractZipUsingShell = True
     Exit Function
@@ -2757,8 +3266,23 @@ On Error Resume Next
     folderName = UCase(folder.Name)
 
     ' Never use generated output folders as source CAD.
+    '
+    ' The old rule `InStr(folderName, " BASE") > 0` was too broad: it also
+    ' matched the customer's own "<part no> Mold Base" folder, and because this
+    ' Sub returns before recursing, the ENTIRE subtree was skipped. That is why
+    ' C18503 died with "No CAD file found" while
+    '   ...\C18503\2223588-14661 Mold Base\2223588-14661 Mold Base .stp file\2223588_moldbase_asm.stp
+    ' sat right there -- the only job in the workspace with a complete set of
+    ' per-part named PDFs and a fully named BOM, and it produced nothing.
+    '
+    ' Our own generated folder is always exactly "base" (ExportBasePackage
+    ' writes CurrentJobFolder & "\base"), so an exact match covers it. Keep a
+    ' suffix guard for "<job> Base" style output folders, but never let it
+    ' swallow a folder the customer called a Mold Base.
     If folderName = "BASE" Then Exit Sub
-    If InStr(folderName, " BASE") > 0 Then Exit Sub
+    If InStr(folderName, "MOLD BASE") = 0 And InStr(folderName, "MOLDBASE") = 0 Then
+        If Right$(folderName, 5) = " BASE" Then Exit Sub
+    End If
     If InStr(folderName, " PRINT") > 0 Then Exit Sub
     If folderName = UCase(EXTRACT_FOLDER_NAME) Then Exit Sub
 
@@ -3368,6 +3892,17 @@ ErrHandler:
     LogLine "SetStandardBaseOrientation error: " & Err.Description
 End Sub
 
+' Which roles count as "the mold stack" when finding the top/bottom plate.
+'
+' Only full-footprint plates belong here. Rails, ejector plates and pins are
+' deliberately out: they do not span the base, so their centers would drag the
+' stack extreme to the wrong end.
+'
+' NOTE ON QUOTES: NormalizeKey strips space/-/_/. but NOT the double quote, so
+' the canonical names "X" Plate and "Y" Plate normalize to ""X"PLATE", not
+' "XPLATE". Both spellings are listed. Without them an X-series (5X/6X)
+' stripper base had its two largest plates excluded from the stack search
+' entirely and got oriented off whatever else happened to be whitelisted.
 Private Function IsStandardStructuralRoleKey(ByVal roleKey As String) As Boolean
     Select Case NormalizeKey(roleKey)
         Case "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
@@ -3375,6 +3910,19 @@ Private Function IsStandardStructuralRoleKey(ByVal roleKey As String) As Boolean
              "SUPPORTPLATE", "STRIPPERPLATE", "MANIFOLDPLATE", _
              "SCRETAINERPLATE", "SCBACKUPPLATE", _
              "DIEPLATE", "DIEBACKUPPLATE"
+            IsStandardStructuralRoleKey = True
+
+        ' --- T series (three-plate): two parting lines, two extra full plates ---
+        Case "RUNNERSTRIPPERPLATE", "X1PLATE", "X2PLATE"
+            IsStandardStructuralRoleKey = True
+
+        ' --- X series (5X / 6X stripper): AX and BX span the base ---
+        Case "XPLATE", """X""PLATE", "YPLATE", """Y""PLATE", _
+             "AXPLATE", "BXPLATE"
+            IsStandardStructuralRoleKey = True
+
+        ' --- hot runner: the backing plate is a full plate above the manifold ---
+        Case "BACKINGPLATE"
             IsStandardStructuralRoleKey = True
     End Select
 End Function
@@ -3581,9 +4129,54 @@ On Error GoTo ErrHandler
 
             If railIdx > 0 Then
                 StdQty(i) = railCount
-                StdT(i) = parts(railIdx).Thickness
-                StdW(i) = parts(railIdx).Width
-                StdL(i) = parts(railIdx).Length
+
+                ' RAILS MUST BE RE-POINTED ONTO THE STACK AXIS HERE TOO.
+                '
+                ' parts().Thickness is the blind-sorted smallest dimension, and for
+                ' a rail that is wrong: a rail stands up in the stack, so its
+                ' thickness is its stack height, not its smallest side.
+                ' AddStdRailsRowFromCad already knows this and calls
+                ' StackAxisDimsForPart. This Sub did not, so it overwrote the
+                ' corrected values with the raw ones and quietly undid the fix.
+                '
+                ' C18640 is the case: Standard_Quote_Rows_Debug_BEFORE_STL.csv has
+                ' Rails T/W/L 3.000/1.438/11.875 and the live log records
+                ' "RAILS dims from stack axis: 1.438/3.000/11.875 ->
+                ' 3.000/1.438/11.875 ... Grind face 1.438 x 11.875". Then this Sub
+                ' ran and the FINAL csv -- and the Steel Sheet built from it --
+                ' came out 1.438/3.000/11.875 again.
+                '
+                ' The stack proves 3.000 is right: the Support Plate's bottom face
+                ' sits at Z -3.2525 and the Bottom Clamp Plate's top face at
+                ' -6.2525, a 3.000 gap, and the rails' own centre (-4.752) is
+                ' exactly midway. The BOM agrees in its own column order --
+                ' "Ejector rail, 3.000 x 1-7/16 x 11-7/8", thickness first, like
+                ' every other plate row on that sheet.
+                '
+                ' This matters twice over: thickness is the dimension that gets the
+                ' +0.25" stock allowance, so the wrong one changes the steel
+                ' ordered, and it names the wrong pair of faces as the grind faces.
+                Dim rT As Double, rW As Double, rL As Double
+                rT = parts(railIdx).Thickness
+                rW = parts(railIdx).Width
+                rL = parts(railIdx).Length
+
+                Dim raT As Double, raW As Double, raL As Double
+                If StackAxisDimsForPart(railIdx, raT, raW, raL) Then
+                    If Abs(raT - rT) > 0.005 Then
+                        LogLine "  RAILS refresh kept stack-axis dims: T/W/L " & _
+                                Format(rT, "0.000") & "/" & Format(rW, "0.000") & "/" & Format(rL, "0.000") & _
+                                " -> " & Format(raT, "0.000") & "/" & Format(raW, "0.000") & "/" & Format(raL, "0.000") & _
+                                ". Grind face " & Format(raW, "0.000") & " x " & Format(raL, "0.000") & "."
+                    End If
+                    rT = raT
+                    rW = raW
+                    rL = raL
+                End If
+
+                StdT(i) = rT
+                StdW(i) = rW
+                StdL(i) = rL
 
                 LogLine "STANDARD dims refreshed after CMS view frame: Rails qty=" & railCount & _
                         " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i)
@@ -3976,7 +4569,7 @@ On Error GoTo nope
 
     Dim i As Long
     Dim px As Double, py As Double, pz As Double
-    Dim vx As Double, vy As Double
+    Dim vX As Double, vY As Double
     Dim minX As Double, maxX As Double, minY As Double, maxY As Double
     Dim got As Boolean
     minX = 1E+30: maxX = -1E+30: minY = 1E+30: maxY = -1E+30
@@ -3984,12 +4577,12 @@ On Error GoTo nope
 
     For i = 1 To nRail
         If Not TryGetCadCenterPointForFrontCheck(railIdx(i), False, px, py, pz) Then GoTo nextRail
-        vx = (px * CDbl(mView(0))) + (py * CDbl(mView(3))) + (pz * CDbl(mView(6)))
-        vy = (px * CDbl(mView(1))) + (py * CDbl(mView(4))) + (pz * CDbl(mView(7)))
-        If vx < minX Then minX = vx
-        If vx > maxX Then maxX = vx
-        If vy < minY Then minY = vy
-        If vy > maxY Then maxY = vy
+        vX = (px * CDbl(mView(0))) + (py * CDbl(mView(3))) + (pz * CDbl(mView(6)))
+        vY = (px * CDbl(mView(1))) + (py * CDbl(mView(4))) + (pz * CDbl(mView(7)))
+        If vX < minX Then minX = vX
+        If vX > maxX Then maxX = vX
+        If vY < minY Then minY = vY
+        If vY > maxY Then maxY = vY
         got = True
 nextRail:
     Next i
@@ -4177,6 +4770,93 @@ On Error Resume Next
     DoEvents
 End Sub
 
+' Force a fine, custom tessellation so the exported mesh is accurate enough for
+' the web app to fit real hole diameters off it.
+'
+' Best-effort and self-restoring, like the unit and binary preferences. Deviation
+' and angle are only honoured when quality is set to Custom, so quality goes
+' first.
+Private Sub ForceFineStlTessellation(ByRef priorQuality As Long, _
+                                     ByRef priorDev As Double, _
+                                     ByRef priorAng As Double, _
+                                     ByRef tessSet As Boolean)
+    tessSet = False
+    If Not FORCE_FINE_STL_TESSELLATION Then Exit Sub
+    If swApp Is Nothing Then Exit Sub
+
+    On Error Resume Next
+
+    Err.Clear
+    priorQuality = swApp.GetUserPreferenceIntegerValue(swSTLQuality)
+    If Err.Number <> 0 Then
+        Err.Clear
+        LogLine "STL: tessellation quality preference unreadable; leaving as-is."
+        Exit Sub
+    End If
+
+    priorDev = swApp.GetUserPreferenceDoubleValue(swSTLDeviation)
+    priorAng = swApp.GetUserPreferenceDoubleValue(swSTLAngleTolerance)
+
+    swApp.SetUserPreferenceIntegerValue swSTLQuality, swSTLQuality_Custom
+    swApp.SetUserPreferenceDoubleValue swSTLDeviation, CMS_STL_DEVIATION_M
+    swApp.SetUserPreferenceDoubleValue swSTLAngleTolerance, CMS_STL_ANGLE_RAD
+
+    If Err.Number = 0 Then
+        tessSet = True
+        LogLine "STL: fine custom tessellation forced " & _
+                "(deviation 0.01 mm, angle 5 deg). Was quality=" & CStr(priorQuality) & _
+                " dev=" & FormatNumberForCsv(priorDev) & _
+                " ang=" & FormatNumberForCsv(priorAng)
+    Else
+        Err.Clear
+        LogLine "STL: tessellation could not be set; continuing at the machine default. " & _
+                "Hole diameters read off this mesh will be less accurate."
+    End If
+End Sub
+
+Private Sub RestoreStlTessellation(ByVal priorQuality As Long, _
+                                   ByVal priorDev As Double, _
+                                   ByVal priorAng As Double, _
+                                   ByVal tessSet As Boolean)
+    If Not tessSet Then Exit Sub
+    On Error Resume Next
+    swApp.SetUserPreferenceIntegerValue swSTLQuality, priorQuality
+    swApp.SetUserPreferenceDoubleValue swSTLDeviation, priorDev
+    swApp.SetUserPreferenceDoubleValue swSTLAngleTolerance, priorAng
+End Sub
+
+' Set the STL export unit to inches, reporting the prior value so the caller can
+' restore it. Best-effort: if the enum is wrong for this SolidWorks version it
+' no-ops and the web app's own mm->in normalisation covers it.
+Private Sub ForceInchStlUnits(ByRef priorUnits As Long, ByRef unitsSet As Boolean)
+    unitsSet = False
+    If Not FORCE_INCH_STL_EXPORT Then Exit Sub
+    If swApp Is Nothing Then Exit Sub
+
+    On Error Resume Next
+    Err.Clear
+    priorUnits = swApp.GetUserPreferenceIntegerValue(swExportStlUnits)
+    If Err.Number <> 0 Then
+        Err.Clear
+        LogLine "STL: export-unit preference unreadable; leaving as-is (web app normalizes)."
+        Exit Sub
+    End If
+
+    If priorUnits = swStlUnitInches Then
+        LogLine "STL: export units already INCHES."
+        Exit Sub
+    End If
+
+    swApp.SetUserPreferenceIntegerValue swExportStlUnits, swStlUnitInches
+    If Err.Number = 0 Then
+        unitsSet = True
+        LogLine "STL: export units forced to INCHES (was " & CStr(priorUnits) & ")."
+    Else
+        Err.Clear
+        LogLine "STL: export units could not be set; continuing (web app normalizes)."
+    End If
+End Sub
+
 Private Sub SaveAssemblyStlSingleFileBinary(ByVal assyModel As Object, ByVal stlPath As String)
 On Error GoTo ErrHandler
 
@@ -4186,8 +4866,16 @@ On Error GoTo ErrHandler
     Dim priorBinary As Long
     Dim binarySet As Boolean
 
+    Dim priorUnits As Long
+    Dim unitsSet As Boolean
+    Dim priorQuality As Long
+    Dim priorDev As Double
+    Dim priorAng As Double
+    Dim tessSet As Boolean
+
     oneFileSet = False
     binarySet = False
+    unitsSet = False
 
     If Not swApp Is Nothing Then
 
@@ -4210,6 +4898,9 @@ On Error GoTo ErrHandler
             End If
         End If
 
+        ForceInchStlUnits priorUnits, unitsSet
+        ForceFineStlTessellation priorQuality, priorDev, priorAng, tessSet
+
         On Error GoTo ErrHandler
 
     End If
@@ -4222,6 +4913,8 @@ CleanExit:
 
     If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
     If binarySet Then swApp.SetUserPreferenceIntegerValue swSTLBinaryFormat, priorBinary
+    If unitsSet Then swApp.SetUserPreferenceIntegerValue swExportStlUnits, priorUnits
+    RestoreStlTessellation priorQuality, priorDev, priorAng, tessSet
 
     Exit Sub
 
@@ -4290,10 +4983,9 @@ On Error Resume Next
         Exit Sub
     End If
 
-    ' JPG capture needs the real visible SolidWorks window.
+    ' JPG capture needs a real visible SolidWorks window.
     swApp.Visible = True
     swApp.UserControl = True
-    swApp.CommandInProgress = False
 
     Dim errs As Long
     errs = 0
@@ -4320,12 +5012,12 @@ On Error Resume Next
 
         If model.GetType = swDocASSEMBLY Then
 
-            LogLine "JPEG prep: showing assembly components only; skipping body-by-body scan for speed."
+            LogLine "JPEG prep: showing assembly components only; SKIPPING body-by-body scan for speed."
             ShowAllAssemblyComponents model
 
             ' IMPORTANT:
             ' Do NOT call ShowAllBodiesInAssemblyComponents here.
-            ' That loops every component/body and is one of the big hangs.
+            ' That loops every component/body and is a major hang source.
 
         ElseIf model.GetType = swDocPART Then
 
@@ -4336,7 +5028,6 @@ On Error Resume Next
 
     End If
 
-    ' Shaded mode is safer for screenshots.
     Err.Clear
     model.ViewDisplayShaded
     Err.Clear
@@ -4345,7 +5036,7 @@ On Error Resume Next
     model.GraphicsRedraw2
     DoEvents
 
-    If FAST_ISO_JPEG_CAPTURE Then
+    If FAST_QUOTE_MODE Then
         WaitMilliseconds 150
     Else
         WaitMilliseconds 500
@@ -4358,6 +5049,7 @@ On Error Resume Next
     LogLine "JPEG prep EXIT"
 
 End Sub
+
 
 Private Sub ShowAllBodiesInAssemblyComponents(ByVal assyModel As Object)
 On Error Resume Next
@@ -4480,6 +5172,8 @@ On Error GoTo ErrHandler
     Dim xtPath As String
     Dim dxfPath As String
     Dim stlPath As String
+    Dim componentsEasmPath As String
+    Dim componentsStlPath As String
 
     If swModel.GetType = swDocASSEMBLY Then
         sldPath = GetUniqueFilePath(outputFolder & "\" & baseName & ".sldasm")
@@ -4494,6 +5188,9 @@ On Error GoTo ErrHandler
     stlPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & ".stl")
     Dim stlBasePath As String
     stlBasePath = GetUniqueFilePath(outputFolder & "\" & baseName & ".stl")
+    ' "<job> component.easm" / ".stl" -- everything that is NOT on the steel sheet.
+    componentsEasmPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & " component.easm")
+    componentsStlPath = GetUniqueFilePath(CurrentJobFolder & "\" & baseName & " component.stl")
 
     ' Native SolidWorks copy first (DXF needs the .sldasm path).
     SaveModelAs swModel, sldPath
@@ -4584,36 +5281,83 @@ On Error GoTo ErrHandler
         End If
 
         PrepareAssemblyVisibilityFast swModel
+        ' === CMS PATCH FINAL RESTORE VISIBILITY AFTER STEEL STL ===
+        If gJobIsStandardBase And swModel.GetType = swDocASSEMBLY Then
+            ShowAllAssemblyComponents swModel
+            LogLine "STANDARD export: restored full assembly visibility after steel STL isolation."
+        End If
 
     Else
 
         LogLine "FAST QUOTE: skipped STL."
 
     End If
+
+    ' Per-plate STLs — one file per quoted plate, in the corrected CMS frame.
+    ' Standard bases name from the standard quote rows; BMS jobs use the six
+    ' classified roles.
+    '
+    ' MUST run here, immediately after the assembly STL and BEFORE the ISO JPG
+    ' and DXF steps. The engraving-DXF pass creates and closes extra drawing
+    ' documents and can take SolidWorks down with it ("The object invoked has
+    ' disconnected from its clients", RPC_E_DISCONNECTED); when that happens
+    ' every later COM call fails instantly. Running the plate STLs while the
+    ' assembly is still healthy is the difference between 6 of 6 and 0 of 6.
+    If EXPORT_PER_PLATE_STLS Then
+        ExportPlateStlsForComparison CurrentJobFolder & "\stl"
+    End If
+
+    ' WHOLE-ASSEMBLY EASM — and it MUST be here, not after the DXF.
+    '
+    ' This used to live below the DXF block, and on a standard base it never ran
+    ' even once. C17267:
+    '
+    '     09:51:18  BASE DXF OK: ...dxf size=1075195 bytes
+    '     09:51:18  ExportBasePackage error: Automation error
+    '               The object invoked has disconnected from its clients.
+    '
+    ' The DXF pass takes SolidWorks down with it, ExportBasePackage jumps to
+    ' ErrHandler, and every step below the DXF is dead code. The per-plate STLs
+    ' were moved up for exactly this reason (see the note above); the EASM was
+    ' left behind. So it moves up too, while the session is still healthy.
+    '
+    ' Everything visible, nothing suppressed, before the save: the plate-STL pass
+    ' immediately above isolates one component at a time, and whatever is hidden
+    ' when SaveAs runs is missing from the eDrawing. This is the file that gets
+    ' sent to a customer, so it has to be the complete assembly.
+    If swModel.GetType = swDocASSEMBLY Then
+        On Error Resume Next
+        UnsuppressAllAssemblyComponents swModel
+        ShowAllAssemblyComponents swModel
+        On Error GoTo ErrHandler
+        SaveModelAs swModel, easmPath
+        LogLine "EASM written (whole assembly, before DXF): " & easmPath
+        LogFileExistsAndSize "EASM", easmPath
+
+        ' COMPONENTS-ONLY EASM + STL, here for the same reason the whole-assembly
+        ' EASM is: the DXF pass below can take the SolidWorks session down with it,
+        ' and anything after that is dead code.
+        If EXPORT_COMPONENTS_ONLY_PACKAGE Then
+            LogStart "Export components-only EASM/STL (steel hidden)"
+            ExportComponentsOnlyPackage swModel, componentsEasmPath, componentsStlPath
+            LogDone "Export components-only EASM/STL (steel hidden)"
+        End If
+    Else
+        LogLine "EASM skipped: active document is not an assembly."
+    End If
+
     If DEBUG_SKIP_ISO_JPEGS Then
 
         LogLine "DEBUG: skipped ISO JPG exports."
 
     ElseIf CREATE_ISO_JPEGS Then
-
-        LogStart "Export ISO JPGs"
-
         If gJobIsStandardBase Then
-            LogLine "ISO JPG: standard full assembly path"
             ExportFrontAndBackIsoJpegsFullAssembly CurrentJobFolder, baseName
-            LogLine "ISO JPGs written to job folder (STANDARD full assembly)"
+            LogLine "ISO JPGs written to job folder (STANDARD full assembly — no Pyropel isolation)"
         Else
-            LogLine "ISO JPG: BMS Pyropel-hidden path"
             ExportFrontAndBackIsoJpegsWithoutPyropel CurrentJobFolder, baseName
             LogLine "ISO JPGs written to job folder (BMS Pyropel hidden)"
         End If
-
-        LogDone "Export ISO JPGs"
-
-    Else
-
-        LogLine "FAST QUOTE: skipped ISO JPGs because CREATE_ISO_JPEGS=False."
-
     End If
 
     If DEBUG_SKIP_DXF_EXPORT Then
@@ -4629,23 +5373,30 @@ On Error GoTo ErrHandler
         End If
         LogLine "DXF written: " & dxfPath
         LogFileExistsAndSize "BASE DXF", dxfPath
+
+        ' === CMS PATCH SEPARATE ENGRAVING TOP DXFS START ===
+        ' Three separate one-view top engraving DXFs:
+        ' ID HOLDER, OD HOLDER, and TCP.
+        If EXPORT_SEPARATE_ENGRAVING_TOP_DXFS Then
+            ExportEngravingTopDxfFiles_IdOdTcp sldPath, baseName
+        End If
+        ' === CMS PATCH SEPARATE ENGRAVING TOP DXFS END ===
     End If
 
+    ' (EASM moved up, to before the DXF — see the note next to the plate STLs.
+    ' Everything from here down runs only when the DXF pass leaves the COM
+    ' session alive, which on a standard base it does not.)
+
     If EXPORT_HEAVY_NEUTRALS And Not FAST_QUOTE_MODE Then
-        If swModel.GetType = swDocASSEMBLY Then
-            SaveModelAs swModel, easmPath
-            LogLine "EASM written: " & easmPath
-        End If
         SaveModelAs swModel, igsPath
         LogLine "IGS written: " & igsPath
     Else
-        LogLine "FAST QUOTE: skipped EASM/IGS (heavy neutrals)"
+        LogLine "FAST QUOTE: skipped IGS (heavy neutral)"
     End If
 
-    ' Per-plate STLs (TCP, BCP, ID/OD Holder, ID/OD Pot) — optional / slow.
-    If EXPORT_PER_PLATE_STLS Then
-        ExportPlateStlsForComparison CurrentJobFolder & "\stl"
-    End If
+    ' (Per-plate STLs moved earlier — see the note next to the assembly STL.
+    ' Running them here meant the engraving-DXF pass had already killed the
+    ' SolidWorks COM session and all 6 exports failed.)
 
     On Error Resume Next
     UnsuppressAllAssemblyComponents swModel
@@ -4859,29 +5610,49 @@ On Error Resume Next
     names.Add componentName
 End Sub
 
-' Export one STL per quoted plate into a dedicated "stl" folder:
-'   TCP, BCP, ID HOLDER, OD HOLDER, ID POT, OD POT.
+' Export one STL per quoted plate into a dedicated "stl" folder.
+'
+' Job-type branched, the same way BuildSteelStlKeepComponentNamesForCurrentJob
+' branches for the merged steel STL:
+'   STANDARD bases -> one file per standard quote row (A Plate, B Plate,
+'                     Top/Bottom Clamp Plate, Support Plate, Rails 1..n,
+'                     Ejector stack, Stripper Plate, SC plates).
+'   BMS/pot jobs    -> the six classified roles (TCP, BCP, ID/OD Holder,
+'                     ID/OD Pot), unchanged from before.
+'
+' Filenames are prefixed with the job base name so the files stay
+' self-describing after PublishJobOutputs flattens <job>\stl into the
+' per-job folder on the matching share.
 Private Sub ExportPlateStlsForComparison(ByVal stlFolder As String)
 On Error GoTo eh
     EnsureFolderDeep stlFolder
-    Dim idx(1 To 6) As Long, lbl(1 To 6) As String, i As Long
-    idx(1) = gIdxTCP: lbl(1) = "TCP"
-    idx(2) = gIdxBCP: lbl(2) = "BCP"
-    idx(3) = gIdxIDH: lbl(3) = "ID HOLDER"
-    idx(4) = gIdxODH: lbl(4) = "OD HOLDER"
-    idx(5) = gIdxIDP: lbl(5) = "ID POT"
-    idx(6) = gIdxODP: lbl(6) = "OD POT"
 
-    Dim made As Long
-    made = 0
-    For i = 1 To 6
-        If idx(i) > 0 And idx(i) <= PartCount Then
-            If ExportOnePlateStl(idx(i), stlFolder & "\" & lbl(i) & ".STL") Then made = made + 1
-        Else
-            LogLine "  plate STL skip: " & lbl(i) & " not classified."
+    ' Start from a clean folder. Without this, a re-run of the same job would
+    ' land on GetUniqueFilePath's "_2"/"_3" suffixes and the web app's 3D tab
+    ' would show the same plate several times over.
+    ClearPlateStlFolder stlFolder
+
+    ' Hide the assembly once for the whole loop rather than per plate. On a big
+    ' assembly this is the single biggest cost in the run -- see gPlateIsoActive.
+    Dim isoOpened As Boolean
+    isoOpened = False
+    If Not swModel Is Nothing Then
+        If swModel.GetType = swDocASSEMBLY Then
+            PrepareAssemblyVisibilityFast swModel
+            isoOpened = BeginPlateStlIsolation(swModel)
         End If
-    Next i
-    LogLine "Plate STLs written: " & made & " of 6 -> " & stlFolder
+    End If
+
+    If gJobIsStandardBase Then
+        ExportStandardPlateStlsForComparison stlFolder
+    Else
+        ExportBmsPlateStlsForComparison stlFolder
+    End If
+
+    If isoOpened Then
+        EndPlateStlIsolation swModel
+        ApplyCmsTopView swModel
+    End If
 
     Dim e As Long
     If Not swModel Is Nothing Then
@@ -4891,36 +5662,854 @@ On Error GoTo eh
     Exit Sub
 eh:
     LogLine "ExportPlateStlsForComparison error: " & Err.Description
+    ' Never leave the assembly hidden. Everything downstream -- ISO JPGs, the
+    ' base DXF, the EASM -- renders whatever is visible, so an isolation session
+    ' left open by an error would silently produce near-empty output files.
+    On Error Resume Next
+    If gPlateIsoActive Then
+        EndPlateStlIsolation swModel
+        ApplyCmsTopView swModel
+    End If
 End Sub
 
-Private Function ExportOnePlateStl(ByVal idx As Long, ByVal stlPath As String) As Boolean
+' BMS / pot-block jobs: the six classified roles.
+Private Sub ExportBmsPlateStlsForComparison(ByVal stlFolder As String)
 On Error GoTo eh
-    ExportOnePlateStl = False
-    Dim fp As String
-    fp = parts(idx).filePath
-    If fp = "" Then
-        LogLine "  plate STL skip (no file path): " & parts(idx).componentName
+    Dim idx(1 To 6) As Long, lbl(1 To 6) As String, i As Long
+    idx(1) = gIdxTCP: lbl(1) = "TCP"
+    idx(2) = gIdxBCP: lbl(2) = "BCP"
+    idx(3) = gIdxIDH: lbl(3) = "ID HOLDER"
+    idx(4) = gIdxODH: lbl(4) = "OD HOLDER"
+    idx(5) = gIdxIDP: lbl(5) = "ID POT"
+    idx(6) = gIdxODP: lbl(6) = "OD POT"
+
+    Dim prefix As String
+    prefix = StlPlateFilePrefix()
+
+    Dim made As Long
+    made = 0
+    For i = 1 To 6
+        If idx(i) > 0 And idx(i) <= PartCount Then
+            If ExportOnePlateStl(idx(i), _
+                    stlFolder & "\" & prefix & CleanFileName(lbl(i)) & ".STL", lbl(i)) Then
+                made = made + 1
+            End If
+        Else
+            LogLine "  plate STL skip: " & lbl(i) & " not classified."
+        End If
+    Next i
+    LogLine "Plate STLs written: " & made & " of 6 -> " & stlFolder
+    Exit Sub
+eh:
+    LogLine "ExportBmsPlateStlsForComparison error: " & Err.Description
+End Sub
+
+' STANDARD bases: one STL per quoted steel row. Reuses the same
+' stdName/StdCadIndex/StdQty arrays the merged steel keep-list uses, so a
+' plate that got priced is exactly a plate that gets a model file.
+Private Sub ExportStandardPlateStlsForComparison(ByVal stlFolder As String)
+On Error GoTo eh
+
+    ' NO QUOTE ROWS IS NOT A REASON TO EXPORT NOTHING.
+    '
+    ' This used to Exit Sub here, and because the leftover-steel sweep is called
+    ' at the BOTTOM of this routine, a job with no standard quote rows got no
+    ' plate STLs at all -- not one. That is the exact case the sweep exists for:
+    ' when the quoting side has not recognised the plates, the geometry is still
+    ' sitting right there in the assembly.
+    '
+    ' Seen on C18600, C18621 and C18622: "Standard plate STLs skipped: no
+    ' standard quote rows", then an empty stl\ folder and an empty 3D tab.
+    '
+    ' So: log it, skip the per-row pass (there are no rows to walk), and go
+    ' straight to sweeping every steel solid in the assembly.
+    Dim prefix As String
+
+    If StdCount < 1 Then
+        LogLine "No standard quote rows, so there is no per-row plate pass -- " & _
+                "sweeping every steel part in the assembly instead."
+        If EXPORT_ALL_STEEL_PART_STLS And PartCount >= 1 Then
+            Dim noneDone() As Boolean
+            ReDim noneDone(1 To PartCount)
+            ExportRemainingSteelPartStls stlFolder, StlPlateFilePrefix(), noneDone
+        Else
+            LogLine "  ...and EXPORT_ALL_STEEL_PART_STLS is off, so nothing was written."
+        End If
+        Exit Sub
+    End If
+
+    Dim railIdx As Collection
+    Dim made As Long, attempted As Long
+    Dim i As Long, r As Long, ci As Long
+    Dim k As String, lbl As String
+
+    ' Which CAD parts already have an STL, so the leftover sweep at the bottom
+    ' cannot write the same solid twice under two different names.
+    Dim doneIdx() As Boolean
+    If PartCount >= 1 Then ReDim doneIdx(1 To PartCount)
+
+    prefix = StlPlateFilePrefix()
+    made = 0
+    attempted = 0
+
+    For i = 1 To StdCount
+
+        k = NormalizeKey(stdName(i))
+
+        If k = "RAILS" Then
+
+            ' Rails are aggregated into a single quote row with a quantity.
+            ' Export each physical rail on its own so the viewer can show
+            ' them individually instead of one merged blob.
+            Set railIdx = CollectLargestRailIndices(StdQty(i))
+
+            If railIdx.Count = 0 Then
+                ' No part carries the Rails role (StdCadRole never populated, or
+                ' the rails came in from BOM rather than geometry). The quote row
+                ' still has its own StdCadIndex, so fall back to that instead of
+                ' dropping the rails from the gallery entirely.
+                ci = 0
+                If i <= UBound(StdCadIndex) Then ci = StdCadIndex(i)
+
+                If ci >= 1 And ci <= PartCount Then
+                    attempted = attempted + 1
+                    LogLine "  plate STL: Rails via StdCadIndex fallback (no rail-role parts)."
+                    If ExportOnePlateStl(ci, _
+                            stlFolder & "\" & prefix & CleanFileName("Rails") & ".STL", "Rails") Then
+                        made = made + 1
+                        doneIdx(ci) = True
+                    End If
+                Else
+                    LogLine "  plate STL skip: Rails row has no rail components " & _
+                            "and no StdCadIndex."
+                End If
+            Else
+                For r = 1 To railIdx.Count
+                    attempted = attempted + 1
+                    If railIdx.Count = 1 Then
+                        lbl = "Rails"
+                    Else
+                        lbl = "Rails " & r
+                    End If
+                    If ExportOnePlateStl(CLng(railIdx(r)), _
+                            stlFolder & "\" & prefix & CleanFileName(lbl) & ".STL", lbl) Then
+                        made = made + 1
+                        doneIdx(CLng(railIdx(r))) = True
+                    End If
+                Next r
+            End If
+
+        Else
+
+            ci = 0
+            If i <= UBound(StdCadIndex) Then ci = StdCadIndex(i)
+
+            If ci >= 1 And ci <= PartCount Then
+                attempted = attempted + 1
+                lbl = Trim(stdName(i))
+                If lbl = "" Then lbl = parts(ci).componentName
+                If ExportOnePlateStl(ci, _
+                        stlFolder & "\" & prefix & CleanFileName(lbl) & ".STL", lbl) Then
+                    made = made + 1
+                    doneIdx(ci) = True
+                End If
+            Else
+                LogLine "  plate STL skip: " & stdName(i) & _
+                        " (row " & i & ") has no StdCadIndex."
+            End If
+
+        End If
+
+    Next i
+
+    LogLine "Standard plate STLs written: " & made & " of " & attempted & _
+            " -> " & stlFolder
+
+    ' --- Second pass: every remaining steel part -------------------------------
+    ' The loop above is driven by quote rows, so it only covers plates the
+    ' quoting logic both recognised and matched to a CAD index. Everything else
+    ' in the assembly -- unquoted plates, rows that never matched, interlocks,
+    ' wear plates, a second support plate -- had no STL at all. Sweep them.
+    If EXPORT_ALL_STEEL_PART_STLS Then
+        ExportRemainingSteelPartStls stlFolder, prefix, doneIdx
+    End If
+
+    Exit Sub
+eh:
+    LogLine "ExportStandardPlateStlsForComparison error: " & Err.Description
+End Sub
+
+' Export an STL for every steel part that the quote-row pass did not already
+' cover.
+'
+' "Steel" here is by exclusion, because a CAD component carries no material --
+' material lives on the BOM row, and these parts are precisely the ones with no
+' BOM row. So: drop anything whose name reads as hardware, drop insulation, and
+' drop anything too small to be a plate. What is left is a solid the shop has to
+' cut, and it belongs in the gallery, the Geometry tab and the machining total.
+Private Sub ExportRemainingSteelPartStls(ByVal stlFolder As String, _
+                                         ByVal prefix As String, _
+                                         ByRef doneIdx() As Boolean)
+On Error GoTo eh
+
+    If PartCount < 1 Then Exit Sub
+
+    Dim ci As Long
+    Dim nm As String, lbl As String
+    Dim vol As Double
+    Dim made As Long, skipped As Long
+
+    For ci = 1 To PartCount
+
+        If doneIdx(ci) Then GoTo NextPart
+
+        nm = Trim$(parts(ci).componentName)
+        If nm = "" Then nm = Trim$(parts(ci).cleanName)
+        If nm = "" Then GoTo NextPart
+
+        ' Hardware: screws, dowels, bushings, leader pins, water fittings.
+        If IsHardwareName(nm) Then
+            skipped = skipped + 1
+            GoTo NextPart
+        End If
+
+        ' Insulation is never quoted and never cut.
+        If IsExcludedInsulationPurchase(nm, "", "") Then
+            skipped = skipped + 1
+            GoTo NextPart
+        End If
+
+        vol = parts(ci).BBoxVolume
+        If vol <= 0 Then vol = parts(ci).BoxDx * parts(ci).BoxDy * parts(ci).BoxDz
+
+        If vol < MIN_STEEL_STL_BBOX_CUIN Then
+            skipped = skipped + 1
+            GoTo NextPart
+        End If
+
+        ' Name it the way everything else in the app expects: the role the stack
+        ' analysis gave it, else a canonical plate name parsed from the CAD name,
+        ' else the CAD name itself. GetUniqueFilePath inside ExportOnePlateStl
+        ' keeps two same-named plates from overwriting each other.
+        lbl = Trim$(StdCadRole(ci))
+        If lbl = "" Then lbl = Trim$(StandardPlateNameStd(nm))
+
+        ' HARDWARE HAS A ROLE TOO, AND THAT IS WHY THIS USED TO EXPORT IT.
+        '
+        ' The IsHardwareName test above reads the CAD component name, and on a real
+        ' job that name is a bare part number -- "1524836392-1" -- with no word in
+        ' it to match. So hardware reached here, picked up a perfectly good role
+        ' from StdCadRole ("Leader Pin", "Guided Ejector Bushing"), and that
+        ' non-empty label sailed past the "not a structural plate" skip below.
+        '
+        ' C17267: 30 extra STLs, 22 Leader Pins and 8 Guided Ejector Bushings.
+        ' The 9 real plates took 158s; the hardware took 369s. Half the run.
+        '
+        ' So test the RESOLVED ROLE as well as the CAD name.
+        If IsHardwareRoleLabel(lbl) Then
+            skipped = skipped + 1
+            GoTo NextPart
+        End If
+
+        If lbl = "" Then
+            ' MAJOR PLATES ONLY.
+            '
+            ' This used to fall back to a "Steel Part - <cad name>" tag and export
+            ' the solid anyway. On a real assembly that means every interlock,
+            ' wear pad, slide detail and sub-insert gets its own STL: on C18616
+            ' that is 34 roled parts out of 193 components, and the export is the
+            ' slowest step in the whole run. It also floods the 3D gallery with
+            ' parts nobody is quoting.
+            '
+            ' If no naming rule recognises it as a structural plate, it is not a
+            ' major plate, so skip it. The merged whole-base STL still contains
+            ' the geometry for anyone who needs to see it.
+            skipped = skipped + 1
+            GoTo NextPart
+        End If
+
+        If ExportOnePlateStl(ci, _
+                stlFolder & "\" & prefix & CleanFileName(lbl) & ".STL", lbl) Then
+            made = made + 1
+            doneIdx(ci) = True
+            LogLine "  extra steel STL: " & nm & " -> " & lbl
+        End If
+
+NextPart:
+    Next ci
+
+    LogLine "Extra major-plate STLs written: " & made & _
+            " (skipped " & skipped & ": hardware, insulation, too small, or not a " & _
+            "recognised structural plate)."
+    Exit Sub
+eh:
+    LogLine "ExportRemainingSteelPartStls error: " & Err.Description
+End Sub
+
+' ============================================================================
+' SQUARE THE WHOLE ASSEMBLY TO ITS TRUE AXES
+'
+' Imported X_T / STEP geometry is rarely aligned to the model planes. That makes
+' every axis-aligned measurement wrong, because swComp.GetBox returns the box
+' around the TILTED solid -- its shadow, not its size. On a 54 degree import a
+' 1.375 x 15.875 x 18.375 clamp plate measures 10.443 x 18.375 x 13.651, and
+' those numbers go straight into the steel sheet and the quote.
+'
+' The fix is the same trick the pullcore de-rotation uses: read the placement
+' transform and apply its inverse. Component2.Transform2.ArrayData holds the
+' part's local X/Y/Z axes as COLUMNS in assembly coordinates -- that IS the
+' rotation. For an orthonormal rotation the inverse is the transpose, so R's rows
+' are those axes, and R * M = Identity puts the reference plate dead on the model
+' axes with every parallel plate carried along.
+'
+' Reference plate = the largest footprint, which on a mold base is always a clamp
+' plate. No names and no BOM needed, so it works before anything is classified.
+Private Function StraightenAssemblyFromPlateTransform(ByVal model As Object) As Boolean
+On Error GoTo eh
+
+    StraightenAssemblyFromPlateTransform = False
+
+    If model Is Nothing Then Exit Function
+    If model.GetType <> swDocASSEMBLY Then Exit Function
+    If PartCount < 1 Then Exit Function
+
+    ' ---- 1. reference plate: biggest footprint ------------------------
+    Dim i As Long
+    Dim bestIdx As Long
+    Dim bestFoot As Double, fp As Double
+    bestIdx = 0: bestFoot = 0#
+
+    For i = 1 To PartCount
+        fp = parts(i).Width * parts(i).Length
+        If fp > bestFoot Then
+            bestFoot = fp
+            bestIdx = i
+        End If
+    Next i
+
+    If bestIdx < 1 Then
+        LogLine "STRAIGHTEN: no reference plate found."
         Exit Function
     End If
-    If Dir(fp) = "" Then
-        LogLine "  plate STL skip (file missing): " & fp
+
+    LogLine "STRAIGHTEN reference plate: " & parts(bestIdx).componentName & _
+            "  measured T/W/L=" & FormatNumberForCsv(parts(bestIdx).Thickness) & "/" & _
+            FormatNumberForCsv(parts(bestIdx).Width) & "/" & _
+            FormatNumberForCsv(parts(bestIdx).Length)
+
+    ' ---- 2. find the component, read its rotation --------------------
+    ' TOP-LEVEL ONLY. GetComponents(False) walks every level, and a child inside
+    ' a sub-assembly would then be rotated twice -- once by its own transform and
+    ' again inherited from its rotated parent -- which scrambles the assembly.
+    Dim vComps As Variant
+    vComps = model.GetComponents(True)
+    If IsEmpty(vComps) Then
+        LogLine "STRAIGHTEN: GetComponents returned nothing."
         Exit Function
     End If
-    Dim errs As Long, warns As Long
-    Dim pm As Object
-    Set pm = swApp.OpenDoc6(fp, swDocPART, swOpenDocOptions_Silent, "", errs, warns)
-    If pm Is Nothing Then
-        LogLine "  plate STL open failed: " & fp
+
+    Dim refComp As Object
+    Set refComp = Nothing
+
+    Dim wantName As String
+    wantName = UCase$(Trim$(parts(bestIdx).componentName))
+
+    Dim ci As Long
+    For ci = 0 To UBound(vComps)
+        If Not vComps(ci) Is Nothing Then
+            If UCase$(Trim$(vComps(ci).Name2)) = wantName Then
+                Set refComp = vComps(ci)
+                Exit For
+            End If
+        End If
+    Next ci
+
+    If refComp Is Nothing Then
+        For ci = 0 To UBound(vComps)
+            If Not vComps(ci) Is Nothing Then
+                If InStr(wantName, UCase$(Trim$(vComps(ci).Name2))) > 0 Then
+                    Set refComp = vComps(ci)
+                    Exit For
+                End If
+            End If
+        Next ci
+    End If
+
+    If refComp Is Nothing Then
+        LogLine "STRAIGHTEN: could not locate the reference plate component."
         Exit Function
     End If
-    swApp.ActivateDoc3 pm.GetTitle, False, 0, errs
-    SaveModelAs pm, GetUniqueFilePath(stlPath)
-    swApp.CloseDoc pm.GetTitle
-    ExportOnePlateStl = True
-    LogLine "  plate STL: " & stlPath
+
+    Dim xf As Object
+    Set xf = refComp.Transform2
+    If xf Is Nothing Then Exit Function
+
+    Dim v As Variant
+    v = xf.ArrayData
+    If IsEmpty(v) Then Exit Function
+    If IsArray(v) = False Then Exit Function
+    If UBound(v) < 8 Then Exit Function
+
+    ' ---- 3. R = transpose of the plate rotation ----------------------
+    Dim R(0 To 2, 0 To 2) As Double
+    R(0, 0) = CDbl(v(0)): R(0, 1) = CDbl(v(1)): R(0, 2) = CDbl(v(2))
+    R(1, 0) = CDbl(v(3)): R(1, 1) = CDbl(v(4)): R(1, 2) = CDbl(v(5))
+    R(2, 0) = CDbl(v(6)): R(2, 1) = CDbl(v(7)): R(2, 2) = CDbl(v(8))
+
+    Dim offAxis As Double
+    offAxis = Abs(Abs(R(0, 0)) - 1#) + Abs(Abs(R(1, 1)) - 1#) + Abs(Abs(R(2, 2)) - 1#)
+
+    LogLine "STRAIGHTEN plate rotation (local axes in assembly coords):"
+    LogLine "  local X = " & FormatNumberForCsv(R(0, 0)) & ", " & _
+            FormatNumberForCsv(R(0, 1)) & ", " & FormatNumberForCsv(R(0, 2))
+    LogLine "  local Y = " & FormatNumberForCsv(R(1, 0)) & ", " & _
+            FormatNumberForCsv(R(1, 1)) & ", " & FormatNumberForCsv(R(1, 2))
+    LogLine "  local Z = " & FormatNumberForCsv(R(2, 0)) & ", " & _
+            FormatNumberForCsv(R(2, 1)) & ", " & FormatNumberForCsv(R(2, 2))
+    LogLine "  off-axis measure = " & FormatNumberForCsv(offAxis)
+
+    If offAxis < 0.0001 Then
+        LogLine "STRAIGHTEN: already square to model XYZ; nothing to do."
+        StraightenAssemblyFromPlateTransform = True
+        Exit Function
+    End If
+
+    ' ---- 4. apply to every top-level component -----------------------
+    Dim swMathUtil As Object
+    Set swMathUtil = swApp.GetMathUtility
+    If swMathUtil Is Nothing Then
+        LogLine "STRAIGHTEN failed: GetMathUtility returned Nothing."
+        Exit Function
+    End If
+
+    Dim moved As Long, failed As Long
+    moved = 0: failed = 0
+
+    For ci = 0 To UBound(vComps)
+        If Not vComps(ci) Is Nothing Then
+            If StraightenOneComponentByMatrix(vComps(ci), R, swMathUtil) Then
+                moved = moved + 1
+            Else
+                failed = failed + 1
+            End If
+        End If
+    Next ci
+
+    LogLine "STRAIGHTEN: rotated " & CStr(moved) & " top-level component(s), " & _
+            CStr(failed) & " failed."
+
+    If moved = 0 Then
+        LogLine "STRAIGHTEN failed: no component transforms could be set. " & _
+                "Components are probably fixed and need floating first."
+        Exit Function
+    End If
+
+    On Error Resume Next
+    model.EditRebuild3
+    model.GraphicsRedraw2
+    On Error GoTo eh
+
+    LogLine "STRAIGHTEN: geometry is now square to model XYZ. Every measured " & _
+            "T/W/L from here is the real plate size, not a tilted bounding box."
+
+    StraightenAssemblyFromPlateTransform = True
+    Exit Function
+
+eh:
+    LogLine "StraightenAssemblyFromPlateTransform error: " & Err.Description
+    StraightenAssemblyFromPlateTransform = False
+End Function
+
+' Rotate one component by R, working straight on Transform2.ArrayData.
+'
+'   v(0..2) / v(3..5) / v(6..8) = local X/Y/Z axes in assembly coords (columns)
+'   v(9..11) = translation, v(12) = scale
+'
+' so new column = R * old column, and new translation = R * old translation.
+' Done as plain arithmetic rather than IMathTransform.Multiply, because that
+' call's operand order is a convention that is easy to get backwards and produces
+' silent garbage when you do.
+Private Function StraightenOneComponentByMatrix(ByVal swComp As Object, _
+                                                ByRef R() As Double, _
+                                                ByVal swMathUtil As Object) As Boolean
+On Error GoTo eh
+
+    StraightenOneComponentByMatrix = False
+
+    Dim xform As Object
+    Set xform = swComp.Transform2
+    If xform Is Nothing Then Exit Function
+
+    Dim v As Variant
+    v = xform.ArrayData
+    If IsEmpty(v) Then Exit Function
+    If IsArray(v) = False Then Exit Function
+    If UBound(v) < 12 Then Exit Function
+
+    Dim o(0 To 15) As Double
+    Dim k As Long
+    For k = 0 To 15
+        If k <= UBound(v) Then o(k) = CDbl(v(k)) Else o(k) = 0#
+    Next k
+
+    Dim n(0 To 15) As Double
+    Dim col As Long
+    Dim base As Long
+    For col = 0 To 3
+        If col = 3 Then base = 9 Else base = col * 3
+        n(base + 0) = R(0, 0) * o(base + 0) + R(0, 1) * o(base + 1) + R(0, 2) * o(base + 2)
+        n(base + 1) = R(1, 0) * o(base + 0) + R(1, 1) * o(base + 1) + R(1, 2) * o(base + 2)
+        n(base + 2) = R(2, 0) * o(base + 0) + R(2, 1) * o(base + 1) + R(2, 2) * o(base + 2)
+    Next col
+
+    n(12) = o(12)
+    If n(12) = 0# Then n(12) = 1#
+    n(13) = 0#: n(14) = 0#: n(15) = 0#
+
+    Dim newX As Object
+    Set newX = swMathUtil.CreateTransform(n)
+    If newX Is Nothing Then Exit Function
+
+    swComp.Transform2 = newX
+
+    StraightenOneComponentByMatrix = True
+    Exit Function
+
+eh:
+    StraightenOneComponentByMatrix = False
+End Function
+
+' Delete everything a previous run of this macro generated in the job folder.
+'
+' Runs before staging, so a re-quote starts from a clean slate. Without it stale
+' artifacts survive and quietly mislead: an old plate STL the web app still reads
+' and measures, a DXF from a previous (wrong) orientation, a quote workbook with
+' last week's plate sizes, a signature CSV Elgin already imported.
+'
+' SOURCE FILES ARE NOT TOUCHED. Only generated output goes -- the customer ZIP,
+' the incoming X_T/STEP and the BOM stay, because they are what the next run
+' needs to work from. If the whole folder were wiped there would be nothing left
+' to re-quote from when running against a locally staged job.
+Private Sub CleanPriorRunOutputs(ByVal jobFolder As String)
+On Error GoTo eh
+
+    If jobFolder = "" Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(jobFolder) Then Exit Sub
+
+    Dim nFiles As Long, nFolders As Long
+    nFiles = 0: nFolders = 0
+
+    ' --- generated subfolders -------------------------------------------
+    Dim subs As Variant
+    subs = Array("stl", "base", "pdf", "images", "models", "documents", _
+                 EXTRACT_FOLDER_NAME)
+    Dim i As Long
+    For i = LBound(subs) To UBound(subs)
+        Dim sp As String
+        sp = jobFolder & "\" & CStr(subs(i))
+        If fso.FolderExists(sp) Then
+            fso.DeleteFolder sp, True
+            nFolders = nFolders + 1
+        End If
+    Next i
+
+    ' --- generated files at the job root --------------------------------
+    ' Matched by EXTENSION for the things we always author, and by NAME for the
+    ' reports. Deliberately NOT deleting .zip / .step / .stp / .igs / .sldprt /
+    ' .sldasm / .xlsm -- those are or may be customer source.
+    Dim f As Object
+    Dim ext As String
+    Dim nm As String
+    For Each f In fso.GetFolder(jobFolder).Files
+        ext = UCase$(fso.GetExtensionName(f.path))
+        nm = UCase$(f.Name)
+
+        Dim kill As Boolean
+        kill = False
+
+        If ext = "STL" Then kill = True
+        If ext = "DXF" Then kill = True
+        If ext = "JPG" Or ext = "JPEG" Or ext = "PNG" Then kill = True
+        If ext = "EASM" Then kill = True
+
+        ' Our own reports and logs.
+        If InStr(nm, "XT_EXPORT") > 0 Then kill = True
+        If InStr(nm, "CAD_ALL_COMPONENTS_DEBUG") > 0 Then kill = True
+        If InStr(nm, "STANDARD_QUOTE_ROWS_DEBUG") > 0 Then kill = True
+        If InStr(nm, "PDF_KNOWLEDGE_EVIDENCE") > 0 Then kill = True
+        If InStr(nm, "STACK_LEADERPIN_ANALYSIS") > 0 Then kill = True
+        If InStr(nm, "PCS_NAMING_ANALYSIS") > 0 Then kill = True
+        If InStr(nm, "JOB_FILE_INVENTORY") > 0 Then kill = True
+        If InStr(nm, "PURCHASED COMPONENTS QUOTE") > 0 Then kill = True
+        If InStr(nm, "PULLCORE PRICES") > 0 Then kill = True
+        If InStr(nm, "CMS_BASE_EXPORT_LOG") > 0 Then kill = True
+        If InStr(nm, "CMS_PRICING_READY") > 0 Then kill = True
+        If InStr(nm, "CMS_ZIP_EXTRACT_DONE") > 0 Then kill = True
+        If InStr(nm, "CLASSIFICATION") > 0 Then kill = True
+
+        ' The filled quote / steel workbooks we copied in and wrote to. These are
+        ' OUR copies (prefixed with the job base name); the customer's own .xlsm
+        ' BOM has no such prefix and is skipped by the extension rule above.
+        If ext = "XLS" Or ext = "XLSX" Then
+            If InStr(nm, "QUOTE") > 0 Or InStr(nm, "STEEL") > 0 Or _
+               InStr(nm, "J000") > 0 Or InStr(nm, "GRIND") > 0 Or _
+               InStr(nm, "PURCHASED") > 0 Or InStr(nm, "PULL CORE") > 0 Then
+                kill = True
+            End If
+        End If
+
+        If kill Then
+            fso.DeleteFile f.path, True
+            nFiles = nFiles + 1
+        End If
+    Next f
+
+    If nFiles > 0 Or nFolders > 0 Then
+        LogLine "Cleaned prior run: deleted " & CStr(nFiles) & " file(s) and " & _
+                CStr(nFolders) & " folder(s) from " & jobFolder
+        LogLine "  (source ZIP / X_T / STEP / customer BOM were kept)"
+    Else
+        LogLine "No prior run output to clean in " & jobFolder
+    End If
+    Exit Sub
+
+eh:
+    ' Never let a locked file stop the quote. A leftover artifact is better than
+    ' a failed run.
+    LogLine "CleanPriorRunOutputs warning: " & Err.Description & _
+            " (continuing; some prior output may remain)"
+End Sub
+
+' Wipe the per-plate STL folder so each run rewrites it from scratch.
+' Deliberately NOT gated on CLEAN_EXTRA_STL_SHARDS_IN_JOB_FOLDER: that flag is
+' about stray shards SolidWorks drops next to the assembly STL, whereas this is
+' the per-plate folder's own idempotency and must always hold.
+Private Sub ClearPlateStlFolder(ByVal folderPath As String)
+On Error GoTo eh
+
+    If folderPath = "" Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(folderPath) Then Exit Sub
+
+    Dim f As Object
+    Dim n As Long
+    n = 0
+    For Each f In fso.GetFolder(folderPath).Files
+        If LCase$(fso.GetExtensionName(f.path)) = "stl" Then
+            fso.DeleteFile f.path, True
+            n = n + 1
+        End If
+    Next f
+
+    If n > 0 Then LogLine "Cleared " & n & " stale plate STL(s) from " & folderPath
+    Exit Sub
+eh:
+    LogLine "ClearPlateStlFolder error: " & Err.Description
+End Sub
+
+' Job-base-name prefix for per-plate STL filenames, e.g. "J8420_".
+' Returns "" when no base name is known, so the label alone is used.
+Private Function StlPlateFilePrefix() As String
+On Error GoTo eh
+    Dim b As String
+    b = Trim(JobBaseName)
+    If b = "" Then b = Trim(CurrentJobNumber)
+    b = CleanFileName(b)
+    If b = "" Then
+        StlPlateFilePrefix = ""
+    Else
+        StlPlateFilePrefix = b & "_"
+    End If
     Exit Function
 eh:
+    StlPlateFilePrefix = ""
+End Function
+
+' Rail CAD indices, largest first — the index-returning twin of
+' AddLargestRailComponentsToKeep (which returns component names).
+Private Function CollectLargestRailIndices(ByVal qtyNeeded As Long) As Collection
+On Error GoTo ErrHandler
+
+    Dim out As New Collection
+    Set CollectLargestRailIndices = out
+
+    If qtyNeeded < 1 Then Exit Function
+    If PartCount < 1 Then Exit Function
+    If Not StdRoleArrayReady() Then Exit Function
+
+    Dim railIdx() As Long
+    Dim n As Long
+    Dim i As Long
+
+    ReDim railIdx(1 To PartCount)
+    n = 0
+
+    For i = 1 To PartCount
+        If NormalizeKey(StdCadRole(i)) = "RAILS" Then
+            n = n + 1
+            railIdx(n) = i
+        End If
+    Next i
+
+    If n < 1 Then Exit Function
+
+    Dim a As Long
+    Dim b As Long
+    Dim tmp As Long
+
+    For a = 1 To n - 1
+        For b = a + 1 To n
+            If (parts(railIdx(b)).Length * 100000# + parts(railIdx(b)).BBoxVolume) > _
+               (parts(railIdx(a)).Length * 100000# + parts(railIdx(a)).BBoxVolume) Then
+
+                tmp = railIdx(a)
+                railIdx(a) = railIdx(b)
+                railIdx(b) = tmp
+            End If
+        Next b
+    Next a
+
+    Dim maxAdd As Long
+    maxAdd = qtyNeeded
+    If maxAdd > n Then maxAdd = n
+
+    For i = 1 To maxAdd
+        out.Add railIdx(i)
+    Next i
+
+    Set CollectLargestRailIndices = out
+    Exit Function
+
+ErrHandler:
+    LogLine "CollectLargestRailIndices error: " & Err.Description
+    Set CollectLargestRailIndices = New Collection
+End Function
+
+Private Function ExportOnePlateStl(ByVal idx As Long, ByVal stlPath As String, Optional ByVal plateLabel As String = "") As Boolean
+On Error GoTo eh
+    ExportOnePlateStl = False
+
+    If idx <= 0 Or idx > PartCount Then
+        LogLine "  plate STL skip (bad index)."
+        Exit Function
+    End If
+
+    If plateLabel = "" Then plateLabel = parts(idx).componentName
+
+    ' Non-assembly jobs (single part file): fall back to the original
+    ' standalone-file behavior, but still route through the corrected
+    ' orientation writer instead of a plain SaveModelAs.
+    If swModel Is Nothing Or swModel.GetType <> swDocASSEMBLY Then
+        Dim fp As String
+        fp = parts(idx).filePath
+        If fp = "" Then
+            LogLine "  plate STL skip (no file path): " & parts(idx).componentName
+            Exit Function
+        End If
+        If Dir(fp) = "" Then
+            LogLine "  plate STL skip (file missing): " & fp
+            Exit Function
+        End If
+        Dim errs As Long, warns As Long
+        Dim pm As Object
+        Set pm = swApp.OpenDoc6(fp, swDocPART, swOpenDocOptions_Silent, "", errs, warns)
+        If pm Is Nothing Then
+            LogLine "  plate STL open failed: " & fp
+            Exit Function
+        End If
+        swApp.ActivateDoc3 pm.GetTitle, False, 0, errs
+        SaveStlWithMainBaseOrientation pm, GetUniqueFilePath(stlPath), plateLabel, parts(idx).componentName
+        swApp.CloseDoc pm.GetTitle
+        ExportOnePlateStl = (Dir(stlPath) <> "")
+        LogLine "  plate STL (standalone part): " & stlPath
+        Exit Function
+    End If
+
+    ' Assembly job: isolate just this one component (same pattern used by
+    ' ExportSteelComponentsMergedStlOnly below) and export it through
+    ' SaveStlWithMainBaseOrientation, so the corrected Top/Front orientation
+    ' matrix gets applied instead of exporting the part in its own raw,
+    ' as-modeled axes.
+    Dim assyModel As Object
+    Set assyModel = swModel
+
+    Dim keepNames As Collection
+    Dim hiddenNames As Collection
+    Dim usedSession As Boolean
+
+    ' FAST PATH: an isolation session is already open, so everything is hidden
+    ' and all this plate needs is its own component turned on. Two COM calls
+    ' instead of walking and re-selecting 400+ components.
+    If gPlateIsoActive Then
+        If PlateIsoSetOneVisible(assyModel, parts(idx).componentName, True) Then
+            usedSession = True
+            LogLine "  plate STL: showing " & parts(idx).componentName & " (" & plateLabel & ")"
+        Else
+            LogLine "  plate STL: " & parts(idx).componentName & " not in the isolation " & _
+                    "session, falling back to a full isolate."
+        End If
+    End If
+
+    If Not usedSession Then
+        Set keepNames = New Collection
+        keepNames.Add parts(idx).componentName
+        Set hiddenNames = New Collection
+
+        LogLine "  plate STL: isolating " & parts(idx).componentName & " (" & plateLabel & ")"
+
+        PrepareAssemblyVisibilityFast assyModel
+
+        If HideAllExceptComponentNamesOnce(assyModel, keepNames, hiddenNames) = False Then
+            LogLine "  plate STL skip: could not isolate " & parts(idx).componentName
+            GoTo CleanExit
+        End If
+    End If
+
+    ApplyCmsTopView assyModel
+    StabilizeActiveView assyModel, 50
+
+    Dim finalPath As String
+    finalPath = GetUniqueFilePath(stlPath)
+
+    SaveStlWithMainBaseOrientation assyModel, finalPath, plateLabel, parts(idx).componentName
+
+    ExportOnePlateStl = (Dir(finalPath) <> "")
+
+    If ExportOnePlateStl Then
+        LogLine "  plate STL: " & finalPath
+    Else
+        LogLine "  WARNING: plate STL was not created: " & finalPath
+    End If
+
+CleanExit:
+    On Error Resume Next
+
+    If usedSession Then
+        ' Leave the session state intact -- just put this plate back out of sight
+        ' so the next one starts from the same all-hidden baseline.
+        PlateIsoSetOneVisible assyModel, parts(idx).componentName, False
+    ElseIf Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then
+            ShowNamedComponentsOnce assyModel, hiddenNames
+        Else
+            ShowAllAssemblyComponents assyModel
+        End If
+        ApplyCmsTopView assyModel
+    Else
+        ShowAllAssemblyComponents assyModel
+        ApplyCmsTopView assyModel
+    End If
+
+    Exit Function
+
+eh:
     LogLine "ExportOnePlateStl error: " & Err.Description
+    Resume CleanExit
 End Function
 
 ' ============================================================
@@ -4929,17 +6518,53 @@ End Function
 ' ============================================================
 Private Sub ExportFrontAndBackIsoJpegsFullAssembly(ByVal outputFolder As String, ByVal baseName As String)
 On Error GoTo ErrHandler
+
     If swModel Is Nothing Then Exit Sub
     If baseName = "" Then baseName = CurrentJobNumber
     EnsureFolderDeep outputFolder
 
-    PrepareAssemblyVisibilityFast swModel
+    LogLine "STANDARD ISO FAST: ENTER"
 
     On Error Resume Next
     swApp.Visible = True
+    swApp.UserControl = True
+    swApp.CommandInProgress = False
     On Error GoTo ErrHandler
 
     RestoreMainViewportGraphics
+
+    Dim errs As Long
+    errs = 0
+    swApp.ActivateDoc3 swModel.GetTitle, False, 0, errs
+    Set swModel = swApp.ActiveDoc
+
+    If swModel Is Nothing Then
+        LogLine "STANDARD ISO FAST: ActiveDoc is Nothing"
+        Exit Sub
+    End If
+
+    Dim swView As Object
+    Set swView = swModel.ActiveView
+    If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
+
+    swModel.ClearSelection2 True
+
+    ' === CMS PATCH FINAL STANDARD ISO FULL VISIBILITY ===
+    If swModel.GetType = swDocASSEMBLY Then
+        ShowAllAssemblyComponents swModel
+        LogLine "STANDARD ISO: restored all assembly components visible before full-assembly ISO."
+    End If
+
+    ' CRITICAL SPEED RULE:
+    ' Do not ShowAllAssemblyComponents here.
+    ' Do not ShowAllBodiesInAssemblyComponents here.
+    ' Do not call PrepareModelForJpegCapture here.
+    ' Those calls freeze on large STEP imports.
+
+    On Error Resume Next
+    swModel.ViewDisplayShaded
+    Err.Clear
+    On Error GoTo ErrHandler
 
     Dim isoPath As String
     Dim backIsoPath As String
@@ -4947,31 +6572,26 @@ On Error GoTo ErrHandler
     isoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " ISO.jpg")
     backIsoPath = GetUniqueFilePath(outputFolder & "\" & baseName & " BACK ISO.jpg")
 
-    ' FRONT ISO
+    LogLine "STANDARD ISO FAST: front ISO"
     swModel.ShowNamedView2 "*Isometric", 7
-    PrepareModelForJpegCapture swModel, True
+    FastRedrawForJpeg swModel
 
     If SaveViewAsImage(swModel, isoPath) Then
-        LogLine "Saved front ISO jpg (STANDARD full assembly): " & isoPath
+        LogLine "Saved front ISO jpg (STANDARD fast): " & isoPath
     Else
         LogLine "WARNING: front ISO jpg failed: " & isoPath
     End If
 
-    ' BACK ISO
-    swModel.ShowNamedView2 "*Isometric", 7
-    PrepareModelForJpegCapture swModel, True
-
-    Dim swView As Object
+    LogLine "STANDARD ISO FAST: back ISO rotate"
     Set swView = swModel.ActiveView
-
     If Not swView Is Nothing Then
         swView.RotateAboutCenter 0#, PI_VALUE
     End If
 
-    PrepareModelForJpegCapture swModel, True
+    FastRedrawForJpeg swModel
 
     If SaveViewAsImage(swModel, backIsoPath) Then
-        LogLine "Saved back ISO jpg (STANDARD full assembly): " & backIsoPath
+        LogLine "Saved back ISO jpg (STANDARD fast): " & backIsoPath
     Else
         LogLine "WARNING: back ISO jpg failed: " & backIsoPath
     End If
@@ -4979,10 +6599,14 @@ On Error GoTo ErrHandler
     swModel.ShowNamedView2 CMS_TOP_VIEW_NAME, -1
     ApplyCmsTopView swModel
     EnsureSwHidden
+
+    LogLine "STANDARD ISO FAST: EXIT"
     Exit Sub
+
 ErrHandler:
-    LogLine "ExportFrontAndBackIsoJpegsFullAssembly error: " & Err.Description
+    LogLine "ExportFrontAndBackIsoJpegsFullAssembly FAST error: " & Err.Description
 End Sub
+
 
 ' ============================================================
 ' FRONT + BACK ISO JPGs  (BMS only — Pyropel hidden via keep-list)
@@ -5517,9 +7141,16 @@ On Error GoTo ErrHandler
     Dim oneFileSet As Boolean
     Dim priorBinary As Long
     Dim binarySet As Boolean
+    Dim priorUnits As Long
+    Dim unitsSet As Boolean
+    Dim priorQuality As Long
+    Dim priorDev As Double
+    Dim priorAng As Double
+    Dim tessSet As Boolean
 
     oneFileSet = False
     binarySet = False
+    unitsSet = False
 
     If Not swApp Is Nothing Then
 
@@ -5541,6 +7172,9 @@ On Error GoTo ErrHandler
                 LogLine "STL temp export: binary preference could not be set."
             End If
         End If
+
+        ForceInchStlUnits priorUnits, unitsSet
+        ForceFineStlTessellation priorQuality, priorDev, priorAng, tessSet
 
         On Error GoTo ErrHandler
 
@@ -5565,8 +7199,36 @@ On Error GoTo ErrHandler
     LogLine "STL temp export produced " & stlFiles.Count & " STL file(s)."
 
     If stlFiles.Count = 0 Then
-        LogLine "STL temp export failed: no STL files found in temp folder."
+
+        ' SolidWorks sometimes returns Errors=0 but writes no STL to the temp
+        ' folder when components are hidden/isolated. Do not give up — try direct
+        ' final-path STL export from the current visible model.
+        LogLine "STL temp export produced zero files. Trying direct final-path STL fallback:"
+        LogLine "  " & finalStlPath
+
+        errs = 0
+        warns = 0
+
+        On Error Resume Next
+        If fso.FileExists(finalStlPath) Then fso.DeleteFile finalStlPath, True
+        Err.Clear
+        On Error GoTo ErrHandler
+
+        model.Extension.SaveAs3 finalStlPath, _
+                                swSaveAsCurrentVersion, _
+                                swSaveAsOptions_Silent, _
+                                Nothing, Nothing, errs, warns
+
+        LogLine "STL direct fallback save done. Errors=" & errs & " Warnings=" & warns
+
+        If fso.FileExists(finalStlPath) Then
+            LogFileExistsAndSize "STL DIRECT FALLBACK", finalStlPath
+            GoTo RotateAndDone
+        End If
+
+        LogLine "STL direct fallback failed: final STL file was not created."
         GoTo CleanExit
+
     End If
 
     If stlFiles.Count = 1 Then
@@ -5583,16 +7245,18 @@ On Error GoTo ErrHandler
 
     End If
 
+RotateAndDone:
+
     If MATCH_STUDIO_STL_MATCH_MAIN_BASE_ORIENTATION And POST_ROTATE_STL_TO_CORRECTED_FRONT Then
 
         If FinalStlCoordFrameReady Then
             If ReorientStlFileToMatrix(finalStlPath, FinalStlCoordM) Then
-                LogLine "Merged STL post-rotated into corrected final coordinate frame."
+                LogLine "Merged/direct STL post-rotated into corrected final coordinate frame."
             Else
-                LogLine "WARNING: merged STL post-rotation failed. File still exists."
+                LogLine "WARNING: STL post-rotation failed. File still exists."
             End If
         Else
-            LogLine "WARNING: final STL coordinate frame not ready; merged STL was not post-rotated."
+            LogLine "WARNING: final STL coordinate frame not ready; STL was not post-rotated."
         End If
 
     End If
@@ -5604,6 +7268,8 @@ CleanExit:
 
     If oneFileSet Then swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
     If binarySet Then swApp.SetUserPreferenceIntegerValue swSTLBinaryFormat, priorBinary
+    If unitsSet Then swApp.SetUserPreferenceIntegerValue swExportStlUnits, priorUnits
+    RestoreStlTessellation priorQuality, priorDev, priorAng, tessSet
 
     If tempFolder <> "" Then
         If fso.FolderExists(tempFolder) Then fso.DeleteFolder tempFolder, True
@@ -5615,6 +7281,7 @@ ErrHandler:
     LogLine "ExportVisibleModelStlToTempAndMerge error: " & Err.Description
     Resume CleanExit
 End Function
+
 
 Private Sub AddLargestRailComponentsToKeep(ByVal keepNames As Collection, ByVal qtyNeeded As Long)
 On Error GoTo ErrHandler
@@ -6046,9 +7713,45 @@ On Error GoTo ErrHandler
 
     End If
 
+    ' THIS TOGGLE IS WHY PER-PLATE STLs SILENTLY PRODUCED NOTHING.
+    '
+    ' Exporting an ASSEMBLY to STL with swSTLComponentsIntoOneFile = False makes
+    ' SolidWorks write ONE FILE PER COMPONENT, named after each component and
+    ' placed wherever it likes -- and it reports SaveAs3 Errors=0 Warnings=0
+    ' while doing it. So the requested path is never written, the log says the
+    ' save succeeded, and the next step fails trying to re-read a file that does
+    ' not exist:
+    '
+    '   Save done. Errors=0 Warnings=0 Path=...\_Bottom Clamp Plate.STL
+    '   WARNING: SAVED FILE was not created: ...\_Bottom Clamp Plate.STL
+    '   STL reorient failed: file was not successfully processed as binary...
+    '
+    ' On C18616 that was 0 of 14 plates written, and roughly 14 seconds burned
+    ' per plate before failing -- which is also most of the "it takes too long".
+    '
+    ' The merged whole-base export already sets this toggle (see
+    ' ExportVisibleModelStlToTempAndMerge), which is exactly why the full base
+    ' STL exists while the per-plate files never did. Set it here too, and always
+    ' restore the user's own setting afterwards.
+    Dim priorOneFile As Boolean
+    Dim oneFileSet As Boolean
+    oneFileSet = False
+    On Error Resume Next
+    priorOneFile = swApp.GetUserPreferenceToggle(swSTLComponentsIntoOneFile)
+    swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, True
+    oneFileSet = (Err.Number = 0)
+    Err.Clear
+    On Error GoTo ErrHandler
+
     ' SolidWorks STL export ignores named views and standard views.
     ' It writes mesh coordinates in model/original coordinate space.
     SaveModelAs model, stlPath
+
+    If oneFileSet Then
+        On Error Resume Next
+        swApp.SetUserPreferenceToggle swSTLComponentsIntoOneFile, priorOneFile
+        On Error GoTo ErrHandler
+    End If
 
     ' Convert exported STL mesh from original model coordinates into your corrected
     ' Top/Front standard-view coordinate system.
@@ -6298,15 +8001,15 @@ Private Sub NormalizeStlVector(ByRef x As Single, _
                                ByRef z As Single)
 On Error Resume Next
 
-    Dim L As Double
+    Dim l As Double
 
-    L = Sqr(CDbl(x) * CDbl(x) + CDbl(y) * CDbl(y) + CDbl(z) * CDbl(z))
+    l = Sqr(CDbl(x) * CDbl(x) + CDbl(y) * CDbl(y) + CDbl(z) * CDbl(z))
 
-    If L <= 0.0000001 Then Exit Sub
+    If l <= 0.0000001 Then Exit Sub
 
-    x = CSng(CDbl(x) / L)
-    y = CSng(CDbl(y) / L)
-    z = CSng(CDbl(z) / L)
+    x = CSng(CDbl(x) / l)
+    y = CSng(CDbl(y) / l)
+    z = CSng(CDbl(z) / l)
 End Sub
 
 Private Function ReorientAsciiStlFileToMatrix(ByVal stlPath As String, ByRef m() As Double) As Boolean
@@ -6329,7 +8032,7 @@ On Error GoTo ErrHandler
     Dim outLines() As String
     ReDim outLines(LBound(lines) To UBound(lines))
 
-    Dim i As Long, rawLine As String, T As String, indent As String
+    Dim i As Long, rawLine As String, t As String, indent As String
     Dim toks() As String
     Dim x As Double, y As Double, z As Double
     Dim sx As Single, sy As Single, sz As Single
@@ -6338,10 +8041,10 @@ On Error GoTo ErrHandler
 
     For i = LBound(lines) To UBound(lines)
         rawLine = lines(i)
-        T = LTrim(rawLine)
-        indent = Left$(rawLine, Len(rawLine) - Len(T))
-        If Left$(LCase$(T), 12) = "facet normal" Or Left$(LCase$(T), 6) = "vertex" Then
-            toks = Split(Replace(Replace(T, vbTab, " "), "  ", " "), " ")
+        t = LTrim(rawLine)
+        indent = Left$(rawLine, Len(rawLine) - Len(t))
+        If Left$(LCase$(t), 12) = "facet normal" Or Left$(LCase$(t), 6) = "vertex" Then
+            toks = Split(Replace(Replace(t, vbTab, " "), "  ", " "), " ")
             ' facet normal nx ny nz  OR  vertex x y z
             Dim nTok As Long, k As Long, nums() As Double, nNum As Long
             nTok = UBound(toks)
@@ -6356,8 +8059,8 @@ On Error GoTo ErrHandler
             If nNum >= 3 Then
                 sx = CSng(nums(1)): sy = CSng(nums(2)): sz = CSng(nums(3))
                 TransformStlVectorByMatrix sx, sy, sz, m
-                If Left$(LCase$(T), 12) = "facet normal" Then NormalizeStlVector sx, sy, sz
-                If Left$(LCase$(T), 12) = "facet normal" Then
+                If Left$(LCase$(t), 12) = "facet normal" Then NormalizeStlVector sx, sy, sz
+                If Left$(LCase$(t), 12) = "facet normal" Then
                     outLines(i) = indent & "facet normal " & _
                         Format(sx, "0.000000E+00") & " " & Format(sy, "0.000000E+00") & " " & Format(sz, "0.000000E+00")
                 Else
@@ -6391,6 +8094,27 @@ ErrHandler:
     ReorientAsciiStlFileToMatrix = False
 End Function
 
+Private Sub FastRedrawForJpeg(ByVal model As Object)
+On Error Resume Next
+
+    If model Is Nothing Then Exit Sub
+
+    Dim swView As Object
+    Set swView = model.ActiveView
+    If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
+
+    model.ViewZoomtofit2
+    model.GraphicsRedraw2
+    DoEvents
+
+    If FAST_QUOTE_MODE Then
+        WaitMilliseconds 100
+    Else
+        WaitMilliseconds 300
+    End If
+
+End Sub
+
 Private Function SaveViewAsImage(ByVal model As Object, ByVal imagePath As String) As Boolean
 On Error GoTo ErrHandler
 
@@ -6414,14 +8138,10 @@ On Error GoTo ErrHandler
 
     Dim swView As Object
     Set swView = model.ActiveView
+    If Not swView Is Nothing Then swView.EnableGraphicsUpdate = True
 
-    If Not swView Is Nothing Then
-        swView.EnableGraphicsUpdate = True
-    End If
-
-    model.GraphicsRedraw2
-    DoEvents
-    WaitMilliseconds 150
+    ' Do not call PrepareModelForJpegCapture here.
+    ' Caller already positioned/redrew the view.
 
     LogLine "JPG Save START: " & imagePath
 
@@ -6456,6 +8176,7 @@ ErrHandler:
     SaveViewAsImage = False
 End Function
 
+
 ' ============================================================
 Private Sub RunVisualMoldInspection()
 On Error GoTo ErrHandler
@@ -6478,12 +8199,532 @@ On Error GoTo ErrHandler
           " -JobFolder " & Chr(34) & CurrentJobFolder & Chr(34) & _
           " -CadCsv " & Chr(34) & CurrentJobFolder & "\XT_Export_CAD_Dimensions.csv" & Chr(34)
     LogLine "Running visual mold inspection."
-    sh.Run cmd, 0, True
+    sh.run cmd, 0, True
     LogLine "Visual mold inspection done."
     Exit Sub
 ErrHandler:
     LogLine "RunVisualMoldInspection error: " & Err.Description
 End Sub
+
+
+' ============================================================
+' SEPARATE ONE-VIEW ENGRAVING DXFS
+' ID HOLDER / OD HOLDER / TCP
+'
+' Output name example:
+'   J8440_ID HOLDER ENG_843000050_06-29-2026.dxf
+'
+' Rules:
+'   - Three separate files.
+'   - One view only.
+'   - Uses the corrected top view already established by the macro.
+'   - Hidden Lines Removed display, not hidden-lines-visible.
+'   - Uses the same full-base layout scale for all three files so placement
+'     follows the same top-view coordinate basis.
+' ============================================================
+
+Private Function ExtractJNumberFromText(ByVal s As String) As String
+On Error GoTo ErrHandler
+
+    ExtractJNumberFromText = ""
+
+    s = Trim$(s)
+    If s = "" Then Exit Function
+
+    Dim re As Object
+    Dim ms As Object
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+    re.Pattern = "\bJ[- ]?([0-9]{3,8})\b"
+
+    Set ms = re.Execute(s)
+
+    If ms.Count > 0 Then
+        ExtractJNumberFromText = "J" & CStr(ms(0).SubMatches(0))
+    End If
+
+    Exit Function
+
+ErrHandler:
+    ExtractJNumberFromText = ""
+End Function
+
+Private Function EngravingPrimaryJobToken() As String
+On Error Resume Next
+
+    Dim blob As String
+    Dim jnum As String
+
+    blob = CustomerJobNumber & " " & _
+           AssignedQuoteNumber & " " & _
+           SimilarToJob & " " & _
+           JobBaseName & " " & _
+           gExactJobFolderName & " " & _
+           NetworkJobFolder & " " & _
+           CurrentJobFolder & " " & _
+           gHandoffAttachDir
+
+    jnum = ExtractJNumberFromText(blob)
+
+    If jnum <> "" Then
+        EngravingPrimaryJobToken = jnum
+        Exit Function
+    End If
+
+    If Trim$(CustomerJobNumber) <> "" Then
+        EngravingPrimaryJobToken = CleanFileName(Replace(CustomerJobNumber, "-", ""))
+        Exit Function
+    End If
+
+    If Trim$(AssignedQuoteNumber) <> "" Then
+        EngravingPrimaryJobToken = CleanFileName(Replace(AssignedQuoteNumber, "-", ""))
+        Exit Function
+    End If
+
+    If Trim$(CurrentJobNumber) <> "" Then
+        EngravingPrimaryJobToken = CleanFileName(Replace(CurrentJobNumber, "-", ""))
+        Exit Function
+    End If
+
+    EngravingPrimaryJobToken = "JOB"
+End Function
+
+Private Function EngravingNumericJobToken() As String
+On Error Resume Next
+
+    Dim v As String
+
+    v = ExtractCustJobFromName(JobBaseName)
+    If v <> "" Then EngravingNumericJobToken = v: Exit Function
+
+    v = ExtractCustJobFromName(gExactJobFolderName)
+    If v <> "" Then EngravingNumericJobToken = v: Exit Function
+
+    v = ExtractCustJobFromName(NetworkJobFolder)
+    If v <> "" Then EngravingNumericJobToken = v: Exit Function
+
+    v = ExtractCustJobFromName(CurrentJobFolder)
+    If v <> "" Then EngravingNumericJobToken = v: Exit Function
+
+    v = ExtractCustJobFromName(gHandoffAttachDir)
+    If v <> "" Then EngravingNumericJobToken = v: Exit Function
+
+    v = ExtractCustJobFromName(CustomerJobNumber)
+    If v <> "" Then EngravingNumericJobToken = v: Exit Function
+
+    EngravingNumericJobToken = "JOB"
+End Function
+
+Private Function EngravingDateForFile() As String
+On Error Resume Next
+
+    Dim d As Date
+
+    Err.Clear
+
+    If Trim$(ShipDateText) <> "" Then
+        d = CDate(ShipDateText)
+        If Err.Number = 0 Then
+            EngravingDateForFile = Format$(d, "mm-dd-yyyy")
+            Exit Function
+        End If
+        Err.Clear
+    End If
+
+    EngravingDateForFile = Format$(Date, "mm-dd-yyyy")
+End Function
+
+Private Function EngravingTopDxfBaseName(ByVal roleLabel As String) As String
+On Error Resume Next
+
+    roleLabel = UCase$(Trim$(roleLabel))
+
+    EngravingTopDxfBaseName = CleanFileName( _
+        EngravingPrimaryJobToken() & "_" & _
+        roleLabel & " ENG_" & _
+        EngravingNumericJobToken() & "_" & _
+        EngravingDateForFile() _
+    )
+End Function
+
+Private Function EngravingTopDxfPath(ByVal roleLabel As String) As String
+    EngravingTopDxfPath = GetUniqueFilePath(CurrentJobFolder & "\" & EngravingTopDxfBaseName(roleLabel) & ".dxf")
+End Function
+
+Private Function BuildSingleEngravingKeepComponentName(ByVal label As String, _
+                                                       ByVal geometryIdx As Long, _
+                                                       ByVal quoteName As String, _
+                                                       ByVal fallbackKeys As String) As Collection
+On Error GoTo ErrHandler
+
+    Dim keepNames As New Collection
+    Dim cadIdx As Long
+
+    cadIdx = FindBaseDxfCadIndex(geometryIdx, quoteName, fallbackKeys)
+
+    If cadIdx > 0 And cadIdx <= PartCount Then
+        AddUniqueComponentName keepNames, parts(cadIdx).componentName
+        LogLine "ENGRAVING " & label & " keep component: CAD '" & parts(cadIdx).componentName & "'"
+    Else
+        LogLine "WARNING: ENGRAVING could not find component for " & label
+    End If
+
+    Set BuildSingleEngravingKeepComponentName = keepNames
+    Exit Function
+
+ErrHandler:
+    LogLine "BuildSingleEngravingKeepComponentName error (" & label & "): " & Err.Description
+    Set BuildSingleEngravingKeepComponentName = New Collection
+End Function
+
+Private Function CalculateSingleTopViewDxfScale(ByVal partL As Double, ByVal partW As Double) As Double
+    Dim usableW As Double
+    Dim usableH As Double
+    Dim sW As Double
+    Dim sh As Double
+    Dim scaleVal As Double
+
+    usableW = E_SHEET_WIDTH_IN - (2# * DXF_MARGIN_IN)
+    usableH = E_SHEET_HEIGHT_IN - (2# * DXF_MARGIN_IN)
+
+    If partW <= 0# Then partW = 42#
+    If partL <= 0# Then partL = 30#
+
+    sW = usableW / partW
+    sh = usableH / partL
+
+    scaleVal = sW
+    If sh < scaleVal Then scaleVal = sh
+
+    If scaleVal <= 0# Then scaleVal = 1#
+    If scaleVal > DXF_MAX_SCALE Then scaleVal = DXF_MAX_SCALE
+
+    CalculateSingleTopViewDxfScale = scaleVal
+End Function
+
+Private Sub SetCmsEngravingDrawingViewDisplayMode(ByVal swView As Object, ByVal displayMode As Long)
+On Error Resume Next
+
+    If swView Is Nothing Then Exit Sub
+
+    swView.UseParentStyle = False
+    swView.SetDisplayMode3 False, displayMode, False, True
+    swView.displayMode = displayMode
+End Sub
+
+Private Sub CreateSingleTopViewDxfFromNativePath(ByVal nativePath As String, _
+                                                 ByVal dxfPath As String, _
+                                                 ByVal displayMode As Long, _
+                                                 Optional ByVal layoutLengthIn As Double = 0#, _
+                                                 Optional ByVal layoutWidthIn As Double = 0#)
+On Error GoTo ErrHandler
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim drawTitle As String
+    drawTitle = ""
+
+    Dim freezeApplied As Boolean
+    freezeApplied = False
+
+    If fso.FileExists(SW_DRAWING_TEMPLATE_PATH) = False Then
+        LogLine "Engraving DXF skipped. Drawing template not found: " & SW_DRAWING_TEMPLATE_PATH
+        Exit Sub
+    End If
+
+    If fso.FileExists(nativePath) = False Then
+        LogLine "Engraving DXF skipped. Native source missing: " & nativePath
+        Exit Sub
+    End If
+
+    ' Make sure the temp/native source uses the same corrected top view.
+    EnsureNativeDxfSourceUsesCmsTop nativePath, CMS_TOP_VIEW_NAME
+
+    Dim partL As Double
+    Dim partW As Double
+    Dim partT As Double
+
+    partL = layoutLengthIn
+    partW = layoutWidthIn
+    partT = 0#
+
+    If partL <= 0# Or partW <= 0# Then
+        TryGetNativeModelDimsInches nativePath, partL, partW, partT
+    End If
+
+    If partL <= 0# Then partL = 42#
+    If partW <= 0# Then partW = 30#
+
+    Dim scaleVal As Double
+    scaleVal = CalculateSingleTopViewDxfScale(partL, partW) * CMS_ENG_DXF_SINGLE_VIEW_SCALE_SAFETY
+    If scaleVal <= 0# Then scaleVal = 0.1
+
+    Dim swDraw As Object
+    Set swDraw = swApp.NewDocument(SW_DRAWING_TEMPLATE_PATH, 0, _
+                                   E_SHEET_WIDTH_IN / INCHES_PER_METER, _
+                                   E_SHEET_HEIGHT_IN / INCHES_PER_METER)
+
+    If swDraw Is Nothing Then
+        LogLine "Engraving DXF skipped. Could not create drawing."
+        GoTo CleanExit
+    End If
+
+    drawTitle = swDraw.GetTitle
+
+    Dim errs As Long
+    swApp.ActivateDoc3 drawTitle, False, 0, errs
+    EnsureSwHidden
+
+    SetupDrawingAsESize swDraw
+
+    If FREEZE_DXF_DRAWING_GRAPHICS Then
+        FreezeDxfDrawingGraphics swDraw
+        freezeApplied = True
+    End If
+
+    Dim centerX As Double
+    Dim centerY As Double
+
+    centerX = E_SHEET_WIDTH_IN / 2#
+    centerY = E_SHEET_HEIGHT_IN / 2#
+
+    Dim topView As Object
+
+    Set topView = CreateParentDrawingView(swDraw, _
+                                          nativePath, _
+                                          CMS_TOP_VIEW_NAME, _
+                                          "*Top", _
+                                          centerX, _
+                                          centerY, _
+                                          scaleVal)
+
+    If topView Is Nothing Then
+        LogLine "Engraving DXF skipped. Could not create one top drawing view."
+        GoTo CleanExit
+    End If
+
+    ' Hidden Lines Removed = solid outline / no hidden lines visible.
+    SetCmsEngravingDrawingViewDisplayMode topView, displayMode
+
+    If freezeApplied Then
+        UnfreezeDxfDrawingGraphics
+        freezeApplied = False
+    End If
+
+    Dim saveErrs As Long
+    Dim saveWarns As Long
+
+    LogLine "Saving one-view engraving DXF: " & dxfPath
+
+    swDraw.Extension.SaveAs3 dxfPath, _
+                             swSaveAsCurrentVersion, _
+                             swSaveAsOptions_Silent, _
+                             Nothing, Nothing, saveErrs, saveWarns
+
+    LogLine "One-view engraving DXF save done. Errors=" & saveErrs & " Warnings=" & saveWarns
+
+CleanExit:
+    On Error Resume Next
+
+    If freezeApplied Then
+        UnfreezeDxfDrawingGraphics
+        freezeApplied = False
+    End If
+
+    If drawTitle <> "" Then swApp.CloseDoc drawTitle
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "CreateSingleTopViewDxfFromNativePath error: " & Err.Description
+    Resume CleanExit
+End Sub
+
+Private Sub CreateSingleComponentTopEngravingDxf(ByVal nativeSourcePath As String, _
+                                                 ByVal roleLabel As String, _
+                                                 ByVal geometryIdx As Long, _
+                                                 ByVal quoteName As String, _
+                                                 ByVal fallbackKeys As String, _
+                                                 ByVal layoutLengthIn As Double, _
+                                                 ByVal layoutWidthIn As Double)
+On Error GoTo ErrHandler
+
+    If swModel Is Nothing Then Exit Sub
+
+    If gJobIsStandardBase Then
+        LogLine "Separate engraving DXF skipped for " & roleLabel & ": standard base job."
+        Exit Sub
+    End If
+
+    If swModel.GetType <> swDocASSEMBLY Then
+        LogLine "Separate engraving DXF skipped for " & roleLabel & ": active model is not assembly."
+        Exit Sub
+    End If
+
+    Dim keepNames As Collection
+    Set keepNames = BuildSingleEngravingKeepComponentName(roleLabel, geometryIdx, quoteName, fallbackKeys)
+
+    If keepNames Is Nothing Or keepNames.Count < 1 Then
+        LogLine "Separate engraving DXF skipped for " & roleLabel & ": keep component not found."
+        Exit Sub
+    End If
+
+    Dim dxfPath As String
+    dxfPath = EngravingTopDxfPath(roleLabel)
+
+    Dim tempFolder As String
+    tempFolder = Environ$("TEMP") & "\CMS_ENG_" & CleanFileName(roleLabel) & "_" & Format(Now, "yyyymmdd_hhnnss")
+
+    EnsureFolderDeep tempFolder
+
+    Dim tempNativePath As String
+    tempNativePath = tempFolder & "\" & CleanFileName(JobBaseName & "_" & roleLabel & "_ENG_TOP") & ".sldasm"
+
+    Dim hiddenNames As Collection
+    Set hiddenNames = New Collection
+
+    LogLine "Creating separate one-view engraving DXF for " & roleLabel
+    LogLine "  Output: " & dxfPath
+    LogLine "  View: corrected CMS_TOP / *Top only"
+    LogLine "  Display: Hidden Lines Removed"
+
+    PrepareAssemblyVisibilityFast swModel
+
+    If HideAllExceptComponentNamesOnce(swModel, keepNames, hiddenNames) = False Then
+        LogLine "Separate engraving DXF failed for " & roleLabel & ": could not isolate component."
+        GoTo CleanExit
+    End If
+
+    ApplyCmsTopView swModel
+    StabilizeActiveView swModel, 100
+
+    If SaveModelCopyAs(swModel, tempNativePath) Then
+
+        CreateSingleTopViewDxfFromNativePath tempNativePath, _
+                                             dxfPath, _
+                                             CMS_ENG_DXF_HIDDEN_LINES_REMOVED, _
+                                             layoutLengthIn, _
+                                             layoutWidthIn
+
+        LogFileExistsAndSize "ENGRAVING " & roleLabel & " DXF", dxfPath
+
+    Else
+        LogLine "Separate engraving DXF failed for " & roleLabel & ": could not save temp isolated assembly."
+    End If
+
+CleanExit:
+    On Error Resume Next
+
+    If Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then
+            ShowNamedComponentsOnce swModel, hiddenNames
+        Else
+            ShowAllAssemblyComponents swModel
+        End If
+    Else
+        ShowAllAssemblyComponents swModel
+    End If
+
+    ApplyCmsTopView swModel
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If tempFolder <> "" Then
+        If fso.FolderExists(tempFolder) Then fso.DeleteFolder tempFolder, True
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "CreateSingleComponentTopEngravingDxf error (" & roleLabel & "): " & Err.Description
+    Resume CleanExit
+End Sub
+
+Private Sub ExportEngravingTopDxfFiles_IdOdTcp(ByVal nativeSourcePath As String, ByVal baseName As String)
+On Error GoTo ErrHandler
+
+    If Not EXPORT_SEPARATE_ENGRAVING_TOP_DXFS Then Exit Sub
+
+    If gJobIsStandardBase Then
+        LogLine "Separate engraving top DXFs skipped: standard base job."
+        Exit Sub
+    End If
+
+    If CurrentJobFolder = "" Then
+        LogLine "Separate engraving top DXFs skipped: CurrentJobFolder blank."
+        Exit Sub
+    End If
+
+    If swModel Is Nothing Then
+        LogLine "Separate engraving top DXFs skipped: swModel is Nothing."
+        Exit Sub
+    End If
+
+    If swModel.GetType <> swDocASSEMBLY Then
+        LogLine "Separate engraving top DXFs skipped: active model is not assembly."
+        Exit Sub
+    End If
+
+    Dim layoutL As Double
+    Dim layoutW As Double
+    Dim layoutT As Double
+
+    layoutL = 0#
+    layoutW = 0#
+    layoutT = 0#
+
+    ' Use the full native/base model dimensions for all three files so all
+    ' engraving DXFs share the same top-view scale basis.
+    If nativeSourcePath <> "" Then
+        TryGetNativeModelDimsInches nativeSourcePath, layoutL, layoutW, layoutT
+    End If
+
+    If layoutL <= 0# Or layoutW <= 0# Then
+        TryGetCmsOrientedAssemblyDims swModel, layoutL, layoutW, layoutT
+    End If
+
+    If layoutL <= 0# Then layoutL = 42#
+    If layoutW <= 0# Then layoutW = 30#
+
+    LogLine "Separate engraving top DXFs: shared layout L/W=" & _
+            FormatNumberForCsv(layoutL) & "/" & FormatNumberForCsv(layoutW)
+
+    CreateSingleComponentTopEngravingDxf nativeSourcePath, _
+                                         "ID HOLDER", _
+                                         gIdxIDH, _
+                                         "ID HOLDER", _
+                                         ID_HOLDER_KEYS, _
+                                         layoutL, _
+                                         layoutW
+
+    CreateSingleComponentTopEngravingDxf nativeSourcePath, _
+                                         "OD HOLDER", _
+                                         gIdxODH, _
+                                         "OD HOLDER", _
+                                         OD_HOLDER_KEYS, _
+                                         layoutL, _
+                                         layoutW
+
+    CreateSingleComponentTopEngravingDxf nativeSourcePath, _
+                                         "TCP", _
+                                         gIdxTCP, _
+                                         "TCP", _
+                                         KEYS_TCP, _
+                                         layoutL, _
+                                         layoutW
+
+    LogLine "Separate engraving top DXFs complete: ID HOLDER / OD HOLDER / TCP"
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ExportEngravingTopDxfFiles_IdOdTcp error: " & Err.Description
+End Sub
+
 
 ' DXF FROM SAVED X_T  (4 projected views, optional dimensions)
 ' ============================================================
@@ -6593,16 +8834,45 @@ On Error GoTo ErrHandler
     If partW <= 0 Then partW = 30#
     If partT <= 0 Then partT = 10#
 
-    ' Base sheet: auto-fit so all four projected views land on the E-size sheet.
-    CurrentDxfForce1to1 = False
+    ' Sheet and scale. Two ways round:
+    '   1:1 (default)  -- keep scale at 1 and size the sheet to the layout.
+    '   fit-to-E       -- keep the E sheet and shrink the views to fit.
     Dim scaleVal As Double
-    scaleVal = CalculateProjectedFourViewDxfScale(partL, partW, partT) * MULTIVIEW_FIT_SAFETY
-    If scaleVal <= 0 Then scaleVal = 0.1
+    Dim sheetW As Double, sheetH As Double
+
+    ' The 1:1 footprint of the whole four-view arrangement: the TOP view in the
+    ' middle (W across, L up), a projected view on each of the four sides adding
+    ' one thickness each way, plus the gap on each side.
+    Dim layoutW As Double, layoutH As Double
+    layoutW = partW + (2# * partT) + (2# * DXF_PROJECTED_VIEW_GAP_IN) + (2# * DXF_MARGIN_IN)
+    layoutH = partL + (2# * partT) + (2# * DXF_PROJECTED_VIEW_GAP_IN) + (2# * DXF_MARGIN_IN)
+
+    If DXF_BASE_FORCE_1TO1 Then
+        CurrentDxfForce1to1 = True
+        scaleVal = 1#
+        sheetW = MaxDouble(E_SHEET_WIDTH_IN, layoutW)
+        sheetH = MaxDouble(E_SHEET_HEIGHT_IN, layoutH)
+        If sheetW > DXF_MAX_SHEET_IN Then sheetW = DXF_MAX_SHEET_IN
+        If sheetH > DXF_MAX_SHEET_IN Then sheetH = DXF_MAX_SHEET_IN
+        LogLine "DXF scale: 1:1 forced. Layout needs " & Format(layoutW, "0.0") & _
+                " x " & Format(layoutH, "0.0") & " in; sheet set to " & _
+                Format(sheetW, "0.0") & " x " & Format(sheetH, "0.0") & " in " & _
+                "(part L=" & Format(partL, "0.000") & " W=" & Format(partW, "0.000") & _
+                " T=" & Format(partT, "0.000") & ", view gap=" & _
+                Format(DXF_PROJECTED_VIEW_GAP_IN, "0.0") & " in)."
+    Else
+        CurrentDxfForce1to1 = False
+        scaleVal = CalculateProjectedFourViewDxfScale(partL, partW, partT) * MULTIVIEW_FIT_SAFETY
+        If scaleVal <= 0 Then scaleVal = 0.1
+        sheetW = E_SHEET_WIDTH_IN
+        sheetH = E_SHEET_HEIGHT_IN
+        LogLine "DXF scale: fit-to-sheet " & Format(scaleVal, "0.0000") & " on E size."
+    End If
 
     Dim swDraw As Object
     Set swDraw = swApp.NewDocument(SW_DRAWING_TEMPLATE_PATH, 0, _
-                                   E_SHEET_WIDTH_IN / INCHES_PER_METER, _
-                                   E_SHEET_HEIGHT_IN / INCHES_PER_METER)
+                                   sheetW / INCHES_PER_METER, _
+                                   sheetH / INCHES_PER_METER)
     If swDraw Is Nothing Then
         LogLine "DXF skipped. Could not create drawing."
         GoTo CleanExit
@@ -6611,15 +8881,15 @@ On Error GoTo ErrHandler
     Dim errs As Long
     swApp.ActivateDoc3 drawTitle, False, 0, errs
     EnsureSwHidden
-    SetupDrawingAsESize swDraw
+    SetupDrawingSheetSize swDraw, sheetW, sheetH
     If FREEZE_DXF_DRAWING_GRAPHICS Then
         FreezeDxfDrawingGraphics swDraw
         freezeApplied = True
     End If
 
     Dim centerX As Double, centerY As Double
-    centerX = E_SHEET_WIDTH_IN / 2#
-    centerY = E_SHEET_HEIGHT_IN / 2#
+    centerX = sheetW / 2#
+    centerY = sheetH / 2#
 
     Dim projectedXOffset As Double, projectedYOffset As Double
     ' Parent view is CMS_TOP: sheet X ~ Width, sheet Y ~ Length (shop DXF labels).
@@ -6633,9 +8903,17 @@ On Error GoTo ErrHandler
     xRight = centerX + projectedXOffset: yRight = centerY
     xTop = centerX: yTop = centerY + projectedYOffset
     xBottom = centerX: yBottom = centerY - projectedYOffset
+
+    ' Clamp to the ACTUAL sheet, not to E size.
+    '
+    ' These clamps are what used to eat the view gap. Pinned against a fixed
+    ' 44 x 34 sheet, a base whose layout was bigger than the sheet had every
+    ' projected view dragged back onto the margin line and stacked on top of the
+    ' top view. Now the sheet is sized to the layout first, so on the 1:1 path
+    ' these never fire -- they are only a backstop for the fit-to-E path.
     If xLeft < DXF_MARGIN_IN Then xLeft = DXF_MARGIN_IN
-    If xRight > E_SHEET_WIDTH_IN - DXF_MARGIN_IN Then xRight = E_SHEET_WIDTH_IN - DXF_MARGIN_IN
-    If yTop > E_SHEET_HEIGHT_IN - DXF_MARGIN_IN Then yTop = E_SHEET_HEIGHT_IN - DXF_MARGIN_IN
+    If xRight > sheetW - DXF_MARGIN_IN Then xRight = sheetW - DXF_MARGIN_IN
+    If yTop > sheetH - DXF_MARGIN_IN Then yTop = sheetH - DXF_MARGIN_IN
     If yBottom < DXF_MARGIN_IN Then yBottom = DXF_MARGIN_IN
 
     Dim parentView As Object
@@ -6969,12 +9247,21 @@ On Error Resume Next
 End Sub
 
 Private Sub SetupDrawingAsESize(ByVal swDraw As Object)
+    SetupDrawingSheetSize swDraw, E_SHEET_WIDTH_IN, E_SHEET_HEIGHT_IN
+End Sub
+
+' Paper size 12 is swDwgPaperUserDefined, so any width/height is accepted. A DXF
+' carries no paper anyway -- the sheet only bounds where views may be placed.
+Private Sub SetupDrawingSheetSize(ByVal swDraw As Object, _
+                                  ByVal wIn As Double, ByVal hIn As Double)
 On Error Resume Next
     If swDraw Is Nothing Then Exit Sub
+    If wIn <= 0 Then wIn = E_SHEET_WIDTH_IN
+    If hIn <= 0 Then hIn = E_SHEET_HEIGHT_IN
     Dim swSheet As Object
     Set swSheet = swDraw.GetCurrentSheet
     If Not swSheet Is Nothing Then
-        swSheet.SetSize 12, E_SHEET_WIDTH_IN / INCHES_PER_METER, E_SHEET_HEIGHT_IN / INCHES_PER_METER
+        swSheet.SetSize 12, wIn / INCHES_PER_METER, hIn / INCHES_PER_METER
     End If
     swDraw.GraphicsRedraw2
 End Sub
@@ -6984,7 +9271,7 @@ On Error Resume Next
     If swView Is Nothing Then Exit Sub
     swView.UseParentStyle = False
     swView.SetDisplayMode3 False, 0, False, True
-    swView.DisplayMode = 0
+    swView.displayMode = 0
 End Sub
 
 Private Sub SetDrawingViewSolid(ByVal swView As Object)
@@ -6992,7 +9279,7 @@ On Error Resume Next
     If swView Is Nothing Then Exit Sub
     swView.UseParentStyle = False
     swView.SetDisplayMode3 False, 2, False, True
-    swView.DisplayMode = 2
+    swView.displayMode = 2
 End Sub
 
 Private Sub SetDrawingViewScale(ByVal swView As Object, ByVal scaleVal As Double)
@@ -7345,19 +9632,19 @@ Private Sub ResetCmsViewFrame()
     gCmsThkAxisX = 0#: gCmsThkAxisY = 0#: gCmsThkAxisZ = 1#
 End Sub
 
-Private Sub NormalizeAxis3(ByRef ax As Double, ByRef ay As Double, ByRef az As Double)
+Private Sub NormalizeAxis3(ByRef aX As Double, ByRef aY As Double, ByRef aZ As Double)
     Dim mag As Double
-    mag = Sqr(ax * ax + ay * ay + az * az)
+    mag = Sqr(aX * aX + aY * aY + aZ * aZ)
     If mag <= 0.0000001 Then
-        ax = 0#: ay = 0#: az = 0#
+        aX = 0#: aY = 0#: aZ = 0#
     Else
-        ax = ax / mag: ay = ay / mag: az = az / mag
+        aX = aX / mag: aY = aY / mag: aZ = aZ / mag
     End If
 End Sub
 
-Private Function AbsDotAxis3(ByVal ax As Double, ByVal ay As Double, ByVal az As Double, _
+Private Function AbsDotAxis3(ByVal aX As Double, ByVal aY As Double, ByVal aZ As Double, _
                              ByVal bx As Double, ByVal by As Double, ByVal bz As Double) As Double
-    AbsDotAxis3 = Abs(ax * bx + ay * by + az * bz)
+    AbsDotAxis3 = Abs(aX * bx + aY * by + aZ * bz)
 End Function
 
 ' Capture Length/Width/Thickness model-space axes from the oriented CMS views.
@@ -7449,7 +9736,7 @@ On Error GoTo eh
 
     ' --- RIGHT of TOP: confirm Thickness = right X, Length = right Y ---
     ' Only overwrite TOP-derived L/T when RIGHT axes agree with TOP (else RIGHT
-    ' from a sideways import swaps Thickness↔Length → TCP T≈18 L≈1.4).
+    ' from a sideways import swaps Thickness?Length ? TCP T˜18 L˜1.4).
     Dim topTx As Double, topTy As Double, topTz As Double
     Dim topLx As Double, topLy As Double, topLz As Double
     Dim topWx As Double, topWy As Double, topWz As Double
@@ -7532,7 +9819,7 @@ On Error GoTo eh
     End If
 
     ' Thin-plate sanity (TCP/BCP): Thickness must be the smallest extent. If the
-    ' frame mapped T↔L (symptom T≈18 L≈1.4), swap Length and Thickness axes.
+    ' frame mapped T?L (symptom T˜18 L˜1.4), swap Length and Thickness axes.
     If gIdxTCP > 0 Then
         If parts(gIdxTCP).BoxDx > 0 And parts(gIdxTCP).BoxDy > 0 And parts(gIdxTCP).BoxDz > 0 Then
             Dim chkL As Double, chkW As Double, chkT As Double
@@ -7568,6 +9855,74 @@ eh:
     LogLine "CaptureCmsViewFrameFromModel error: " & Err.Description
     ResetCmsViewFrame
     CaptureCmsViewFrameFromModel = False
+End Function
+
+' Capture the CMS view frame, retrying a transient SolidWorks COM failure.
+'
+' This runs straight after ExportBasePackage, which on a big base spends minutes
+' inside SaveAs for the EASM and the DXF. On C18621 the DXF alone took 100s and
+' the very next call came back
+'
+'     CaptureCmsViewFrameFromModel error: Automation error
+'     The object invoked has disconnected from its clients.
+'
+' i.e. the marshalled model pointer went stale while SolidWorks was busy, not a
+' real geometry problem. One retry against a freshly fetched ActiveDoc gets the
+' frame back.
+'
+' It matters because the no-frame fallback is SortThreeDimensions, and sorting is
+' documented as WRONG for CMS L/W/T (see bms_steel_dim_rules.md): thickness is the
+' view-frame axis, not the smallest dimension. C18599's rails are 10.000 thick and
+' 1.875 wide -- sorted, that plate is quoted 1.875 thick, and the steel weight and
+' price go with it.
+Private Function CaptureCmsViewFrameWithRetry(ByVal model As Object) As Boolean
+On Error Resume Next
+
+    CaptureCmsViewFrameWithRetry = False
+
+    If CaptureCmsViewFrameFromModel(model) Then
+        CaptureCmsViewFrameWithRetry = True
+        Exit Function
+    End If
+
+    LogLine "CMS view frame: first capture failed. Re-acquiring the active document and retrying " & _
+            "(a long DXF/EASM export can drop the COM pointer)."
+
+    Dim freshApp As Object
+    Dim freshModel As Object
+
+    Set freshApp = Nothing
+    Set freshApp = Application.SldWorks
+    If freshApp Is Nothing Then Set freshApp = swApp
+
+    If Not freshApp Is Nothing Then
+        Set freshModel = Nothing
+        Set freshModel = freshApp.ActiveDoc
+
+        If Not freshModel Is Nothing Then
+            StabilizeActiveView freshModel, 100
+            ApplyCmsTopView freshModel
+            StabilizeActiveView freshModel, 100
+
+            If CaptureCmsViewFrameFromModel(freshModel) Then
+                LogLine "CMS view frame: retry succeeded on the re-acquired document."
+                CaptureCmsViewFrameWithRetry = True
+                Exit Function
+            End If
+        End If
+    End If
+
+    ' Still no frame. Do not let this pass as a footnote -- every plate on the
+    ' sheet is now dimensioned by sorting, which silently mis-assigns thickness on
+    ' rails, risers and any block whose thickness is not its smallest dimension.
+    LogLine "*** WARNING: CMS VIEW FRAME UNAVAILABLE ***"
+    LogLine "    L/W/T fall back to largest-to-smallest sorting, which is NOT the CMS convention."
+    LogLine "    Thickness is the view-frame axis, so any part whose thickness is not its"
+    LogLine "    smallest dimension (rails, risers, holder/pot blocks) can be transposed here,"
+    LogLine "    and transposed thickness changes the steel weight and the price."
+    LogLine "    REVIEW every Thickness on the steel sheet for this job before ordering."
+
+    CaptureCmsViewFrameWithRetry = False
 End Function
 
 ' Map assembly-axis box extents (dx,dy,dz along model X/Y/Z) onto CMS L/W/T axes.
@@ -7994,6 +10349,8 @@ End Function
 Private Sub WriteMacroLaunchStatus(ByVal statusText As String, Optional ByVal messageText As String = "")
 On Error Resume Next
 
+    If UCase$(statusText) = "STARTED" Then DeletePricingReadyMarkerV8B
+
     EnsureFolderDeep LOCAL_WORKSPACE_ROOT
 
     Dim f As Integer
@@ -8033,6 +10390,489 @@ On Error Resume Next
             Close #f
     End Select
 End Sub
+
+' === CMS PATCH PRICING READY V8 START ===
+Private Sub WritePricingReadyMarkerV8()
+On Error Resume Next
+
+    If CurrentJobFolder = "" Then Exit Sub
+
+    EnsureFolderDeep CurrentJobFolder
+    EnsureFolderDeep LOCAL_WORKSPACE_ROOT
+
+    Dim f As Integer
+    Dim p As String
+
+    p = CurrentJobFolder & "\cms_pricing_ready.txt"
+
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Status=READY"
+    Print #f, "Time=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Print #f, "CurrentJobNumber=" & CurrentJobNumber
+    Print #f, "CurrentJobFolder=" & CurrentJobFolder
+    Print #f, "PurchasedCount=" & CStr(PpCount)
+    Close #f
+
+    p = LOCAL_WORKSPACE_ROOT & "\cms_pricing_ready_" & CleanFileName(CurrentJobNumber) & ".txt"
+
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Status=READY"
+    Print #f, "Time=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Print #f, "CurrentJobNumber=" & CurrentJobNumber
+    Print #f, "CurrentJobFolder=" & CurrentJobFolder
+    Print #f, "PurchasedCount=" & CStr(PpCount)
+    Close #f
+
+    LogLine "Pricing ready marker V8 written."
+End Sub
+' === CMS PATCH PRICING READY V8 END ===
+
+' === CMS PURCHASED COMPONENTS V8B REPAIR START ===
+' Final repair layer for purchased components and pricing-ready marker.
+'
+' Runs regardless of older V4/V5/V7 parser state.
+'
+' Rules:
+'   - ANY DME part uses cms_price_lookup.py first.
+'       5213GL -> lookup
+'       5503   -> lookup
+'   - Snap / retaining ring = $10.00 each.
+'   - Safety Strap LSS-300 = pack of 2 for $20 total -> $10 unit when qty 2.
+'   - Sleeve Bearing 6391K255 = $13.50 for 2 -> $6.75 unit when qty 2.
+'   - De-dupes purchased rows before Purchased Components Quote.csv is written.
+'   - Removes stale pricing-ready markers during STARTED status.
+'   - Writes pricing-ready marker at true macro completion.
+
+Private Function CmsV8BKey(ByVal s As String) As String
+    CmsV8BKey = NormalizeKey(s)
+End Function
+
+Private Function CmsV8BIsDmeVendor(ByVal vendorText As String) As Boolean
+    Dim u As String
+    u = UCase$(Trim$(vendorText))
+    CmsV8BIsDmeVendor = (InStr(u, "DME") > 0 Or InStr(u, "D.M.E") > 0)
+End Function
+
+Private Function CmsV8BValidDmePartNo(ByVal partNo As String) As Boolean
+On Error Resume Next
+
+    Dim p As String
+    p = UCase$(Trim$(partNo))
+
+    CmsV8BValidDmePartNo = False
+
+    If p = "" Then Exit Function
+    If Len(p) < 3 Then Exit Function
+
+    ' Reject bad partial captures like "5".
+    If IsNumeric(p) Then
+        If Len(p) < 4 Then Exit Function
+    End If
+
+    CmsV8BValidDmePartNo = True
+End Function
+
+Private Function CmsV8BJunkPurchased(ByVal desc As String, ByVal partNo As String) As Boolean
+On Error Resume Next
+
+    Dim u As String
+    u = UCase$(Trim$(desc & " " & partNo))
+
+    CmsV8BJunkPurchased = False
+
+    If Trim$(desc) = "" And Trim$(partNo) = "" Then
+        CmsV8BJunkPurchased = True
+        Exit Function
+    End If
+
+    If InStr(u, "DET NO") > 0 And InStr(u, "DESCRIPTION") > 0 Then
+        CmsV8BJunkPurchased = True
+        Exit Function
+    End If
+
+    If InStr(u, "NO. REQ") > 0 And InStr(u, "NEED-BY") > 0 Then
+        CmsV8BJunkPurchased = True
+        Exit Function
+    End If
+
+    If InStr(u, "MAT'L SPEC") > 0 And InStr(u, "MFG") > 0 Then
+        CmsV8BJunkPurchased = True
+        Exit Function
+    End If
+End Function
+
+Private Sub CmsV8BCanonicalizePurchasedRow(ByRef comp As String, _
+                                           ByRef desc As String, _
+                                           ByRef vendorText As String, _
+                                           ByRef partNo As String)
+On Error Resume Next
+
+    Dim k As String
+    Dim p As String
+
+    k = CmsV8BKey(comp & " " & desc)
+    p = UCase$(Trim$(partNo))
+
+    ' Fix partial captures from older parsers.
+    If InStr(k, "GUIDEBUSHING") > 0 Or InStr(k, "EJECTORBUSHING") > 0 Then
+        comp = "Ejector Bushing"
+        If p = "" Or p = "5" Or p = "55" Or p = "550" Then partNo = "5503"
+        If vendorText = "" Then vendorText = "DME CO"
+        Exit Sub
+    End If
+
+    If InStr(k, "LEADERPIN") > 0 Then
+        comp = "Leader Pin"
+        If vendorText = "" Then vendorText = "DME CO"
+        ' Only force 5213GL if part is blank/garbled. This BOM uses 5213GL.
+        If p = "" Or p = "107" Then partNo = "5213GL"
+        Exit Sub
+    End If
+
+    If InStr(k, "RETAININGRING") > 0 Or InStr(k, "SNAPRING") > 0 Or InStr(k, "RETAINERING") > 0 Then
+        comp = "Snap Ring"
+        If p = "" Or p = "99142A" Or p = "99142A5" Or p = "99142A52" Then partNo = "99142A520"
+        If vendorText = "" Then vendorText = "McMaster-Carr"
+        Exit Sub
+    End If
+
+    If InStr(k, "SAFETYSTRAP") > 0 Or InStr(k, "SAFTEYSTRAP") > 0 Then
+        comp = "Safety Strap"
+        If p = "" Or p = "LSS" Or p = "LSS-" Then partNo = "LSS-300"
+        If vendorText = "" Then vendorText = "PCS"
+        Exit Sub
+    End If
+
+    If InStr(k, "SLEEVEBEARING") > 0 Or (InStr(k, "SLEEVE") > 0 And InStr(k, "BEARING") > 0) Then
+        comp = "Sleeve Bearing"
+        If p = "" Then partNo = "6391K255"
+        If vendorText = "" Then vendorText = "McMaster-Carr"
+        Exit Sub
+    End If
+
+    If InStr(k, "SPACERINSULATION") > 0 Or InStr(k, "INSULATION") > 0 Then
+        comp = "Insulation"
+        If p = "" Then partNo = "HT200"
+        If vendorText = "" Then vendorText = "JACO"
+        Exit Sub
+    End If
+
+    If InStr(k, "PYROPEL") > 0 Then
+        comp = "Pyropel"
+        If p = "" Then partNo = "PYROPEL"
+        If vendorText = "" Then vendorText = "JACO"
+        Exit Sub
+    End If
+End Sub
+
+Private Function CmsV8BFixedManualUnitPrice(ByVal comp As String, _
+                                            ByVal desc As String, _
+                                            ByVal partNo As String, _
+                                            ByVal qty As Long) As Double
+On Error Resume Next
+
+    Dim k As String
+    Dim p As String
+
+    k = CmsV8BKey(comp & " " & desc)
+    p = UCase$(Trim$(partNo))
+
+    CmsV8BFixedManualUnitPrice = 0#
+
+    ' DME is never manual here. It must be looked up.
+    If p = "5213GL" Then Exit Function
+    If p = "5503" Then Exit Function
+
+    ' Snap / retaining ring = $10 each.
+    If p = "99142A520" Or InStr(k, "RETAININGRING") > 0 Or InStr(k, "SNAPRING") > 0 Or InStr(k, "RETAINERING") > 0 Then
+        CmsV8BFixedManualUnitPrice = 10#
+        Exit Function
+    End If
+
+    ' Safety strap pack of 2 = $20 total.
+    ' Quote uses Qty * Unit, so unit = 10.
+    If p = "LSS-300" Or InStr(k, "SAFETYSTRAP") > 0 Or InStr(k, "SAFTEYSTRAP") > 0 Then
+        CmsV8BFixedManualUnitPrice = 10#
+        Exit Function
+    End If
+
+    ' Sleeve bearing = $13.50 for 2.
+    ' Unit = 6.75.
+    If p = "6391K255" Or InStr(k, "SLEEVEBEARING") > 0 Or (InStr(k, "SLEEVE") > 0 And InStr(k, "BEARING") > 0) Then
+        CmsV8BFixedManualUnitPrice = 6.75
+        Exit Function
+    End If
+End Function
+
+Private Function CmsV8BPriceForPurchased(ByVal comp As String, _
+                                         ByVal desc As String, _
+                                         ByVal vendorText As String, _
+                                         ByVal partNo As String, _
+                                         ByVal qty As Long, _
+                                         ByVal currentPrice As Double) As Double
+On Error Resume Next
+
+    Dim p As Double
+
+    p = CmsV8BFixedManualUnitPrice(comp, desc, partNo, qty)
+    If p > 0# Then
+        CmsV8BPriceForPurchased = p
+        Exit Function
+    End If
+
+    ' Any DME part must use cms_price_lookup.py first.
+    If CmsV8BIsDmeVendor(vendorText) And CmsV8BValidDmePartNo(partNo) Then
+        p = 0#
+        If ENABLE_PYTHON_PRICE_LOOKUP Then
+            p = LookupDmePriceWithPython(partNo)
+            If p > 0# Then
+                SavePriceToList vendorText, partNo, p
+                CmsV8BPriceForPurchased = p
+                Exit Function
+            End If
+        End If
+
+        ' If Python lookup failed, allow exact CSV fallback only.
+        p = LookupListPriceByPartNo(partNo)
+        If p > 0# Then
+            CmsV8BPriceForPurchased = p
+            Exit Function
+        End If
+
+        LogLine "PRICE WARNING V8B: DME lookup failed for " & partNo & ". Leaving price at $0 to avoid wrong stale price."
+        CmsV8BPriceForPurchased = 0#
+        Exit Function
+    End If
+
+    ' Non-DME exact CSV fallback.
+    p = LookupListPriceByPartNo(partNo)
+    If p > 0# Then
+        CmsV8BPriceForPurchased = p
+        Exit Function
+    End If
+
+    CmsV8BPriceForPurchased = currentPrice
+End Function
+
+Private Sub CmsV8BRepricePurchasedLine(ByVal idx As Long)
+On Error Resume Next
+
+    If idx < 1 Or idx > PpCount Then Exit Sub
+
+    Dim comp As String
+    Dim desc As String
+    Dim vendorText As String
+    Dim partNo As String
+
+    comp = PpComp(idx)
+    desc = PpDesc(idx)
+    vendorText = PpVendor(idx)
+    partNo = PpPartNo(idx)
+
+    CmsV8BCanonicalizePurchasedRow comp, desc, vendorText, partNo
+
+    PpComp(idx) = comp
+    PpDesc(idx) = desc
+    PpVendor(idx) = vendorText
+    PpPartNo(idx) = partNo
+
+    PpPrice(idx) = CmsV8BPriceForPurchased(comp, desc, vendorText, partNo, PpQty(idx), PpPrice(idx))
+End Sub
+
+Private Sub NormalizePurchasedComponentsV8B()
+On Error GoTo ErrHandler
+
+    If PpCount < 1 Then Exit Sub
+
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    Dim nDesc() As String
+    Dim nQty() As Long
+    Dim nComp() As String
+    Dim nVendor() As String
+    Dim nPartNo() As String
+    Dim nPrice() As Double
+    Dim nW() As Double
+    Dim nL() As Double
+    Dim nT() As Double
+    Dim nDet() As String
+
+    ReDim nDesc(1 To PpCount)
+    ReDim nQty(1 To PpCount)
+    ReDim nComp(1 To PpCount)
+    ReDim nVendor(1 To PpCount)
+    ReDim nPartNo(1 To PpCount)
+    ReDim nPrice(1 To PpCount)
+    ReDim nW(1 To PpCount)
+    ReDim nL(1 To PpCount)
+    ReDim nT(1 To PpCount)
+    ReDim nDet(1 To PpCount)
+
+    Dim i As Long
+    Dim n As Long
+    Dim comp As String
+    Dim desc As String
+    Dim vendorText As String
+    Dim partNo As String
+    Dim key As String
+    Dim q As Long
+    Dim price As Double
+
+    n = 0
+
+    For i = 1 To PpCount
+
+        comp = PpComp(i)
+        desc = PpDesc(i)
+        vendorText = PpVendor(i)
+        partNo = PpPartNo(i)
+        q = PpQty(i)
+        If q < 1 Then q = 1
+
+        CmsV8BCanonicalizePurchasedRow comp, desc, vendorText, partNo
+
+        If CmsV8BJunkPurchased(desc, partNo) Then GoTo NextPurchasedV8B
+
+        ' Skip old bad partial guide-bushing rows if still not corrected.
+        If IsNumeric(Trim$(partNo)) Then
+            If Len(Trim$(partNo)) < 4 Then GoTo NextPurchasedV8B
+        End If
+
+        If NormalizeKey(PpDet(i)) <> "" Then
+            key = "DET:" & NormalizeKey(PpDet(i))
+        ElseIf NormalizeKey(partNo) <> "" Then
+            key = "PN:" & NormalizeKey(partNo)
+        Else
+            key = "DESC:" & NormalizeKey(comp & "|" & desc)
+        End If
+
+        If dict.Exists(key) Then GoTo NextPurchasedV8B
+        dict.Add key, True
+
+        price = CmsV8BPriceForPurchased(comp, desc, vendorText, partNo, q, PpPrice(i))
+
+        n = n + 1
+        nDesc(n) = desc
+        nQty(n) = q
+        nComp(n) = comp
+        nVendor(n) = vendorText
+        nPartNo(n) = partNo
+        nPrice(n) = price
+        nW(n) = PpW(i)
+        nL(n) = PpL(i)
+        nT(n) = PpT(i)
+        nDet(n) = PpDet(i)
+
+NextPurchasedV8B:
+    Next i
+
+    PpCount = n
+
+    If n < 1 Then
+        ReDim PpDesc(1 To 1)
+        ReDim PpQty(1 To 1)
+        ReDim PpComp(1 To 1)
+        ReDim PpVendor(1 To 1)
+        ReDim PpPartNo(1 To 1)
+        ReDim PpPrice(1 To 1)
+        ReDim PpW(1 To 1)
+        ReDim PpL(1 To 1)
+        ReDim PpT(1 To 1)
+        ReDim PpDet(1 To 1)
+        Exit Sub
+    End If
+
+    ReDim PpDesc(1 To n)
+    ReDim PpQty(1 To n)
+    ReDim PpComp(1 To n)
+    ReDim PpVendor(1 To n)
+    ReDim PpPartNo(1 To n)
+    ReDim PpPrice(1 To n)
+    ReDim PpW(1 To n)
+    ReDim PpL(1 To n)
+    ReDim PpT(1 To n)
+    ReDim PpDet(1 To n)
+
+    For i = 1 To n
+        PpDesc(i) = nDesc(i)
+        PpQty(i) = nQty(i)
+        PpComp(i) = nComp(i)
+        PpVendor(i) = nVendor(i)
+        PpPartNo(i) = nPartNo(i)
+        PpPrice(i) = nPrice(i)
+        PpW(i) = nW(i)
+        PpL(i) = nL(i)
+        PpT(i) = nT(i)
+        PpDet(i) = nDet(i)
+
+        LogLine "Purchased normalized V8B: " & PpComp(i) & _
+                " vendor=" & PpVendor(i) & _
+                " part=" & PpPartNo(i) & _
+                " qty=" & CStr(PpQty(i)) & _
+                " unit=$" & FormatNumberForCsv(PpPrice(i))
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "NormalizePurchasedComponentsV8B error: " & Err.Description
+End Sub
+
+Private Sub DeletePricingReadyMarkerV8B()
+On Error Resume Next
+
+    If CurrentJobFolder <> "" Then
+        If Dir(CurrentJobFolder & "\cms_pricing_ready.txt") <> "" Then Kill CurrentJobFolder & "\cms_pricing_ready.txt"
+    End If
+
+    If CurrentJobNumber <> "" Then
+        If Dir(LOCAL_WORKSPACE_ROOT & "\cms_pricing_ready_" & CleanFileName(CurrentJobNumber) & ".txt") <> "" Then
+            Kill LOCAL_WORKSPACE_ROOT & "\cms_pricing_ready_" & CleanFileName(CurrentJobNumber) & ".txt"
+        End If
+    End If
+End Sub
+
+Private Sub WritePricingReadyMarkerV8B()
+On Error Resume Next
+
+    If CurrentJobFolder = "" Then Exit Sub
+
+    NormalizePurchasedComponentsV8B
+
+    EnsureFolderDeep CurrentJobFolder
+    EnsureFolderDeep LOCAL_WORKSPACE_ROOT
+
+    Dim f As Integer
+    Dim p As String
+
+    p = CurrentJobFolder & "\cms_pricing_ready.txt"
+
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Status=READY"
+    Print #f, "Time=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Print #f, "CurrentJobNumber=" & CurrentJobNumber
+    Print #f, "CurrentJobFolder=" & CurrentJobFolder
+    Print #f, "PurchasedCount=" & CStr(PpCount)
+    Close #f
+
+    p = LOCAL_WORKSPACE_ROOT & "\cms_pricing_ready_" & CleanFileName(CurrentJobNumber) & ".txt"
+
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "Status=READY"
+    Print #f, "Time=" & Format(Now, "yyyy-mm-dd hh:nn:ss")
+    Print #f, "CurrentJobNumber=" & CurrentJobNumber
+    Print #f, "CurrentJobFolder=" & CurrentJobFolder
+    Print #f, "PurchasedCount=" & CStr(PpCount)
+    Close #f
+
+    LogLine "Pricing ready marker V8B written."
+End Sub
+' === CMS PURCHASED COMPONENTS V8B REPAIR END ===
 
 Private Sub LogLine(ByVal msg As String)
 On Error Resume Next
@@ -8095,12 +10935,1777 @@ End Sub
 ' ============================================================
 
 ' ============================================================
+' B-REP HOLE SIGNATURE  (feature evidence for plate naming)
+' ------------------------------------------------------------
+' Bounding box + mass + stack position cannot tell two same-footprint plates
+' apart. That is the whole failure class: a 1.38" Top Clamp Plate and a 5.889"
+' A Plate both measure 11.875 x 20, so only stack ORDER separated them -- and an
+' Ejector Retainer vs an Ejector Back-Up were split by "thinner = retainer",
+' which is a shop convention, not a measurement. Holes settle both.
+'
+' Read from the SolidWorks B-rep, NOT from STL. Three reasons:
+'
+'   1. EXACT. Surface.CylinderParams gives radius and axis analytically. A
+'      tessellated 0.201" hole is roughly a 12-sided prism, and a least-squares
+'      fit inherits that facet error -- the same problem
+'      FORCE_FINE_STL_TESSELLATION exists to reduce. Here there is no error to
+'      reduce, because nothing is tessellated.
+'
+'   2. NO MESH WRITTEN. Per-part STL export is the slowest step in a run. This
+'      pass writes no STL for any part; it reads faces off the model already open
+'      in SolidWorks. Cost is face iteration only.
+'
+'   3. ORDERING. This runs BEFORE classification, so the roles it informs are not
+'      the roles its own output depended on. Per-plate STLs are named FROM the
+'      classification, so they can never inform it.
+'
+' Cost control -- this must not turn into a 99-part face walk:
+'   * plate-shaped parts only (thickness + footprint gate)
+'   * at most HOLE_SIG_MAX_PARTS of them, largest footprint first
+'   * a per-part face budget, so one pathological import cannot stall a quote
+' On the C18522 base that is ~10 parts out of 99.
+'
+' The Const / array declarations for this block live in the module DECLARATIONS
+' SECTION at the top of the file, next to the other tuning constants -- NOT here.
+' VBA only registers module-level declarations that appear before the first
+' procedure, so leaving them next to the code that uses them compiled as
+' "Variable not defined" on HOLE_SIG_ENABLED under Option Explicit.
+' ============================================================
+
+Private Sub HoleSigReset()
+    HsReady = False
+    HsFacesWalked = 0
+    If PartCount < 1 Then Exit Sub
+    ReDim HsThru(1 To PartCount)
+    ReDim HsCbore(1 To PartCount)
+    ReDim HsCross(1 To PartCount)
+    ReDim HsMaxBore(1 To PartCount)
+    ReDim HsSig(1 To PartCount)
+    ReDim HsPockets(1 To PartCount)
+    ReDim HsPocketArea(1 To PartCount)
+    ReDim HsPocketDepth(1 To PartCount)
+    ReDim HsPocketAreaUp(1 To PartCount)
+    ReDim HsPocketAreaDn(1 To PartCount)
+    ReDim HsPocketDepthUp(1 To PartCount)
+    ReDim HsPocketDepthDn(1 To PartCount)
+    ReDim HsFillPct(1 To PartCount)
+    HsReady = True
+End Sub
+
+' Safe accessors: WritePartDimensionCsv runs even when the pass was disabled,
+' errored, or never reached, and an unallocated array raises on LBound.
+Private Function HsThruAt(ByVal i As Long) As Long
+    On Error Resume Next
+    If HsReady Then HsThruAt = HsThru(i)
+End Function
+Private Function HsCboreAt(ByVal i As Long) As Long
+    On Error Resume Next
+    If HsReady Then HsCboreAt = HsCbore(i)
+End Function
+Private Function HsCrossAt(ByVal i As Long) As Long
+    On Error Resume Next
+    If HsReady Then HsCrossAt = HsCross(i)
+End Function
+Private Function HsMaxBoreAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsMaxBoreAt = HsMaxBore(i)
+End Function
+Private Function HsSigAt(ByVal i As Long) As String
+    On Error Resume Next
+    If HsReady Then HsSigAt = HsSig(i)
+End Function
+Private Function HsPocketsAt(ByVal i As Long) As Long
+    On Error Resume Next
+    If HsReady Then HsPocketsAt = HsPockets(i)
+End Function
+Private Function HsPocketAreaAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsPocketAreaAt = HsPocketArea(i)
+End Function
+Private Function HsPocketDepthAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsPocketDepthAt = HsPocketDepth(i)
+End Function
+Private Function HsPocketAreaUpAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsPocketAreaUpAt = HsPocketAreaUp(i)
+End Function
+Private Function HsPocketAreaDnAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsPocketAreaDnAt = HsPocketAreaDn(i)
+End Function
+Private Function HsPocketDepthUpAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsPocketDepthUpAt = HsPocketDepthUp(i)
+End Function
+Private Function HsPocketDepthDnAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsPocketDepthDnAt = HsPocketDepthDn(i)
+End Function
+Private Function HsFillPctAt(ByVal i As Long) As Double
+    On Error Resume Next
+    If HsReady Then HsFillPctAt = HsFillPct(i)
+End Function
+
+' Which box axis is the plate thickness: 1=X, 2=Y, 3=Z.
+'
+' Taken from the part's OWN extents, not the CMS view frame, because this pass
+' runs before CaptureCmsViewFrameFromModel has locked that frame.
+Private Function HoleSigThicknessAxis(ByVal idx As Long) As Integer
+    Dim dx As Double, dy As Double, dz As Double
+    dx = parts(idx).BoxDx: dy = parts(idx).BoxDy: dz = parts(idx).BoxDz
+    HoleSigThicknessAxis = 3
+    If dx <= dy And dx <= dz Then
+        HoleSigThicknessAxis = 1
+    ElseIf dy <= dx And dy <= dz Then
+        HoleSigThicknessAxis = 2
+    End If
+End Function
+
+' Widest bore that could physically exist in this part.
+'
+' A bore is drilled through the part, so it is bounded by the two extents it is
+' not drilled along. Taking the two SMALLEST of the three box dimensions is the
+' safe bound for any drilling direction: whichever way the hole runs, it has to
+' fit inside a cross-section at least that big.
+Private Function HoleSigMaxCredibleBore(ByVal idx As Long) As Double
+    Dim d(1 To 3) As Double, i As Long, j As Long, t As Double
+    d(1) = parts(idx).BoxDx: d(2) = parts(idx).BoxDy: d(3) = parts(idx).BoxDz
+    For i = 1 To 2
+        For j = i + 1 To 3
+            If d(j) < d(i) Then t = d(i): d(i) = d(j): d(j) = t
+        Next j
+    Next i
+    ' d(2) is the middle extent. Allow a hair over it for measurement slop.
+    HoleSigMaxCredibleBore = d(2) * 1.02
+    If HoleSigMaxCredibleBore <= 0 Then HoleSigMaxCredibleBore = 1E+09
+End Function
+
+Private Function HoleSigQuant(ByVal v As Double) As String
+    ' Bucket size for "is this the same axis line / the same plane". Both faces of
+    ' a split cylinder wall report the identical cylinder, so this only has to be
+    ' tight enough to keep genuinely different holes apart.
+    Const HOLE_SIG_POS_QUANT As Double = 0.005
+    HoleSigQuant = Format(CDbl(Fix(v / HOLE_SIG_POS_QUANT + IIf(v < 0, -0.5, 0.5))) _
+                          * HOLE_SIG_POS_QUANT, "0.000")
+End Function
+
+' Build the list of parts worth walking, largest footprint first.
+Private Function HoleSigCandidates(ByRef outIdx() As Long) As Long
+    ' Walk at most this many parts. Standard bases have 4-8 real plates; 24 leaves
+    ' room for stripper/support/die plates and a two-base job without going wide.
+    Const HOLE_SIG_MAX_PARTS As Long = 24
+    Const HOLE_SIG_MIN_THICKNESS As Double = 0.4
+    ' Fraction of the largest footprint a part must reach to be worth walking. 0.10
+    ' keeps ejector plates and rails in, and leaves screws and dowels out.
+    Const HOLE_SIG_MIN_FOOTPRINT_FRAC As Double = 0.1
+
+    Dim i As Long, n As Long
+    Dim maxFoot As Double, fp As Double
+    HoleSigCandidates = 0
+    If PartCount < 1 Then Exit Function
+
+    For i = 1 To PartCount
+        fp = parts(i).Width * parts(i).Length
+        If fp > maxFoot Then maxFoot = fp
+    Next i
+    If maxFoot <= 0 Then Exit Function
+
+    ReDim outIdx(1 To PartCount)
+    n = 0
+    For i = 1 To PartCount
+        If parts(i).Thickness >= HOLE_SIG_MIN_THICKNESS Then
+            fp = parts(i).Width * parts(i).Length
+            ' A POT BLOCK IS SMALL AND MUST STILL BE WALKED.
+            '
+            ' The footprint gate is written for mold plates, where 10% of the base
+            ' separates plates from screws. A pot block is neither: the reference
+            ' job's 5.500 x 5.500 ID Pot is 30.25 in2 against a 15.875 x 18.375
+            ' base, which is 10.4% -- inside the gate by four tenths of one
+            ' percent. A slightly smaller pot, or a slightly larger base, drops it
+            ' silently, and then the pot's own feature columns in
+            ' XT_Export_CAD_Dimensions.csv are zeros. Those columns are what the AI
+            ' bridge and the web app read, so a dropped pot means the whole system
+            ' downstream is blind to the one part the quote turns on.
+            '
+            ' IsPotBlockGeometry is the same test ClassifyPotBlockPlatesFromCad
+            ' uses to find pots, so anything it calls a pot is walked regardless of
+            ' the fractional footprint gate.
+            '
+            ' PLATE_MIN_FOOTPRINT comes along with it because that is the OTHER
+            ' half of the classifier's pot test, and without it this admits
+            ' hardware: a PILLAR_D3-X-4-5 support pillar is 3.000 x 3.000 x 4.500,
+            ' which passes IsPotBlockGeometry on every count -- thick, blocky,
+            ' small -- and C18595 carries eight of them. Eight pillars promoted
+            ' ahead of the HOLE_SIG_MAX_PARTS cap would push real plates out of the
+            ' walk, which is the exact failure this change exists to prevent.
+            If fp >= maxFoot * HOLE_SIG_MIN_FOOTPRINT_FRAC Or _
+               HoleSigIsPotShaped(i, maxFoot) Then
+                n = n + 1
+                outIdx(n) = i
+            End If
+        End If
+    Next i
+    If n < 1 Then Exit Function
+
+    ' Footprint-descending, then capped -- so if the cap bites it is the SMALLEST
+    ' parts that go, and a pot admitted by the rule above would be first to fall.
+    ' Pots are moved to the front of the list before the cap for that reason.
+    SortIndexArrayByFootprintDesc outIdx, n
+    HoleSigPromotePotBlocks outIdx, n, maxFoot
+    If n > HOLE_SIG_MAX_PARTS Then n = HOLE_SIG_MAX_PARTS
+    HoleSigCandidates = n
+End Function
+
+' A pot block for walk-list purposes: blocky enough for IsPotBlockGeometry AND big
+' enough for PLATE_MIN_FOOTPRINT. Both halves, or support pillars qualify -- see
+' the note in HoleSigCandidates. Kept as one function so the admission test and
+' the promotion test cannot drift apart.
+Private Function HoleSigIsPotShaped(ByVal idx As Long, ByVal maxFoot As Double) As Boolean
+    HoleSigIsPotShaped = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If parts(idx).Width * parts(idx).Length < PLATE_MIN_FOOTPRINT Then Exit Function
+    HoleSigIsPotShaped = IsPotBlockGeometry(parts(idx).Thickness, parts(idx).Width, _
+                                            parts(idx).Length, maxFoot)
+End Function
+
+' Move pot-shaped parts to the front of the walk list, preserving the relative
+' order within each group. Without this the footprint sort puts every pot last and
+' the HOLE_SIG_MAX_PARTS cap is exactly what removes them.
+Private Sub HoleSigPromotePotBlocks(ByRef idx() As Long, ByVal n As Long, ByVal maxFoot As Double)
+On Error GoTo eh
+    If n < 2 Then Exit Sub
+
+    Dim reordered() As Long
+    ReDim reordered(1 To n)
+    Dim w As Long, i As Long
+    w = 0
+
+    For i = 1 To n
+        If HoleSigIsPotShaped(idx(i), maxFoot) Then
+            w = w + 1
+            reordered(w) = idx(i)
+        End If
+    Next i
+    If w = 0 Then Exit Sub          ' no pots: leave the footprint order alone
+
+    For i = 1 To n
+        If Not HoleSigIsPotShaped(idx(i), maxFoot) Then
+            w = w + 1
+            reordered(w) = idx(i)
+        End If
+    Next i
+
+    For i = 1 To n
+        idx(i) = reordered(i)
+    Next i
+    Exit Sub
+eh:
+    ' Leave the original order on any error: a worse walk order is survivable,
+    ' a corrupted index array is not.
+End Sub
+
+' Main entry. Call after the FINAL scan (post-straighten) and before the CSV is
+' written, so the numbers describe the geometry everything else measured.
+Private Sub MeasureHoleSignaturesForPlates()
+On Error GoTo eh
+    ' Set False to skip the pass entirely. Everything downstream treats the
+    ' resulting 0 / empty columns as "not measured", so nothing breaks.
+    Const HOLE_SIG_ENABLED As Boolean = True
+
+    HoleSigReset
+    If Not HOLE_SIG_ENABLED Then Exit Sub
+    If Not HsReady Then Exit Sub
+    If swModel Is Nothing Then Exit Sub
+
+    Dim cand() As Long, nCand As Long
+    nCand = HoleSigCandidates(cand)
+    If nCand < 1 Then
+        LogLine "HOLE SIG: no plate-shaped parts to measure."
+        Exit Sub
+    End If
+
+    LogStart "Measure B-rep hole signatures"
+    LogLine "HOLE SIG: walking " & nCand & " plate-shaped part(s) of " & PartCount & _
+            " (no STL written)."
+    ' Timer, not DateDiff: LogDone only resolves whole seconds, and this pass is
+    ' expected to land under one. Without millisecond truth there is no way to
+    ' tell "fast" from "silently did nothing".
+    Dim hsT0 As Single
+    hsT0 = Timer
+
+    Dim wantIdx As Object
+    Set wantIdx = CreateObject("Scripting.Dictionary")
+    wantIdx.CompareMode = 1                      ' TextCompare
+    Dim i As Long
+    For i = 1 To nCand
+        If Not wantIdx.Exists(parts(cand(i)).componentName) Then
+            wantIdx.Add parts(cand(i)).componentName, cand(i)
+        End If
+    Next i
+
+    Dim measured As Long
+    measured = 0
+
+    If swModel.GetType = swDocASSEMBLY Then
+        Dim vComps As Variant
+        vComps = swModel.GetComponents(False)
+        If IsEmpty(vComps) Then GoTo doneSig
+        Dim c As Long, swComp As Object, compModel As Object, nm As String
+        For c = 0 To UBound(vComps)
+            Set swComp = vComps(c)
+            If Not swComp Is Nothing Then
+                nm = ""
+                On Error Resume Next
+                nm = swComp.Name2
+                On Error GoTo eh
+                If nm <> "" Then
+                    If wantIdx.Exists(nm) Then
+                        Set compModel = Nothing
+                        On Error Resume Next
+                        Set compModel = swComp.GetModelDoc2
+                        On Error GoTo eh
+                        If Not compModel Is Nothing Then
+                            If MeasureOnePartHoleSignature(CLng(wantIdx(nm)), compModel) Then
+                                measured = measured + 1
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        Next c
+    ElseIf swModel.GetType = swDocPART Then
+        ' Single-part quote: every scanned row came from this one document.
+        For i = 1 To nCand
+            If MeasureOnePartHoleSignature(cand(i), swModel) Then measured = measured + 1
+        Next i
+    End If
+
+doneSig:
+    Dim hsElapsed As Double
+    hsElapsed = Timer - hsT0
+    If hsElapsed < 0 Then hsElapsed = 0            ' midnight rollover
+    LogLine "HOLE SIG: measured " & measured & " part(s), " & HsFacesWalked & " face(s), " & _
+            Format(hsElapsed, "0.00") & "s" & _
+            IIf(HsFacesWalked > 0, " (" & Format(hsElapsed * 1000# / HsFacesWalked, "0.00") & _
+            " ms/face)", "")
+
+    ' A plate-shaped candidate that could not be measured is a part whose solid
+    ' body did not come through the translation -- graphics only, or a failed
+    ' import. C18621's Imported_11-1 is a 30 MB file that returned mass 0.000 and
+    ' no faces, and the only trace was "measured 1 part(s)" against 2 candidates.
+    '
+    ' Its bounding box is still usable, so it is still quoted; what it loses is
+    ' every feature-based decision (holes, pockets, fill %, A/B side cues), and
+    ' those are what name the plate. Name the part so the miss is visible.
+    If measured < nCand Then
+        Dim missIdx As Long
+        For i = 1 To nCand
+            missIdx = cand(i)
+            If HsSig(missIdx) = "" And HsThru(missIdx) = 0 And HsPockets(missIdx) = 0 Then
+                LogLine "WARNING: no measurable solid geometry on plate-shaped part '" & _
+                        parts(missIdx).componentName & "' (idx " & missIdx & _
+                        ", bbox " & FormatNumberForCsv(parts(missIdx).Thickness) & " x " & _
+                        FormatNumberForCsv(parts(missIdx).Width) & " x " & _
+                        FormatNumberForCsv(parts(missIdx).Length) & _
+                        ", mass/volume " & FormatNumberForCsv(parts(missIdx).massValue) & ")."
+                If parts(missIdx).massValue <= 0# Then
+                    LogLine "    Mass/volume is zero: this component has no usable solid body " & _
+                            "(graphics-only or failed import). Size comes from the bounding box only, " & _
+                            "so holes, pockets and side cues are unavailable and its plate name is a " & _
+                            "position guess. Verify this plate on the steel sheet."
+                End If
+            End If
+        Next i
+    End If
+    For i = 1 To nCand
+        If HsSig(cand(i)) <> "" Or HsThru(cand(i)) > 0 Or HsPockets(cand(i)) > 0 Then
+            LogLine "  HOLE SIG [" & cand(i) & "] " & parts(cand(i)).componentName & _
+                    "  thru=" & HsThru(cand(i)) & _
+                    " cbore=" & HsCbore(cand(i)) & _
+                    " cross=" & HsCross(cand(i)) & _
+                    " maxBore=" & FormatNumberForCsv(HsMaxBore(cand(i))) & _
+                    " pockets=" & HsPockets(cand(i)) & _
+                    " pocketArea=" & FormatNumberForCsv(HsPocketArea(cand(i))) & _
+                    " deepest=" & FormatNumberForCsv(HsPocketDepth(cand(i))) & _
+                    " fill=" & Format(HsFillPct(cand(i)), "0.0") & "%" & _
+                    "  " & HsSig(cand(i))
+        End If
+    Next i
+    LogDone "Measure B-rep hole signatures"
+    Exit Sub
+eh:
+    LogLine "MeasureHoleSignaturesForPlates error (ignored, naming continues): " & Err.Description
+End Sub
+
+' Walk one part's solid bodies and fill the hole-signature slots for parts(idx).
+'
+' A single hole's wall is often split by SolidWorks into two or more faces. They
+' all report the SAME underlying cylinder (root point, axis, radius), so areas
+' are ACCUMULATED per coaxial-plus-radius group and the axial length derived from
+' the total. Counting faces instead of groups would double every hole -- the same
+' class of mistake as the duplicate scan.
+Private Function MeasureOnePartHoleSignature(ByVal idx As Long, ByVal partModel As Object) As Boolean
+On Error GoTo eh
+    ' Per-part face budget, so one pathological import cannot stall a quote.
+    Const HOLE_SIG_MAX_FACES As Long = 6000
+    ' A cylinder wall this long relative to plate thickness goes all the way through.
+    Const HOLE_SIG_THRU_FRAC As Double = 0.85
+    ' A wider coaxial cylinder no longer than this is a counterbore, not a bore.
+    Const HOLE_SIG_CBORE_MAX_FRAC As Double = 0.5
+    ' How closely a face axis must line up with the plate thickness to count as
+    ' through-thickness, and how far off to count as cross-axis.
+    Const HOLE_SIG_AXIS_ALIGN_DOT As Double = 0.94
+    Const HOLE_SIG_AXIS_CROSS_DOT As Double = 0.34
+    ' Cross-axis holes must be this deep relative to diameter to count as a water
+    ' line. Stops chamfer/relief cylinders on the plate edge from scoring.
+    Const HOLE_SIG_CROSS_MIN_LD As Double = 2#
+    ' Pocket gates. The AREA gate is what separates a cavity pocket from a
+    ' counterbore seat -- both are inset planar faces, and without it every
+    ' socket-screw seat would score as a pocket. A 1/2" c'bore seat is ~0.6 in^2;
+    ' on a 238 in^2 plate the fractional gate lands at ~3.6 in^2, so they do not
+    ' overlap.
+    Const HOLE_SIG_POCKET_MIN_AREA_IN2 As Double = 1#
+    Const HOLE_SIG_POCKET_MIN_AREA_FRAC As Double = 0.015
+    Const HOLE_SIG_POCKET_MIN_DEPTH As Double = 0.05
+
+    MeasureOnePartHoleSignature = False
+
+    Dim vBodies As Variant
+    On Error Resume Next
+    vBodies = partModel.GetBodies2(swSolidBody, False)
+    On Error GoTo eh
+    If IsEmpty(vBodies) Then Exit Function
+
+    Dim thk As Double
+    thk = parts(idx).Thickness
+    If thk <= 0 Then Exit Function
+
+    Dim tAx As Integer
+    tAx = HoleSigThicknessAxis(idx)
+    Dim tx As Double, ty As Double, tz As Double
+    tx = 0: ty = 0: tz = 0
+    Select Case tAx
+        Case 1: tx = 1
+        Case 2: ty = 1
+        Case Else: tz = 1
+    End Select
+
+    ' "pos|rad" -> accumulated cylindrical-wall area (in^2)
+    Dim areaAcc As Object
+    Set areaAcc = CreateObject("Scripting.Dictionary")
+    ' pos -> ";rad;rad;"  (which radii share this axis line)
+    Dim radsByPos As Object
+    Set radsByPos = CreateObject("Scripting.Dictionary")
+    ' cross-axis "pos|rad" -> accumulated area
+    Dim crossAcc As Object
+    Set crossAcc = CreateObject("Scripting.Dictionary")
+    ' planes facing along the thickness: "sign|pos" -> accumulated area (in^2).
+    ' Coplanar faces of one pocket floor merge, the same way split cylinder walls do.
+    Dim planeAcc As Object
+    Set planeAcc = CreateObject("Scripting.Dictionary")
+
+    ' Solid fill fraction. One extra COM call for the whole part, and it is the
+    ' cheapest pocket signal there is: a clamp plate comes out ~92-95% of its
+    ' bounding box, an A plate with a cavity ~74%, a deeply cored B plate ~50%.
+    ' Taken from mp.Volume directly, NOT derived from mp.Mass -- mass carries
+    ' whatever density SolidWorks assigned (1000 kg/m^3 when the import has no
+    ' material), while Volume is unconditionally the real geometry.
+    Dim fillPct As Double
+    On Error Resume Next
+    Dim mpv As Object
+    Set mpv = partModel.Extension.CreateMassProperty
+    If Not mpv Is Nothing Then
+        If parts(idx).BBoxVolume > 0 Then
+            fillPct = (mpv.Volume * CUIN_PER_CUBIC_METER) / parts(idx).BBoxVolume * 100#
+            If fillPct < 0 Or fillPct > 100# Then fillPct = 0#
+        End If
+    End If
+    On Error GoTo eh
+
+    Dim maxBore As Double
+    Dim faceBudget As Long
+    faceBudget = HOLE_SIG_MAX_FACES
+
+    Dim b As Long, swBody As Object, vFaces As Variant, f As Long
+    Dim swFace As Object, swSurf As Object, vCyl As Variant
+    Dim rIn As Double, aIn2 As Double
+    Dim ax As Double, ay As Double, az As Double
+    Dim ox As Double, oy As Double, oz As Double
+    Dim dotT As Double, posKey As String, radKey As String, k As String
+
+    For b = 0 To UBound(vBodies)
+        Set swBody = vBodies(b)
+        If swBody Is Nothing Then GoTo nextBody
+
+        vFaces = Empty
+        On Error Resume Next
+        vFaces = swBody.GetFaces
+        On Error GoTo eh
+        If IsEmpty(vFaces) Then GoTo nextBody
+
+        For f = 0 To UBound(vFaces)
+            If faceBudget <= 0 Then
+                LogLine "  HOLE SIG [" & idx & "] face budget reached; signature is partial."
+                Exit For
+            End If
+            faceBudget = faceBudget - 1
+
+            Set swFace = vFaces(f)
+            If swFace Is Nothing Then GoTo nextFace
+
+            Set swSurf = Nothing
+            On Error Resume Next
+            Set swSurf = swFace.GetSurface
+            On Error GoTo eh
+            If swSurf Is Nothing Then GoTo nextFace
+
+            HsFacesWalked = HsFacesWalked + 1
+
+            ' ---- planar face along the thickness: candidate pocket floor -----
+            Dim isPlane As Boolean
+            isPlane = False
+            On Error Resume Next
+            isPlane = swSurf.IsPlane
+            On Error GoTo eh
+            If isPlane Then
+                Dim vPln As Variant
+                Dim plnArea As Double
+                vPln = Empty
+                plnArea = 0
+                On Error Resume Next
+                vPln = swSurf.PlaneParams        ' 0-2 normal, 3-5 a point on the plane
+                plnArea = swFace.GetArea * INCHES_PER_METER * INCHES_PER_METER
+                On Error GoTo eh
+                If Not IsEmpty(vPln) And plnArea > 0 Then
+                    Dim nx As Double, ny As Double, nz As Double
+                    nx = CDbl(vPln(0)): ny = CDbl(vPln(1)): nz = CDbl(vPln(2))
+                    NormalizeAxis3 nx, ny, nz
+                    If AbsDotAxis3(nx, ny, nz, tx, ty, tz) >= HOLE_SIG_AXIS_ALIGN_DOT Then
+                        ' NOT named sgn: Sgn is a VBA intrinsic (sign of a number)
+                        ' and is reserved, so "Dim sgn As String" is a syntax error.
+                        Dim pAlong As Double, faceSgn As String, plKey As String
+                        pAlong = (CDbl(vPln(3)) * tx + CDbl(vPln(4)) * ty + CDbl(vPln(5)) * tz) _
+                                 * INCHES_PER_METER
+                        ' Which way the face looks. A floor opens toward the outer
+                        ' face on its normal side, so the sign sets which outer
+                        ' face the depth is measured from.
+                        faceSgn = IIf((nx * tx + ny * ty + nz * tz) >= 0, "+", "-")
+                        plKey = faceSgn & "|" & HoleSigQuant(pAlong)
+                        If planeAcc.Exists(plKey) Then
+                            planeAcc(plKey) = CDbl(planeAcc(plKey)) + plnArea
+                        Else
+                            planeAcc.Add plKey, plnArea
+                        End If
+                    End If
+                End If
+                GoTo nextFace
+            End If
+
+            Dim isCyl As Boolean
+            isCyl = False
+            On Error Resume Next
+            isCyl = swSurf.IsCylinder
+            On Error GoTo eh
+            If Not isCyl Then GoTo nextFace
+
+            vCyl = Empty
+            aIn2 = 0
+            On Error Resume Next
+            vCyl = swSurf.CylinderParams        ' 0-2 root, 3-5 axis, 6 radius (metres)
+            aIn2 = swFace.GetArea * INCHES_PER_METER * INCHES_PER_METER
+            On Error GoTo eh
+            If IsEmpty(vCyl) Then GoTo nextFace
+            If aIn2 <= 0 Then GoTo nextFace
+
+            rIn = CDbl(vCyl(6)) * INCHES_PER_METER
+            If rIn <= 0 Then GoTo nextFace
+            ox = CDbl(vCyl(0)) * INCHES_PER_METER
+            oy = CDbl(vCyl(1)) * INCHES_PER_METER
+            oz = CDbl(vCyl(2)) * INCHES_PER_METER
+            ax = CDbl(vCyl(3)): ay = CDbl(vCyl(4)): az = CDbl(vCyl(5))
+            NormalizeAxis3 ax, ay, az
+
+            ' A HOLE CANNOT BE WIDER THAN THE PART IT IS IN.
+            '
+            ' Every cylindrical face counts here, and not all of them are holes:
+            ' an outer round, a filleted corner or a large blend arc is also a
+            ' cylinder, and its radius can dwarf the part. On C17267 idx 3 this
+            ' reported MaxBoreDia = 28.047 on a plate only 23.750 wide.
+            '
+            ' The widest a real bore can be is the smaller of the two cross-section
+            ' dimensions it is drilled through, so gate on that before recording.
+            If rIn * 2# > maxBore Then
+                If rIn * 2# <= HoleSigMaxCredibleBore(idx) Then maxBore = rIn * 2#
+            End If
+
+            dotT = AbsDotAxis3(ax, ay, az, tx, ty, tz)
+            radKey = Format(rIn, "0.0000")
+
+            If dotT >= HOLE_SIG_AXIS_ALIGN_DOT Then
+
+                ' Through-thickness family. Identify the axis LINE by the two
+                ' coordinates perpendicular to the thickness direction, so both
+                ' halves of a split wall land in one group.
+                Select Case tAx
+                    Case 1: posKey = HoleSigQuant(oy) & "," & HoleSigQuant(oz)
+                    Case 2: posKey = HoleSigQuant(ox) & "," & HoleSigQuant(oz)
+                    Case Else: posKey = HoleSigQuant(ox) & "," & HoleSigQuant(oy)
+                End Select
+
+                k = posKey & "|" & radKey
+                If areaAcc.Exists(k) Then
+                    areaAcc(k) = CDbl(areaAcc(k)) + aIn2
+                Else
+                    areaAcc.Add k, aIn2
+                End If
+                If radsByPos.Exists(posKey) Then
+                    If InStr(1, CStr(radsByPos(posKey)), ";" & radKey & ";") = 0 Then
+                        radsByPos(posKey) = CStr(radsByPos(posKey)) & radKey & ";"
+                    End If
+                Else
+                    radsByPos.Add posKey, ";" & radKey & ";"
+                End If
+
+            ElseIf dotT <= HOLE_SIG_AXIS_CROSS_DOT Then
+
+                ' Cross-axis: cooling lines enter the side of a molding plate.
+                posKey = HoleSigQuant(ox) & "," & HoleSigQuant(oy) & "," & HoleSigQuant(oz)
+                k = posKey & "|" & radKey
+                If crossAcc.Exists(k) Then
+                    crossAcc(k) = CDbl(crossAcc(k)) + aIn2
+                Else
+                    crossAcc.Add k, aIn2
+                End If
+
+            End If
+
+nextFace:
+        Next f
+
+nextBody:
+    Next b
+
+    ' ---- reduce the groups to counts -------------------------------------
+    Dim nThru As Long, nCbore As Long, nCross As Long
+    Dim buckets As Object
+    Set buckets = CreateObject("Scripting.Dictionary")
+
+    Dim vKeys As Variant, kk As Long, pk As String
+    Dim rads() As String, ri As Long
+    Dim lenFor As Double, bigR As Double, bigLen As Double, smallSeen As Boolean
+    Dim hasThru As Boolean
+
+    vKeys = radsByPos.Keys
+    For kk = 0 To UBound(vKeys)
+        pk = CStr(vKeys(kk))
+        rads = Split(CStr(radsByPos(pk)), ";")
+        hasThru = False
+        bigR = 0: bigLen = 0: smallSeen = False
+
+        For ri = 0 To UBound(rads)
+            If Trim(rads(ri)) <> "" Then
+                k = pk & "|" & rads(ri)
+                lenFor = 0
+                If areaAcc.Exists(k) Then
+                    ' cylinder wall area = 2*pi*r*len  ->  len = area / (2*pi*r)
+                    lenFor = CDbl(areaAcc(k)) / (2# * PI_VALUE * CDbl(rads(ri)))
+                End If
+                If lenFor >= thk * HOLE_SIG_THRU_FRAC Then
+                    hasThru = True
+                    If Not buckets.Exists(rads(ri)) Then
+                        buckets.Add rads(ri), 1
+                    Else
+                        buckets(rads(ri)) = CLng(buckets(rads(ri))) + 1
+                    End If
+                End If
+                If CDbl(rads(ri)) > bigR Then
+                    bigR = CDbl(rads(ri))
+                    bigLen = lenFor
+                End If
+            End If
+        Next ri
+
+        If hasThru Then nThru = nThru + 1
+
+        ' Counterbore: a wider, shallow seat sharing the axis with a smaller hole.
+        If UBound(rads) >= 1 Then
+            For ri = 0 To UBound(rads)
+                If Trim(rads(ri)) <> "" Then
+                    If CDbl(rads(ri)) < bigR - 0.0005 Then smallSeen = True
+                End If
+            Next ri
+            If smallSeen And bigLen > 0 And bigLen <= thk * HOLE_SIG_CBORE_MAX_FRAC Then
+                nCbore = nCbore + 1
+            End If
+        End If
+    Next kk
+
+    vKeys = crossAcc.Keys
+    For kk = 0 To UBound(vKeys)
+        k = CStr(vKeys(kk))
+        Dim parts2() As String
+        parts2 = Split(k, "|")
+        If UBound(parts2) >= 1 Then
+            rIn = CDbl(parts2(1))
+            If rIn > 0 Then
+                lenFor = CDbl(crossAcc(k)) / (2# * PI_VALUE * rIn)
+                If lenFor >= HOLE_SIG_CROSS_MIN_LD * (rIn * 2#) Then nCross = nCross + 1
+            End If
+        End If
+    Next kk
+
+    ' ---- pockets: inset planar floors, measured from the face they open to ----
+    '
+    ' The two extreme plane positions along the thickness ARE the outer faces of
+    ' the plate. Anything between them that looks outward is a floor left behind
+    ' by material removal. Depth is measured to the outer face on the floor's own
+    ' normal side, because that is the direction the pocket opens.
+    Dim nPockets As Long, pocketArea As Double, deepest As Double
+    Dim pocketAreaUp As Double, pocketAreaDn As Double
+    Dim deepestUp As Double, deepestDn As Double
+    Dim minPos As Double, maxPos As Double, havePos As Boolean
+    Dim minArea As Double
+    minArea = MaxDouble(HOLE_SIG_POCKET_MIN_AREA_IN2, _
+                        parts(idx).Width * parts(idx).Length * HOLE_SIG_POCKET_MIN_AREA_FRAC)
+
+    vKeys = planeAcc.Keys
+    For kk = 0 To UBound(vKeys)
+        Dim pp() As String
+        pp = Split(CStr(vKeys(kk)), "|")
+        If UBound(pp) >= 1 Then
+            Dim pv As Double
+            pv = CDbl(pp(1))
+            If Not havePos Then
+                minPos = pv: maxPos = pv: havePos = True
+            Else
+                If pv < minPos Then minPos = pv
+                If pv > maxPos Then maxPos = pv
+            End If
+        End If
+    Next kk
+
+    ' WHY THIS NO LONGER USES THE FACE NORMAL SIGN.
+    '
+    ' It used to pick the measuring face from pp(0), the sign of the face normal
+    ' projected on the thickness axis. That sign is not trustworthy: PlaneParams
+    ' returns the SURFACE normal, which is reversed relative to the face whenever
+    ' Face2.FaceInSurfaceSense is False, so roughly half the faces came back
+    ' flipped. A flipped TOP outer face landed at maxPos with sign "-", scored
+    ' fDepth = maxPos - minPos, and was admitted as a pocket the full thickness of
+    ' the plate. That is exactly what C17267 showed: MaxPocketDepth equal to
+    ' Thickness on all 9 rows, and rails reporting 282 in2 of "pocket" against a
+    ' 142 in2 footprint -- 1.99x, i.e. the plate's own two outer faces.
+    '
+    ' Position settles which planes are outer faces: a floor sitting AT either
+    ' extreme plane IS an outer face, so reject it.
+    '
+    ' WHICH SIDE a floor opens to takes one more step. The obvious answer -- the
+    ' nearer outer face -- is wrong exactly where it matters most. A core pocketed
+    ' 3.0 deep into a 3.875 plate leaves its floor 0.875 from the FAR face, so
+    ' "nearest face" calls it a 0.875-deep pocket on the wrong side. That is the
+    ' deep-core case the A/B rule depends on, so nearest-face cannot be used.
+    '
+    ' The outer faces answer it directly. A plate with nothing cut into it has a
+    ' full W x L of solid face on each side; cutting a pocket into the top removes
+    ' that pocket's footprint from the TOP face and leaves the bottom untouched. So
+    ' the shortfall between footprint and measured outer-face area says which side
+    ' was opened, and by how much -- no normals, no ambiguity, and it is the "big
+    ' gap facing you" measurement in its own right.
+    Dim outerTol As Double
+    Dim areaAtMax As Double, areaAtMin As Double
+    Dim footprint As Double, openUp As Double, openDn As Double
+    outerTol = HOLE_SIG_POCKET_MIN_DEPTH
+    footprint = parts(idx).Width * parts(idx).Length
+
+    If havePos And maxPos > minPos Then
+
+        ' Solid area remaining on each outer face.
+        For kk = 0 To UBound(vKeys)
+            pp = Split(CStr(vKeys(kk)), "|")
+            If UBound(pp) >= 1 Then
+                Dim opos As Double
+                opos = CDbl(pp(1))
+                If maxPos - opos <= outerTol Then
+                    areaAtMax = areaAtMax + CDbl(planeAcc(CStr(vKeys(kk))))
+                ElseIf opos - minPos <= outerTol Then
+                    areaAtMin = areaAtMin + CDbl(planeAcc(CStr(vKeys(kk))))
+                End If
+            End If
+        Next kk
+
+        openUp = footprint - areaAtMax
+        openDn = footprint - areaAtMin
+        If openUp < 0 Then openUp = 0
+        If openDn < 0 Then openDn = 0
+
+        For kk = 0 To UBound(vKeys)
+            pp = Split(CStr(vKeys(kk)), "|")
+            If UBound(pp) >= 1 Then
+                Dim fArea As Double, fPos As Double, fDepth As Double
+                Dim dUp As Double, dDn As Double, cutFromUp As Boolean
+                fPos = CDbl(pp(1))
+                fArea = CDbl(planeAcc(CStr(vKeys(kk))))
+
+                dUp = maxPos - fPos     ' depth if cut from the +thickness face
+                dDn = fPos - minPos     ' depth if cut from the -thickness face
+
+                ' An outer face of the plate, not a pocket floor.
+                If dUp <= outerTol Or dDn <= outerTol Then GoTo nextPlane
+
+                ' Which face was opened enough to have produced this floor. Only
+                ' when the two sides are genuinely indistinguishable does this fall
+                ' back to the nearer face.
+                If openUp >= minArea Or openDn >= minArea Then
+                    cutFromUp = (openUp >= openDn)
+                Else
+                    cutFromUp = (dUp <= dDn)
+                End If
+
+                If cutFromUp Then fDepth = dUp Else fDepth = dDn
+
+                If fDepth >= HOLE_SIG_POCKET_MIN_DEPTH And fArea >= minArea Then
+                    nPockets = nPockets + 1
+                    pocketArea = pocketArea + fArea
+                    If fDepth > deepest Then deepest = fDepth
+                    If cutFromUp Then
+                        pocketAreaUp = pocketAreaUp + fArea
+                        If fDepth > deepestUp Then deepestUp = fDepth
+                    Else
+                        pocketAreaDn = pocketAreaDn + fArea
+                        If fDepth > deepestDn Then deepestDn = fDepth
+                    End If
+                End If
+            End If
+nextPlane:
+        Next kk
+    End If
+
+    HsThru(idx) = nThru
+    HsCbore(idx) = nCbore
+    HsCross(idx) = nCross
+    HsMaxBore(idx) = maxBore
+    HsSig(idx) = BuildHoleSigText(buckets)
+    HsPockets(idx) = nPockets
+    HsPocketArea(idx) = pocketArea
+    HsPocketDepth(idx) = deepest
+    HsPocketAreaUp(idx) = pocketAreaUp
+    HsPocketAreaDn(idx) = pocketAreaDn
+    HsPocketDepthUp(idx) = deepestUp
+    HsPocketDepthDn(idx) = deepestDn
+    HsFillPct(idx) = fillPct
+    MeasureOnePartHoleSignature = True
+    Exit Function
+eh:
+    LogLine "MeasureOnePartHoleSignature error on part " & idx & ": " & Err.Description
+End Function
+
+' "1.2400x4|0.5000x8" -- largest diameters first, capped so the CSV cell stays
+' short. Diameter, not radius, because that is what a print calls out.
+Private Function BuildHoleSigText(ByVal buckets As Object) As String
+    ' Cap the bucket list so the CSV cell stays short and readable.
+    Const HOLE_SIG_MAX_BUCKETS As Long = 6
+
+    On Error Resume Next
+    If buckets Is Nothing Then Exit Function
+    If buckets.Count < 1 Then Exit Function
+
+    Dim keys() As String, cnt() As Long, n As Long
+    Dim vK As Variant, i As Long, j As Long
+    vK = buckets.Keys
+    n = UBound(vK) + 1
+    ReDim keys(1 To n)
+    ReDim cnt(1 To n)
+    For i = 1 To n
+        keys(i) = CStr(vK(i - 1))
+        cnt(i) = CLng(buckets(vK(i - 1)))
+    Next i
+
+    ' Descending by radius. n is at most a few dozen; insertion sort is fine.
+    Dim ts As String, tc As Long
+    For i = 1 To n - 1
+        For j = i + 1 To n
+            If CDbl(keys(j)) > CDbl(keys(i)) Then
+                ts = keys(i): keys(i) = keys(j): keys(j) = ts
+                tc = cnt(i): cnt(i) = cnt(j): cnt(j) = tc
+            End If
+        Next j
+    Next i
+
+    Dim outText As String, used As Long
+    For i = 1 To n
+        If used >= HOLE_SIG_MAX_BUCKETS Then Exit For
+        If outText <> "" Then outText = outText & "|"
+        outText = outText & Format(CDbl(keys(i)) * 2#, "0.0000") & "x" & cnt(i)
+        used = used + 1
+    Next i
+    BuildHoleSigText = outText
+End Function
+
+' ============================================================
+' BMS POT/HOLDER FEATURE EVIDENCE
+' ------------------------------------------------------------
+' Re-measure pocket openings, bores and water lines against ONE axis handed in
+' from the assembly, so the numbers are comparable BETWEEN parts. See the Bp*
+' declarations at the top of the module for why the Hs* pocket split cannot be
+' used for pot blocks.
+'
+' Reads B-rep faces off models already open in SolidWorks. No STL, no extra
+' document opens; cost is face iteration on the six candidate blocks.
+' ============================================================
+
+Private Sub BmsPotFeatureReset()
+    BpReady = False
+    BpStackAxis = 0
+    If PartCount < 1 Then Exit Sub
+    ReDim BpOpenPlus(1 To PartCount)
+    ReDim BpOpenMinus(1 To PartCount)
+    ReDim BpDeepPlus(1 To PartCount)
+    ReDim BpDeepMinus(1 To PartCount)
+    ReDim BpBoreDia(1 To PartCount)
+    ReDim BpBoreThru(1 To PartCount)
+    ReDim BpWaterLines(1 To PartCount)
+    ReDim BpStackExtent(1 To PartCount)
+    ReDim BpMeasured(1 To PartCount)
+    BpFacesWalked = 0
+    BpReady = True
+End Sub
+
+' The part's own size along the shared stack axis. This is the dimension the
+' shop calls Thickness on a pot or holder, and it is what pairs a pot to its
+' holder -- an ID Pot and an ID Holder are ground together, so they measure the
+' same here (6.875 in the reference job) while the OD pair measures 5.970.
+Private Function BmsStackExtentOf(ByVal idx As Long, ByVal axis As Integer) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+    Select Case axis
+        Case 1: BmsStackExtentOf = parts(idx).BoxDx
+        Case 2: BmsStackExtentOf = parts(idx).BoxDy
+        Case Else: BmsStackExtentOf = parts(idx).BoxDz
+    End Select
+End Function
+
+' Cross-section perpendicular to the stack axis: the area a full-face opening
+' would remove. Product of the two box extents that are NOT the stack axis.
+Private Function BmsCrossSectionOf(ByVal idx As Long, ByVal axis As Integer) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+    Select Case axis
+        Case 1: BmsCrossSectionOf = parts(idx).BoxDy * parts(idx).BoxDz
+        Case 2: BmsCrossSectionOf = parts(idx).BoxDx * parts(idx).BoxDz
+        Case Else: BmsCrossSectionOf = parts(idx).BoxDx * parts(idx).BoxDy
+    End Select
+End Function
+
+' Which axis the mold opens along. TCP/BCP first: they are the outermost plates,
+' so the line between them IS the stack. Holder pair, then pot pair, as backups.
+' Returns 0 when no complete pair exists, and the caller then does nothing --
+' guessing an axis here would put every measurement below in the wrong frame.
+Private Function BmsStackAxisFromRoles() As Integer
+    BmsStackAxisFromRoles = 0
+
+    If gIdxTCP > 0 And gIdxBCP > 0 Then
+        BmsStackAxisFromRoles = DominantAxisBetweenParts(gIdxTCP, gIdxBCP)
+        If BmsStackAxisFromRoles > 0 Then Exit Function
+    End If
+    If gIdxIDH > 0 And gIdxODH > 0 Then
+        BmsStackAxisFromRoles = DominantAxisBetweenParts(gIdxIDH, gIdxODH)
+        If BmsStackAxisFromRoles > 0 Then Exit Function
+    End If
+    If gIdxIDP > 0 And gIdxODP > 0 Then
+        BmsStackAxisFromRoles = DominantAxisBetweenParts(gIdxIDP, gIdxODP)
+    End If
+End Function
+
+Private Sub MeasureBmsPotFeaturesAlongStackAxis(ByVal stackAxis As Integer, _
+                                                ByRef roleIdx() As Long, _
+                                                ByVal nRoles As Long)
+On Error GoTo eh
+    If Not BpReady Then Exit Sub
+    If stackAxis < 1 Or stackAxis > 3 Then Exit Sub
+    If swModel Is Nothing Then Exit Sub
+    If nRoles < 1 Then Exit Sub
+
+    BpStackAxis = stackAxis
+
+    Dim wantIdx As Object
+    Set wantIdx = CreateObject("Scripting.Dictionary")
+    wantIdx.CompareMode = 1                      ' TextCompare
+    Dim i As Long
+    For i = 1 To nRoles
+        If roleIdx(i) >= 1 And roleIdx(i) <= PartCount Then
+            If Not wantIdx.Exists(parts(roleIdx(i)).componentName) Then
+                wantIdx.Add parts(roleIdx(i)).componentName, roleIdx(i)
+            End If
+        End If
+    Next i
+    If wantIdx.Count < 1 Then Exit Sub
+
+    Dim measured As Long
+    If swModel.GetType = swDocASSEMBLY Then
+        Dim vComps As Variant
+        vComps = swModel.GetComponents(False)
+        If IsEmpty(vComps) Then GoTo doneBp
+        Dim c As Long, swComp As Object, compModel As Object, nm As String
+        For c = 0 To UBound(vComps)
+            Set swComp = vComps(c)
+            If Not swComp Is Nothing Then
+                nm = ""
+                On Error Resume Next
+                nm = swComp.Name2
+                On Error GoTo eh
+                If nm <> "" Then
+                    If wantIdx.Exists(nm) Then
+                        Set compModel = Nothing
+                        On Error Resume Next
+                        Set compModel = swComp.GetModelDoc2
+                        On Error GoTo eh
+                        If Not compModel Is Nothing Then
+                            If MeasureOneBmsPotFeature(CLng(wantIdx(nm)), compModel, stackAxis) Then
+                                measured = measured + 1
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        Next c
+    ElseIf swModel.GetType = swDocPART Then
+        For i = 1 To nRoles
+            If MeasureOneBmsPotFeature(roleIdx(i), swModel, stackAxis) Then measured = measured + 1
+        Next i
+    End If
+
+doneBp:
+    LogLine "BMS POT FEATURES: measured " & measured & " of " & nRoles & _
+            " block(s), " & BpFacesWalked & " face(s), against stack axis " & _
+            BmsAxisName(stackAxis) & "."
+    Exit Sub
+eh:
+    LogLine "MeasureBmsPotFeaturesAlongStackAxis error (ignored, naming continues): " & Err.Description
+End Sub
+
+Private Function BmsAxisName(ByVal axis As Integer) As String
+    Select Case axis
+        Case 1: BmsAxisName = "X"
+        Case 2: BmsAxisName = "Y"
+        Case 3: BmsAxisName = "Z"
+        Case Else: BmsAxisName = "?"
+    End Select
+End Function
+
+' One block, measured against the shared stack axis.
+'
+' Openings, not "pockets". The question a pot base asks is not how many floors
+' were cut but WHICH WAY THIS BLOCK FACES, and the honest measure of that is how
+' much of the cross-section is missing from each end face. A block with a full
+' molding cavity on one end shows a large shortfall there and almost none on the
+' other; that asymmetry is what pairs two halves across a parting line.
+Private Function MeasureOneBmsPotFeature(ByVal idx As Long, _
+                                          ByVal partModel As Object, _
+                                          ByVal stackAxis As Integer) As Boolean
+On Error GoTo eh
+    Const BP_MAX_FACES As Long = 6000
+    ' How closely a face normal / cylinder axis must line up with the stack axis.
+    Const BP_ALIGN_DOT As Double = 0.94
+    Const BP_CROSS_DOT As Double = 0.34
+    ' A bore this long relative to the block's stack extent goes all the way through.
+    Const BP_THRU_FRAC As Double = 0.85
+    ' Cross-axis holes must be this deep relative to diameter to be a water line
+    ' rather than a chamfer or an edge relief.
+    Const BP_WATER_MIN_LD As Double = 2#
+    ' An end face sitting this close to the extreme plane IS that end face.
+    Const BP_OUTER_TOL As Double = 0.05
+
+    MeasureOneBmsPotFeature = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    Dim stackExt As Double
+    stackExt = BmsStackExtentOf(idx, stackAxis)
+    If stackExt <= 0# Then Exit Function
+    BpStackExtent(idx) = stackExt
+
+    Dim vBodies As Variant
+    On Error Resume Next
+    vBodies = partModel.GetBodies2(swSolidBody, False)
+    On Error GoTo eh
+    If IsEmpty(vBodies) Then Exit Function
+
+    Dim sx As Double, sy As Double, sz As Double
+    sx = 0: sy = 0: sz = 0
+    Select Case stackAxis
+        Case 1: sx = 1
+        Case 2: sy = 1
+        Case Else: sz = 1
+    End Select
+
+    ' plane position along the stack -> accumulated area (in^2). Coplanar faces of
+    ' one end face or one cavity floor merge, the same way split cylinder walls do.
+    Dim planeAcc As Object
+    Set planeAcc = CreateObject("Scripting.Dictionary")
+    ' bores coaxial with the stack: "pos|rad" -> accumulated wall area
+    Dim boreAcc As Object
+    Set boreAcc = CreateObject("Scripting.Dictionary")
+    ' cross-axis holes: "pos|rad" -> accumulated wall area
+    Dim waterAcc As Object
+    Set waterAcc = CreateObject("Scripting.Dictionary")
+
+    Dim faceBudget As Long
+    faceBudget = BP_MAX_FACES
+
+    Dim b As Long, swBody As Object, vFaces As Variant, f As Long
+    Dim swFace As Object, swSurf As Object
+    Dim isPlane As Boolean, isCyl As Boolean
+    Dim vPln As Variant, vCyl As Variant
+    Dim aIn2 As Double, rIn As Double
+    Dim nx As Double, ny As Double, nz As Double
+    Dim ax As Double, ay As Double, az As Double
+    Dim ox As Double, oy As Double, oz As Double
+    Dim pAlong As Double, dotS As Double, k As String
+
+    For b = 0 To UBound(vBodies)
+        Set swBody = vBodies(b)
+        If swBody Is Nothing Then GoTo nextBody
+
+        vFaces = Empty
+        On Error Resume Next
+        vFaces = swBody.GetFaces
+        On Error GoTo eh
+        If IsEmpty(vFaces) Then GoTo nextBody
+
+        For f = 0 To UBound(vFaces)
+            If faceBudget <= 0 Then
+                LogLine "  BMS POT FEATURES [" & idx & "] face budget reached; evidence is partial."
+                Exit For
+            End If
+            faceBudget = faceBudget - 1
+
+            Set swFace = vFaces(f)
+            If swFace Is Nothing Then GoTo nextFace
+            Set swSurf = Nothing
+            On Error Resume Next
+            Set swSurf = swFace.GetSurface
+            On Error GoTo eh
+            If swSurf Is Nothing Then GoTo nextFace
+
+            BpFacesWalked = BpFacesWalked + 1
+
+            isPlane = False
+            On Error Resume Next
+            isPlane = swSurf.IsPlane
+            On Error GoTo eh
+
+            If isPlane Then
+                vPln = Empty
+                aIn2 = 0
+                On Error Resume Next
+                vPln = swSurf.PlaneParams
+                aIn2 = swFace.GetArea * INCHES_PER_METER * INCHES_PER_METER
+                On Error GoTo eh
+                If IsEmpty(vPln) Or aIn2 <= 0# Then GoTo nextFace
+                nx = CDbl(vPln(0)): ny = CDbl(vPln(1)): nz = CDbl(vPln(2))
+                NormalizeAxis3 nx, ny, nz
+                ' Face normal sign is not trustworthy (FaceInSurfaceSense), so only
+                ' ALIGNMENT is used here and the position settles the rest.
+                If AbsDotAxis3(nx, ny, nz, sx, sy, sz) >= BP_ALIGN_DOT Then
+                    pAlong = (CDbl(vPln(3)) * sx + CDbl(vPln(4)) * sy + CDbl(vPln(5)) * sz) _
+                             * INCHES_PER_METER
+                    k = HoleSigQuant(pAlong)
+                    If planeAcc.Exists(k) Then
+                        planeAcc(k) = CDbl(planeAcc(k)) + aIn2
+                    Else
+                        planeAcc.Add k, aIn2
+                    End If
+                End If
+                GoTo nextFace
+            End If
+
+            isCyl = False
+            On Error Resume Next
+            isCyl = swSurf.IsCylinder
+            On Error GoTo eh
+            If Not isCyl Then GoTo nextFace
+
+            vCyl = Empty
+            aIn2 = 0
+            On Error Resume Next
+            vCyl = swSurf.CylinderParams
+            aIn2 = swFace.GetArea * INCHES_PER_METER * INCHES_PER_METER
+            On Error GoTo eh
+            If IsEmpty(vCyl) Or aIn2 <= 0# Then GoTo nextFace
+
+            rIn = CDbl(vCyl(6)) * INCHES_PER_METER
+            If rIn <= 0# Then GoTo nextFace
+            ox = CDbl(vCyl(0)) * INCHES_PER_METER
+            oy = CDbl(vCyl(1)) * INCHES_PER_METER
+            oz = CDbl(vCyl(2)) * INCHES_PER_METER
+            ax = CDbl(vCyl(3)): ay = CDbl(vCyl(4)): az = CDbl(vCyl(5))
+            NormalizeAxis3 ax, ay, az
+
+            ' Same guard the hole signature needs: an outer round or a blend arc is
+            ' a cylinder too, and its radius can dwarf the block.
+            If rIn * 2# > HoleSigMaxCredibleBore(idx) Then GoTo nextFace
+
+            dotS = AbsDotAxis3(ax, ay, az, sx, sy, sz)
+            If dotS >= BP_ALIGN_DOT Then
+                Select Case stackAxis
+                    Case 1: k = HoleSigQuant(oy) & "," & HoleSigQuant(oz)
+                    Case 2: k = HoleSigQuant(ox) & "," & HoleSigQuant(oz)
+                    Case Else: k = HoleSigQuant(ox) & "," & HoleSigQuant(oy)
+                End Select
+                k = k & "|" & Format(rIn, "0.0000")
+                If boreAcc.Exists(k) Then
+                    boreAcc(k) = CDbl(boreAcc(k)) + aIn2
+                Else
+                    boreAcc.Add k, aIn2
+                End If
+            ElseIf dotS <= BP_CROSS_DOT Then
+                k = HoleSigQuant(ox) & "," & HoleSigQuant(oy) & "," & HoleSigQuant(oz) & _
+                    "|" & Format(rIn, "0.0000")
+                If waterAcc.Exists(k) Then
+                    waterAcc(k) = CDbl(waterAcc(k)) + aIn2
+                Else
+                    waterAcc.Add k, aIn2
+                End If
+            End If
+
+nextFace:
+        Next f
+nextBody:
+    Next b
+
+    ' ---- end faces and how much is missing from each -----------------------
+    Dim vKeys As Variant, kk As Long
+    Dim pv As Double, minPos As Double, maxPos As Double, havePos As Boolean
+    vKeys = planeAcc.Keys
+    For kk = 0 To UBound(vKeys)
+        pv = CDbl(CStr(vKeys(kk)))
+        If Not havePos Then
+            minPos = pv: maxPos = pv: havePos = True
+        Else
+            If pv < minPos Then minPos = pv
+            If pv > maxPos Then maxPos = pv
+        End If
+    Next kk
+
+    Dim cross As Double
+    cross = BmsCrossSectionOf(idx, stackAxis)
+
+    If havePos And maxPos > minPos And cross > 0# Then
+        Dim areaAtMax As Double, areaAtMin As Double
+        Dim deepPlus As Double, deepMinus As Double
+        For kk = 0 To UBound(vKeys)
+            pv = CDbl(CStr(vKeys(kk)))
+            If maxPos - pv <= BP_OUTER_TOL Then
+                areaAtMax = areaAtMax + CDbl(planeAcc(CStr(vKeys(kk))))
+            ElseIf pv - minPos <= BP_OUTER_TOL Then
+                areaAtMin = areaAtMin + CDbl(planeAcc(CStr(vKeys(kk))))
+            End If
+        Next kk
+
+        BpOpenPlus(idx) = MaxDouble(cross - areaAtMax, 0#)
+        BpOpenMinus(idx) = MaxDouble(cross - areaAtMin, 0#)
+
+        ' Deepest interior floor measured from whichever end is the more open one.
+        ' A cavity floor belongs to the face that lost the material.
+        Dim cutFromPlus As Boolean
+        cutFromPlus = (BpOpenPlus(idx) >= BpOpenMinus(idx))
+        For kk = 0 To UBound(vKeys)
+            pv = CDbl(CStr(vKeys(kk)))
+            If maxPos - pv > BP_OUTER_TOL And pv - minPos > BP_OUTER_TOL Then
+                If cutFromPlus Then
+                    If (maxPos - pv) > deepPlus Then deepPlus = maxPos - pv
+                Else
+                    If (pv - minPos) > deepMinus Then deepMinus = pv - minPos
+                End If
+            End If
+        Next kk
+        BpDeepPlus(idx) = deepPlus
+        BpDeepMinus(idx) = deepMinus
+    End If
+
+    ' ---- the pot bore: widest cylinder coaxial with the stack ---------------
+    Dim bestR As Double, bestLen As Double, lenFor As Double
+    Dim pp() As String
+    vKeys = boreAcc.Keys
+    For kk = 0 To UBound(vKeys)
+        pp = Split(CStr(vKeys(kk)), "|")
+        If UBound(pp) >= 1 Then
+            rIn = CDbl(pp(1))
+            If rIn > 0# Then
+                lenFor = CDbl(boreAcc(CStr(vKeys(kk)))) / (2# * PI_VALUE * rIn)
+                If rIn > bestR Then bestR = rIn: bestLen = lenFor
+            End If
+        End If
+    Next kk
+    BpBoreDia(idx) = bestR * 2#
+    BpBoreThru(idx) = (bestR > 0# And bestLen >= stackExt * BP_THRU_FRAC)
+
+    ' ---- water lines: deep holes running across the stack -------------------
+    Dim nWater As Long
+    vKeys = waterAcc.Keys
+    For kk = 0 To UBound(vKeys)
+        pp = Split(CStr(vKeys(kk)), "|")
+        If UBound(pp) >= 1 Then
+            rIn = CDbl(pp(1))
+            If rIn > 0# Then
+                lenFor = CDbl(waterAcc(CStr(vKeys(kk)))) / (2# * PI_VALUE * rIn)
+                If lenFor >= BP_WATER_MIN_LD * (rIn * 2#) Then nWater = nWater + 1
+            End If
+        End If
+    Next kk
+    BpWaterLines(idx) = nWater
+
+    BpMeasured(idx) = True
+    MeasureOneBmsPotFeature = True
+    Exit Function
+eh:
+    LogLine "MeasureOneBmsPotFeature error on part " & idx & ": " & Err.Description
+End Function
+
+' ============================================================
+' REFINE THE SIX BMS ROLES FROM FEATURE EVIDENCE
+' ------------------------------------------------------------
+' What ClassifyPotBlockPlatesFromCad above decides from bounding boxes alone:
+'   TCP/BCP      the two largest footprints, split by center position
+'   ID/OD holder the next two footprints, split by center position
+'   ID/OD pot    the two blockiest parts, split by center position
+'
+' Each pair is split INDEPENDENTLY, and AssignPairTopBottom re-derives its own
+' "dominant separation axis" for every pair. So the holders can be split along Y
+' while the pots -- offset laterally, as pots in a multi-cavity base usually are
+' -- get split along X, and nothing notices that the two answers disagree about
+' which end of the mold is the top. When that happens the pot pair comes back
+' swapped, ID Pot takes OD Pot's thickness, and the steel order is cut wrong.
+'
+' Three measurements settle it, in decreasing order of how much they are trusted:
+'
+'   1. THICKNESS PAIRING. A pot is set into its holder and the two are ground
+'      together, so a pot and its own holder measure the SAME along the stack
+'      axis. In the shop's reference job the ID pair is 6.875 and the OD pair
+'      5.970 -- a 0.9" separation between pairs, far outside any tolerance. This
+'      says which pot belongs to which holder without reference to position.
+'
+'   2. NESTING. The pot sits inside the holder's opening, so their centers agree
+'      in the two lateral axes and the holder's opening is at least the pot's
+'      cross-section. This confirms (1) geometrically.
+'
+'   3. FACING OPENINGS = THE PARTING LINE. The two molding halves present their
+'      cavities to each other. Measured against ONE shared axis, that shows up as
+'      the lower block opening toward +stack and the upper opening toward -stack.
+'      No other pair of blocks in a pot base has large openings facing each other.
+'
+' Only (1)+(2) agreeing triggers a correction; (3) and the water-line counts are
+' reported for the estimator. Which HALF is ID stays the existing rule
+' (ASSIGN_ID_AS_TOP), because that is a shop convention and not a measurement.
+'
+' Nothing here runs unless the geometry pass actually found a pot pair, so a
+' standard base pays nothing and cannot be touched.
+' ============================================================
+Private Sub RefineBmsRolesFromFeatureEvidence()
+On Error GoTo eh
+    ' Set False to leave the bounding-box assignment exactly as it was. The
+    ' evidence CSV is still written, so the pass can be audited with it off.
+    Const BMS_FEATURE_REFINE_ENABLED As Boolean = True
+    ' Two blocks pair as a ground set when their stack extents agree this closely.
+    Const BMS_PAIR_THICKNESS_TOL As Double = 0.02
+    ' ...and the two candidate pairings must be separated by at least this much,
+    ' or the thickness test cannot tell them apart and is not used.
+    Const BMS_PAIR_SEPARATION_MIN As Double = 0.05
+    ' A pot counts as nested in a holder when its center sits within this fraction
+    ' of the holder's lateral half-extent.
+    Const BMS_NEST_LATERAL_FRAC As Double = 0.75
+
+    If gIdxIDP <= 0 Or gIdxODP <= 0 Then
+        If gIdxIDP > 0 Or gIdxODP > 0 Then
+            LogLine "BMS feature refine skipped: only one pot block found (ID=" & gIdxIDP & _
+                    " OD=" & gIdxODP & "); nothing to pair."
+        End If
+        Exit Sub
+    End If
+
+    Dim stackAxis As Integer
+    stackAxis = BmsStackAxisFromRoles()
+    If stackAxis < 1 Or stackAxis > 3 Then
+        LogLine "BMS feature refine skipped: no usable stack axis from the assigned roles."
+        Exit Sub
+    End If
+
+    BmsPotFeatureReset
+    If Not BpReady Then Exit Sub
+
+    Dim roleIdx(1 To 6) As Long
+    Dim roleLbl(1 To 6) As String
+    roleIdx(1) = gIdxTCP: roleLbl(1) = "TCP"
+    roleIdx(2) = gIdxBCP: roleLbl(2) = "BCP"
+    roleIdx(3) = gIdxIDH: roleLbl(3) = "ID HOLDER"
+    roleIdx(4) = gIdxODH: roleLbl(4) = "OD HOLDER"
+    roleIdx(5) = gIdxIDP: roleLbl(5) = "ID POT"
+    roleIdx(6) = gIdxODP: roleLbl(6) = "OD POT"
+
+    LogStart "Refine BMS pot/holder roles from feature evidence"
+    Dim bpT0 As Single
+    bpT0 = Timer
+
+    MeasureBmsPotFeaturesAlongStackAxis stackAxis, roleIdx, 6
+
+    ' ---- log the evidence table ------------------------------------------
+    Dim i As Long
+    For i = 1 To 6
+        If roleIdx(i) > 0 And roleIdx(i) <= PartCount Then
+            LogLine "  BMS EVIDENCE " & roleLbl(i) & " [" & roleIdx(i) & "] " & _
+                    parts(roleIdx(i)).cleanName & _
+                    "  stackExt=" & FormatNumberForCsv(BpStackExtent(roleIdx(i))) & _
+                    " open+=" & FormatNumberForCsv(BpOpenPlus(roleIdx(i))) & _
+                    " open-=" & FormatNumberForCsv(BpOpenMinus(roleIdx(i))) & _
+                    " deep+=" & FormatNumberForCsv(BpDeepPlus(roleIdx(i))) & _
+                    " deep-=" & FormatNumberForCsv(BpDeepMinus(roleIdx(i))) & _
+                    " bore=" & FormatNumberForCsv(BpBoreDia(roleIdx(i))) & _
+                    IIf(BpBoreThru(roleIdx(i)), " (thru)", "") & _
+                    " water=" & BpWaterLines(roleIdx(i)) & _
+                    " ctr=" & FormatNumberForCsv(AxisCenterForBms(roleIdx(i), stackAxis)) & _
+                    IIf(BpMeasured(roleIdx(i)), "", "  [NOT MEASURED]")
+        Else
+            LogLine "  BMS EVIDENCE " & roleLbl(i) & ": not assigned."
+        End If
+    Next i
+
+    ' ---- test 1: which pot is ground to which holder ----------------------
+    Dim swapPots As Boolean
+    swapPots = False
+
+    If gIdxIDH > 0 And gIdxODH > 0 Then
+        Dim tIdh As Double, tOdh As Double, tIdp As Double, tOdp As Double
+        tIdh = BpStackExtent(gIdxIDH): tOdh = BpStackExtent(gIdxODH)
+        tIdp = BpStackExtent(gIdxIDP): tOdp = BpStackExtent(gIdxODP)
+
+        If tIdh > 0# And tOdh > 0# And tIdp > 0# And tOdp > 0# Then
+            ' Cost of keeping the current pairing vs swapping the pots.
+            Dim keepErr As Double, swapErr As Double
+            keepErr = Abs(tIdp - tIdh) + Abs(tOdp - tOdh)
+            swapErr = Abs(tOdp - tIdh) + Abs(tIdp - tOdh)
+
+            LogLine "  BMS pairing by ground thickness: keep(IDpot-IDholder,ODpot-ODholder) err=" & _
+                    FormatNumberForCsv(keepErr) & "  swap err=" & FormatNumberForCsv(swapErr) & _
+                    "  (IDh=" & FormatNumberForCsv(tIdh) & " ODh=" & FormatNumberForCsv(tOdh) & _
+                    " IDp=" & FormatNumberForCsv(tIdp) & " ODp=" & FormatNumberForCsv(tOdp) & ")"
+
+            If Abs(keepErr - swapErr) < BMS_PAIR_SEPARATION_MIN Then
+                LogLine "  BMS pairing: the two pairings are within " & _
+                        FormatNumberForCsv(BMS_PAIR_SEPARATION_MIN) & _
+                        " of each other -- thickness cannot tell them apart. No change from this test."
+            ElseIf swapErr < keepErr And swapErr <= BMS_PAIR_THICKNESS_TOL * 2# Then
+                swapPots = True
+                LogLine "  BMS pairing: SWAP indicated. Each pot matches the OTHER holder's " & _
+                        "ground thickness."
+            Else
+                LogLine "  BMS pairing: current pot/holder assignment agrees with ground thickness."
+            End If
+        Else
+            LogLine "  BMS pairing by thickness unavailable: a holder or pot has no measured " & _
+                    "stack extent."
+        End If
+    Else
+        LogLine "  BMS pairing by thickness skipped: holder pair incomplete (IDH=" & gIdxIDH & _
+                " ODH=" & gIdxODH & ")."
+    End If
+
+    ' ---- test 2: nesting confirms the pairing -----------------------------
+    Dim nestKeep As Boolean, nestSwap As Boolean
+    nestKeep = False: nestSwap = False
+    If gIdxIDH > 0 And gIdxODH > 0 Then
+        nestKeep = BmsPotNestsInHolder(gIdxIDP, gIdxIDH, stackAxis, BMS_NEST_LATERAL_FRAC) And _
+                   BmsPotNestsInHolder(gIdxODP, gIdxODH, stackAxis, BMS_NEST_LATERAL_FRAC)
+        nestSwap = BmsPotNestsInHolder(gIdxODP, gIdxIDH, stackAxis, BMS_NEST_LATERAL_FRAC) And _
+                   BmsPotNestsInHolder(gIdxIDP, gIdxODH, stackAxis, BMS_NEST_LATERAL_FRAC)
+        LogLine "  BMS nesting test: current pairing nests=" & nestKeep & _
+                "  swapped pairing nests=" & nestSwap
+
+        If swapPots And nestKeep And Not nestSwap Then
+            LogLine "  BMS pairing: thickness said SWAP but nesting says the current pairing is " & _
+                    "correct. CONFLICT -- leaving the assignment alone and flagging it."
+            LogLine "*** BMS ROLE WARNING: pot/holder pairing is ambiguous (thickness and " & _
+                    "nesting disagree). Check ID/OD Pot thickness on the steel order against " & _
+                    "the print before it goes out ***"
+            swapPots = False
+        ElseIf Not swapPots And nestSwap And Not nestKeep Then
+            LogLine "  BMS pairing: nesting says the pots belong to the OTHER holders. " & _
+                    "SWAP indicated by nesting."
+            swapPots = True
+        End If
+    End If
+
+    ' ---- apply -----------------------------------------------------------
+    If swapPots And BMS_FEATURE_REFINE_ENABLED Then
+        LogLine "*** BMS ROLE CORRECTED: swapping ID POT / OD POT. was IDpot=" & gIdxIDP & _
+                " ('" & parts(gIdxIDP).cleanName & "') ODpot=" & gIdxODP & _
+                " ('" & parts(gIdxODP).cleanName & "') ***"
+        SwapLongValues gIdxIDP, gIdxODP
+        roleIdx(5) = gIdxIDP
+        roleIdx(6) = gIdxODP
+        LogLine "    now IDpot=" & gIdxIDP & " ('" & parts(gIdxIDP).cleanName & "') ODpot=" & _
+                gIdxODP & " ('" & parts(gIdxODP).cleanName & "')"
+    ElseIf swapPots Then
+        LogLine "  BMS pot swap indicated but BMS_FEATURE_REFINE_ENABLED is False -- " & _
+                "assignment left as the bounding boxes had it."
+    End If
+
+    ' ---- test 3: report the parting line ----------------------------------
+    ReportBmsPartingLineFromOpenings stackAxis, roleIdx, roleLbl
+
+    WriteBmsPotFeatureEvidenceCsv stackAxis, roleIdx, roleLbl
+
+    Dim bpElapsed As Double
+    bpElapsed = Timer - bpT0
+    If bpElapsed < 0 Then bpElapsed = 0
+    LogLine "BMS feature refine: " & Format(bpElapsed, "0.00") & "s"
+    LogDone "Refine BMS pot/holder roles from feature evidence"
+    Exit Sub
+eh:
+    LogLine "RefineBmsRolesFromFeatureEvidence error (ignored, naming continues): " & Err.Description
+End Sub
+
+' Does this pot sit inside this holder? Centers must agree in the two axes that
+' are not the stack, and the holder must have an opening big enough to take the
+' pot's cross-section.
+Private Function BmsPotNestsInHolder(ByVal potIdx As Long, ByVal holderIdx As Long, _
+                                      ByVal stackAxis As Integer, _
+                                      ByVal lateralFrac As Double) As Boolean
+On Error GoTo eh
+    BmsPotNestsInHolder = False
+    If potIdx < 1 Or holderIdx < 1 Then Exit Function
+    If potIdx > PartCount Or holderIdx > PartCount Then Exit Function
+
+    Dim latA As Integer, latB As Integer
+    Select Case stackAxis
+        Case 1: latA = 2: latB = 3
+        Case 2: latA = 1: latB = 3
+        Case Else: latA = 1: latB = 2
+    End Select
+
+    Dim dA As Double, dB As Double
+    dA = Abs(AxisCenterForBms(potIdx, latA) - AxisCenterForBms(holderIdx, latA))
+    dB = Abs(AxisCenterForBms(potIdx, latB) - AxisCenterForBms(holderIdx, latB))
+
+    Dim hA As Double, hB As Double
+    hA = BmsBoxExtentOnAxis(holderIdx, latA) * 0.5 * lateralFrac
+    hB = BmsBoxExtentOnAxis(holderIdx, latB) * 0.5 * lateralFrac
+    If hA <= 0# Or hB <= 0# Then Exit Function
+    If dA > hA Or dB > hB Then Exit Function
+
+    ' The holder has to be open enough to receive the pot. Either end counts: a
+    ' holder can be bored through, or pocketed from the back.
+    Dim potCross As Double, holderOpen As Double
+    potCross = BmsCrossSectionOf(potIdx, stackAxis)
+    holderOpen = MaxDouble(BpOpenPlus(holderIdx), BpOpenMinus(holderIdx))
+    If potCross <= 0# Then Exit Function
+
+    ' Half the pot cross-section is a deliberately loose gate: the holder opening
+    ' is measured as missing END-FACE area, and a stepped or shouldered seat shows
+    ' less than the full pot footprint at the face.
+    If holderOpen < potCross * 0.5 Then Exit Function
+
+    BmsPotNestsInHolder = True
+    Exit Function
+eh:
+    BmsPotNestsInHolder = False
+End Function
+
+Private Function BmsBoxExtentOnAxis(ByVal idx As Long, ByVal axis As Integer) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+    Select Case axis
+        Case 1: BmsBoxExtentOnAxis = parts(idx).BoxDx
+        Case 2: BmsBoxExtentOnAxis = parts(idx).BoxDy
+        Case Else: BmsBoxExtentOnAxis = parts(idx).BoxDz
+    End Select
+End Function
+
+' The parting line is where the two molding halves meet, and the measurement that
+' finds it is two blocks whose openings face each other. Reported rather than
+' acted on: it is the number a machinist checks the DXF against, and it is also
+' the sanity check on the whole assignment -- if the parting line does not land
+' between the two pots, the pots are not the two pots.
+Private Sub ReportBmsPartingLineFromOpenings(ByVal stackAxis As Integer, _
+                                              ByRef roleIdx() As Long, _
+                                              ByRef roleLbl() As String)
+On Error GoTo eh
+    ' An opening this much smaller than the block's cross-section is a bolt
+    ' clearance or a water gallery breaking the surface, not a molding face.
+    Const BP_FACE_OPEN_MIN_FRAC As Double = 0.1
+    ' ...AND the two ends must disagree by this fraction of the cross-section.
+    '
+    ' WHY ASYMMETRY AND NOT JUST SIZE. Openings are measured as end-face area
+    ' MISSING from the bounding-box cross-section, so any block that is not a
+    ' rectangular prism reports an opening it does not have: a round pot 5.500
+    ' diameter in a 5.500 x 5.500 box loses 21% of the box area at BOTH ends purely
+    ' to the corners. On a size test alone every round pot has two "open" faces and
+    ' the pair search is choosing between artifacts. A molding cavity is on ONE end,
+    ' so the honest signal is the difference between a block's two ends -- which the
+    ' corner artifact, being identical at both, cancels out of.
+    Const BP_FACE_ASYM_MIN_FRAC As Double = 0.08
+
+    Dim bestA As Long, bestB As Long, bestScore As Double
+    Dim i As Long, j As Long
+    Dim iIdx As Long, jIdx As Long
+    Dim ci As Double, cj As Double
+    Dim lower As Long, upper As Long
+    Dim openTowardEachOther As Double
+    Dim crossI As Double, crossJ As Double
+
+    For i = 1 To 6
+        For j = i + 1 To 6
+            iIdx = roleIdx(i): jIdx = roleIdx(j)
+            If iIdx > 0 And jIdx > 0 And iIdx <= PartCount And jIdx <= PartCount Then
+                If BpMeasured(iIdx) And BpMeasured(jIdx) Then
+                    ci = AxisCenterForBms(iIdx, stackAxis)
+                    cj = AxisCenterForBms(jIdx, stackAxis)
+                    If ci < cj Then
+                        lower = iIdx: upper = jIdx
+                    Else
+                        lower = jIdx: upper = iIdx
+                    End If
+                    crossI = BmsCrossSectionOf(lower, stackAxis)
+                    crossJ = BmsCrossSectionOf(upper, stackAxis)
+                    If crossI > 0# And crossJ > 0# Then
+                        ' The lower block must open UP and the upper block DOWN --
+                        ' each by enough area to be a molding face, and each MORE
+                        ' toward the other block than away from it.
+                        If BpOpenPlus(lower) >= crossI * BP_FACE_OPEN_MIN_FRAC And _
+                           BpOpenMinus(upper) >= crossJ * BP_FACE_OPEN_MIN_FRAC And _
+                           (BpOpenPlus(lower) - BpOpenMinus(lower)) >= crossI * BP_FACE_ASYM_MIN_FRAC And _
+                           (BpOpenMinus(upper) - BpOpenPlus(upper)) >= crossJ * BP_FACE_ASYM_MIN_FRAC Then
+                            ' Score on the asymmetry, not the raw area, for the same
+                            ' reason the gate uses it: raw area rewards whichever
+                            ' block is least prismatic.
+                            openTowardEachOther = (BpOpenPlus(lower) - BpOpenMinus(lower)) + _
+                                                  (BpOpenMinus(upper) - BpOpenPlus(upper))
+                            If openTowardEachOther > bestScore Then
+                                bestScore = openTowardEachOther
+                                bestA = lower
+                                bestB = upper
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        Next j
+    Next i
+
+    If bestA = 0 Or bestB = 0 Then
+        LogLine "  BMS parting line: no pair of blocks has openings facing each other. " & _
+                "Either the molding faces are outside the six assigned roles, or the CAD " & _
+                "imported without solids."
+        Exit Sub
+    End If
+
+    Dim pl As Double
+    pl = (AxisCenterForBms(bestA, stackAxis) + BmsStackExtentOf(bestA, stackAxis) * 0.5 + _
+          AxisCenterForBms(bestB, stackAxis) - BmsStackExtentOf(bestB, stackAxis) * 0.5) * 0.5
+
+    LogLine "  BMS parting line: between " & BmsRoleLabelFor(bestA, roleIdx, roleLbl) & _
+            " [" & bestA & "] '" & parts(bestA).cleanName & _
+            "' (opens +" & FormatNumberForCsv(BpOpenPlus(bestA)) & " in2) and " & _
+            BmsRoleLabelFor(bestB, roleIdx, roleLbl) & " [" & bestB & _
+            "] '" & parts(bestB).cleanName & "' (opens -" & _
+            FormatNumberForCsv(BpOpenMinus(bestB)) & " in2) at " & BmsAxisName(stackAxis) & _
+            "=" & FormatNumberForCsv(pl)
+
+    ' Sanity check: on a pot base the parting line belongs between the two pots.
+    Dim plIsPots As Boolean
+    plIsPots = ((bestA = gIdxIDP Or bestA = gIdxODP) And (bestB = gIdxIDP Or bestB = gIdxODP))
+    If plIsPots Then
+        LogLine "  BMS parting line CONFIRMS the pot pair: the facing molding faces are the " & _
+                "two blocks named ID POT and OD POT."
+    Else
+        LogLine "*** BMS ROLE WARNING: the parting line was found between blocks that are NOT " & _
+                "the two pots. The pot assignment may be wrong -- check ID/OD POT against the " & _
+                "print ***"
+    End If
+    Exit Sub
+eh:
+    LogLine "ReportBmsPartingLineFromOpenings error: " & Err.Description
+End Sub
+
+Private Function BmsRoleLabelFor(ByVal idx As Long, _
+                                  ByRef roleIdx() As Long, _
+                                  ByRef roleLbl() As String) As String
+    Dim i As Long
+    BmsRoleLabelFor = "?"
+    For i = 1 To 6
+        If roleIdx(i) = idx Then
+            BmsRoleLabelFor = roleLbl(i)
+            Exit Function
+        End If
+    Next i
+End Function
+
+Private Sub WriteBmsPotFeatureEvidenceCsv(ByVal stackAxis As Integer, _
+                                           ByRef roleIdx() As Long, _
+                                           ByRef roleLbl() As String)
+On Error GoTo eh
+    If CurrentJobFolder = "" Then Exit Sub
+    Dim p As String
+    p = CurrentJobFolder & "\BMS_Pot_Feature_Evidence.csv"
+
+    Dim f As Integer
+    f = FreeFile
+    Open p For Output As #f
+    Print #f, "StackAxis,Role,CadIndex,Component,StackExtent,CrossSectionIn2," & _
+              "OpenPlusIn2,OpenMinusIn2,DeepPlus,DeepMinus,BoreDia,BoreThru," & _
+              "WaterLines,StackCenter,Measured"
+    Dim i As Long, idx As Long
+    For i = 1 To 6
+        idx = roleIdx(i)
+        If idx > 0 And idx <= PartCount Then
+            Print #f, BmsAxisName(stackAxis) & "," & csvText(roleLbl(i)) & "," & idx & "," & _
+                      csvText(parts(idx).componentName) & "," & _
+                      FormatNumberForCsv(BpStackExtent(idx)) & "," & _
+                      FormatNumberForCsv(BmsCrossSectionOf(idx, stackAxis)) & "," & _
+                      FormatNumberForCsv(BpOpenPlus(idx)) & "," & _
+                      FormatNumberForCsv(BpOpenMinus(idx)) & "," & _
+                      FormatNumberForCsv(BpDeepPlus(idx)) & "," & _
+                      FormatNumberForCsv(BpDeepMinus(idx)) & "," & _
+                      FormatNumberForCsv(BpBoreDia(idx)) & "," & _
+                      IIf(BpBoreThru(idx), "1", "0") & "," & _
+                      BpWaterLines(idx) & "," & _
+                      FormatNumberForCsv(AxisCenterForBms(idx, stackAxis)) & "," & _
+                      IIf(BpMeasured(idx), "1", "0")
+        Else
+            Print #f, BmsAxisName(stackAxis) & "," & csvText(roleLbl(i)) & _
+                      ",0,,0,0,0,0,0,0,0,0,0,0,0"
+        End If
+    Next i
+    Close #f
+    LogLine "Wrote BMS pot feature evidence: " & p
+    Exit Sub
+eh:
+    LogLine "WriteBmsPotFeatureEvidenceCsv error: " & Err.Description
+End Sub
+
+' ============================================================
 ' SCAN CAD PARTS  (bounding box + mass + location)
 ' ============================================================
 Private Sub ScanActiveSolidWorksDocument()
 On Error GoTo ErrHandler
     If swModel Is Nothing Then Set swModel = swApp.ActiveDoc
     If swModel Is Nothing Then Exit Sub
+
+    ' RESET HERE, not in the caller.
+    '
+    ' AddCadPart does ReDim Preserve, so a second call to this Sub APPENDS a
+    ' complete duplicate of every component instead of replacing it. The
+    ' post-straighten re-scan in ProcessOneJob / RunActiveAssembly had no reset of
+    ' its own, so PartCount doubled: a 99-part base scanned as 198 rows, each
+    ' component twice with identical dims AND identical assembly centers.
+    '
+    ' That is not a cosmetic double-up. StdFullPlateName walks the full-footprint
+    ' list positionally, so with every other entry a ghost the 4-plate stack
+    ' (Top Clamp / A / B / Bottom Clamp) was read as a 5-plate family: each real
+    ' plate took the name of the plate above it, "A Plate" and "Support Plate"
+    ' were invented at duplicate thicknesses, the real Bottom Clamp Plate fell out
+    ' of the stack into Other Hardware, and the parting line landed between the
+    ' two phantoms. Rail/ejector/pin quantities all doubled with it.
+    PartCount = 0
+    ReDim parts(1 To 1)
+    Set swAssy = Nothing
+
     If swModel.GetType = swDocASSEMBLY Then
         Set swAssy = swModel
         On Error Resume Next
@@ -8136,7 +12741,7 @@ On Error GoTo ErrHandler
     If swCompModel.GetType <> swDocPART Then Exit Sub
     Dim dx As Double, dy As Double, dz As Double
     ' MUST use assembly-space AABB (component.GetBox). Part-local bbox axes do not
-    ' match CMS Top/Right/Front when holders/pots are rotated → inconsistent W/L/T.
+    ' match CMS Top/Right/Front when holders/pots are rotated ? inconsistent W/L/T.
     If TryGetComponentBoxDimsInches(swComp, dx, dy, dz) = False Then
         If GetPartBoundingBoxInches(swCompModel, dx, dy, dz) = False Then Exit Sub
     End If
@@ -8234,9 +12839,17 @@ On Error GoTo ErrHandler
     Dim m As Double
     m = mp.Mass
     If m > 0 Then
+        ' Real material/density assigned in SolidWorks -- this is an exact mass
+        ' (accounts for every hole, pocket, fillet, since it's the model's own
+        ' analytical mass property, not a mesh/bounding-box estimate).
         GetModelMassOrVolumeValue = m * 2.20462
     Else
-        GetModelMassOrVolumeValue = mp.Volume * CUIN_PER_CUBIC_METER
+        ' No material assigned (mp.Mass came back 0) -- do NOT return raw volume
+        ' as if it were mass, that silently corrupts any downstream mass
+        ' comparison (volume in^3 and mass in lb are very different scales).
+        ' Instead, apply the shop's standard tool-steel density to the model's
+        ' exact analytical volume, so this is still a real mass in pounds.
+        GetModelMassOrVolumeValue = (mp.Volume * CUIN_PER_CUBIC_METER) * DEFAULT_TOOL_STEEL_DENSITY_LB_PER_CUIN
     End If
     Exit Function
 ErrHandler:
@@ -8245,10 +12858,17 @@ End Function
 
 Private Function GetBodyMassOrVolumeValue(ByVal swBody As Object) As Double
 On Error GoTo ErrHandler
+    ' NOTE: GetMassProperties(density) computes Mass = Volume * the density you
+    ' pass in -- it does NOT read the body's assigned material. Passing 1# here
+    ' means index 3 ("Mass") is really just Volume in disguise. Convert that
+    ' volume to an actual mass using the shop's standard tool-steel density so
+    ' this stays comparable to GetModelMassOrVolumeValue's real mass values.
     Dim vProps As Variant
     vProps = swBody.GetMassProperties(1#)
     If IsArray(vProps) Then
-        If UBound(vProps) >= 3 Then GetBodyMassOrVolumeValue = CDbl(vProps(3)) * CUIN_PER_CUBIC_METER
+        If UBound(vProps) >= 3 Then
+            GetBodyMassOrVolumeValue = (CDbl(vProps(3)) * CUIN_PER_CUBIC_METER) * DEFAULT_TOOL_STEEL_DENSITY_LB_PER_CUIN
+        End If
     End If
     Exit Function
 ErrHandler:
@@ -8313,14 +12933,28 @@ On Error GoTo ErrHandler
     Dim f As Integer
     f = FreeFile
     Open p For Output As #f
-    Print #f, "Index,Component,Qty,Thickness,Width,Length,BBoxVolume_cuin,Mass_or_Vol,CenterX,CenterY,CenterZ"
+    ' Hole columns are APPENDED, never inserted. Every reader on the Python side
+    ' (read_rows, original_row_lookup, write_outputs) keys on the header name and
+    ' ignores unknown columns, so old jobs and old tooling keep working. Parts the
+    ' hole pass skipped -- hardware, and anything past HOLE_SIG_MAX_PARTS -- write
+    ' 0 / empty, which is honestly "not measured", not "measured as none".
+    Print #f, "Index,Component,Qty,Thickness,Width,Length,BBoxVolume_cuin,Mass_or_Vol," & _
+              "CenterX,CenterY,CenterZ,NThruHoles,NCbore,NCrossAxis,MaxBoreDia,HoleSig," & _
+              "NPockets,PocketAreaIn2,MaxPocketDepth,SolidFillPct," & _
+              "PocketAreaUpIn2,PocketAreaDnIn2,PocketDepthUp,PocketDepthDn"
     Dim i As Long
     For i = 1 To PartCount
-        Print #f, i & "," & CsvText(parts(i).componentName) & "," & parts(i).Quantity & "," & _
+        Print #f, i & "," & csvText(parts(i).componentName) & "," & parts(i).Quantity & "," & _
             FormatNumberForCsv(parts(i).Thickness) & "," & FormatNumberForCsv(parts(i).Width) & "," & _
             FormatNumberForCsv(parts(i).Length) & "," & FormatNumberForCsv(parts(i).BBoxVolume) & "," & _
             FormatNumberForCsv(parts(i).massValue) & "," & FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
-            FormatNumberForCsv(parts(i).AsmCenterY) & "," & FormatNumberForCsv(parts(i).AsmCenterZ)
+            FormatNumberForCsv(parts(i).AsmCenterY) & "," & FormatNumberForCsv(parts(i).AsmCenterZ) & "," & _
+            HsThruAt(i) & "," & HsCboreAt(i) & "," & HsCrossAt(i) & "," & _
+            FormatNumberForCsv(HsMaxBoreAt(i)) & "," & csvText(HsSigAt(i)) & "," & _
+            HsPocketsAt(i) & "," & FormatNumberForCsv(HsPocketAreaAt(i)) & "," & _
+            FormatNumberForCsv(HsPocketDepthAt(i)) & "," & FormatNumberForCsv(HsFillPctAt(i)) & "," & _
+            FormatNumberForCsv(HsPocketAreaUpAt(i)) & "," & FormatNumberForCsv(HsPocketAreaDnAt(i)) & "," & _
+            FormatNumberForCsv(HsPocketDepthUpAt(i)) & "," & FormatNumberForCsv(HsPocketDepthDnAt(i))
     Next i
     Close #f
     LogLine "Wrote CAD dimensions CSV: " & p
@@ -8344,12 +12978,12 @@ On Error GoTo ErrHandler
     For i = 1 To ExportCount
         cadName = ""
         If ExportRows(i).HasCad Then cadName = parts(ExportRows(i).CadPartIndex).componentName
-        Print #f, CsvText(ExportRows(i).quoteName) & "," & ExportRows(i).Quantity & "," & _
-            CsvText(ExportRows(i).material) & "," & CsvText(ExportRows(i).Status) & "," & _
+        Print #f, csvText(ExportRows(i).quoteName) & "," & ExportRows(i).Quantity & "," & _
+            csvText(ExportRows(i).material) & "," & csvText(ExportRows(i).status) & "," & _
             FormatNumberForCsv(ExportRows(i).Thickness) & "," & FormatNumberForCsv(ExportRows(i).Width) & "," & _
             FormatNumberForCsv(ExportRows(i).Length) & "," & FormatNumberForCsv(ExportRows(i).BomThickness) & "," & _
             FormatNumberForCsv(ExportRows(i).BomWidth) & "," & FormatNumberForCsv(ExportRows(i).BomLength) & "," & _
-            CsvText(cadName)
+            csvText(cadName)
     Next i
     Close #f
     LogLine "Wrote BOM match report CSV: " & p
@@ -8360,12 +12994,12 @@ ErrHandler:
     Close #f
 End Sub
 
-Private Function CsvText(ByVal s As String) As String
+Private Function csvText(ByVal s As String) As String
     s = Replace(s, Chr(34), "'")
     If InStr(s, ",") > 0 Or InStr(s, vbCr) > 0 Or InStr(s, vbLf) > 0 Then
-        CsvText = Chr(34) & s & Chr(34)
+        csvText = Chr(34) & s & Chr(34)
     Else
-        CsvText = s
+        csvText = s
     End If
 End Function
 
@@ -8417,10 +13051,10 @@ On Error GoTo ErrHandler
 
         Print #f, _
             i & "," & _
-            CsvText(parts(i).componentName) & "," & _
-            CsvText(parts(i).cleanName) & "," & _
-            CsvText(StdCadRole(i)) & "," & _
-            CsvText(BmsRoleForCadIndex(i)) & "," & _
+            csvText(parts(i).componentName) & "," & _
+            csvText(parts(i).cleanName) & "," & _
+            csvText(StdCadRole(i)) & "," & _
+            csvText(BmsRoleForCadIndex(i)) & "," & _
             parts(i).Quantity & "," & _
             FormatNumberForCsv(parts(i).Thickness) & "," & _
             FormatNumberForCsv(parts(i).Width) & "," & _
@@ -8433,13 +13067,13 @@ On Error GoTo ErrHandler
             FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
             FormatNumberForCsv(parts(i).AsmCenterY) & "," & _
             FormatNumberForCsv(parts(i).AsmCenterZ) & "," & _
-            CsvText(CStr(parts(i).hasAsmCenter)) & "," & _
-            CsvText(parts(i).filePath) & "," & _
-            CsvText(parts(i).configName) & "," & _
-            CsvText(parts(i).bodyName) & "," & _
-            CsvText(CStr(parts(i).isBodyOnly)) & "," & _
-            CsvText(CStr(parts(i).UsedForBomMatch)) & "," & _
-            CsvText(existsText)
+            csvText(CStr(parts(i).hasAsmCenter)) & "," & _
+            csvText(parts(i).filePath) & "," & _
+            csvText(parts(i).configName) & "," & _
+            csvText(parts(i).bodyName) & "," & _
+            csvText(CStr(parts(i).isBodyOnly)) & "," & _
+            csvText(CStr(parts(i).UsedForBomMatch)) & "," & _
+            csvText(existsText)
     Next i
 
     Close #f
@@ -8494,12 +13128,12 @@ On Error Resume Next
     Dim file As Object
     For Each file In folder.Files
         Print #fileNum, _
-            CsvText(file.path) & "," & _
-            CsvText(folder.path) & "," & _
-            CsvText(file.Name) & "," & _
-            CsvText(fso.GetExtensionName(file.path)) & "," & _
+            csvText(file.path) & "," & _
+            csvText(folder.path) & "," & _
+            csvText(file.Name) & "," & _
+            csvText(fso.GetExtensionName(file.path)) & "," & _
             CStr(file.Size) & "," & _
-            CsvText(CStr(file.DateLastModified))
+            csvText(CStr(file.DateLastModified))
     Next file
 
     Dim subFolder As Object
@@ -8545,16 +13179,16 @@ On Error GoTo ErrHandler
 
         Print #f, _
             i & "," & _
-            CsvText(stdName(i)) & "," & _
+            csvText(stdName(i)) & "," & _
             StdQty(i) & "," & _
             FormatNumberForCsv(StdT(i)) & "," & _
             FormatNumberForCsv(StdW(i)) & "," & _
             FormatNumberForCsv(StdL(i)) & "," & _
-            CsvText(StdGrade(i)) & "," & _
+            csvText(StdGrade(i)) & "," & _
             StdQuoteRow(i) & "," & _
             ci & "," & _
-            CsvText(comp) & "," & _
-            CsvText(role) & "," & _
+            csvText(comp) & "," & _
+            csvText(role) & "," & _
             FormatNumberForCsv(cx) & "," & _
             FormatNumberForCsv(cy) & "," & _
             FormatNumberForCsv(cz)
@@ -8717,12 +13351,67 @@ On Error GoTo ErrHandler
     Dim rEnd As Long
     rEnd = rLo + BOM_HEADER_SEARCH_MAX_ROWS
     If rEnd > rHi Then rEnd = rHi
+    ' Find the REAL header row, not the title block.
+    '
+    ' FindBomHeaderLikeInArrayRow fires on a single cell equal to
+    ' DESCRIPTION/PART/NAME/COMPONENT. A Hewitt-style title block satisfies
+    ' that, and the reader then walked the label column underneath it and
+    ' returned six "BOM rows": Customer, Project Leader, Mold No.,
+    ' Material/shrink, Cad Location, Sample Date. That is exactly what
+    ' XT_Export_BOM_Match_Report.csv contains for C18040 and C18266 -- BomCount=6,
+    ' every row NO CAD MATCH -- which is why stdBomRoles=0 on every one of those
+    ' jobs and the classifier was forced onto geometry-only guessing while the
+    ' real plate names sat unread further down the same sheet.
+    '
+    ' A genuine BOM header row has a description column AND at least one of
+    ' qty / material / a dimension column beside it. A title block has none of
+    ' those, so keep scanning instead of accepting the first weak hit.
     Dim r As Long
+    Dim tryDesc As Long
+    Dim tryQty As Long, tryMat As Long
+    Dim tryThk As Long, tryWid As Long, tryLen As Long
+    Dim tryTempcraft As Boolean
+    Dim firstWeakRow As Long, firstWeakDesc As Long
+    firstWeakRow = 0: firstWeakDesc = 0
+
     For r = rLo To rEnd
-        descCol = FindBomHeaderLikeInArrayRow(data, r, cLo, cHi)
-        If descCol > 0 Then headerRow = r: Exit For
+        tryDesc = FindBomHeaderLikeInArrayRow(data, r, cLo, cHi)
+        If tryDesc > 0 Then
+            tryQty = FindBomQtyColumnInArrayRow(data, r, cLo, cHi)
+            tryMat = FindBomMaterialColumnInArrayRow(data, r, cLo, cHi)
+            tryThk = 0: tryWid = 0: tryLen = 0: tryTempcraft = False
+            FindBomDimensionColumnsInArrayRow data, r, cLo, cHi, tryThk, tryWid, tryLen, tryTempcraft
+
+            If tryQty > 0 Or tryMat > 0 Or tryThk > 0 Or tryWid > 0 Or tryLen > 0 Then
+                headerRow = r
+                descCol = tryDesc
+                Exit For
+            End If
+
+            ' Remember the first description-only row in case no corroborated
+            ' header exists anywhere -- better to fall back to the old
+            ' behaviour than to read nothing at all.
+            If firstWeakRow = 0 Then
+                firstWeakRow = r
+                firstWeakDesc = tryDesc
+                LogLine "BOM header candidate at row " & r & " has a description column but no " & _
+                        "qty/material/dimension column - looks like a title block. Continuing to scan."
+            End If
+        End If
     Next r
-    If headerRow = 0 Then Exit Sub
+
+    If headerRow = 0 Then
+        If firstWeakRow > 0 Then
+            headerRow = firstWeakRow
+            descCol = firstWeakDesc
+            LogLine "WARNING: no corroborated BOM header found. Falling back to the " & _
+                    "description-only row " & headerRow & "; BOM rows may be unreliable."
+        Else
+            Exit Sub
+        End If
+    Else
+        LogLine "BOM header row " & headerRow & " (descCol=" & descCol & ")."
+    End If
     qtyCol = FindBomQtyColumnInArrayRow(data, headerRow, cLo, cHi)
     matCol = FindBomMaterialColumnInArrayRow(data, headerRow, cLo, cHi)
     FindBomDimensionColumnsInArrayRow data, headerRow, cLo, cHi, thkCol, widCol, lenCol, sheetIsTempcraft
@@ -8763,7 +13452,7 @@ On Error GoTo ErrHandler
             blanks = 0
             qty = 1
             If qtyCol > 0 Then
-                If IsNumeric(GetArrayValue(data, r, qtyCol)) Then qty = CLng(Val(GetArrayValue(data, r, qtyCol)))
+                If IsNumeric(GetArrayValue(data, r, qtyCol)) Then qty = CLng(val(GetArrayValue(data, r, qtyCol)))
             End If
             If qty < 1 Then qty = 1
             mat = ""
@@ -8771,12 +13460,12 @@ On Error GoTo ErrHandler
             tt = 0#: ww = 0#: ll = 0#: hasD = False
             Dim rowIsTempcraft As Boolean
             rowIsTempcraft = sheetIsTempcraft
-            If thkCol > 0 Then tt = Val(GetArrayValue(data, r, thkCol))
-            If widCol > 0 Then ww = Val(GetArrayValue(data, r, widCol))
-            If lenCol > 0 Then ll = Val(GetArrayValue(data, r, lenCol))
+            If thkCol > 0 Then tt = val(GetArrayValue(data, r, thkCol))
+            If widCol > 0 Then ww = val(GetArrayValue(data, r, widCol))
+            If lenCol > 0 Then ll = val(GetArrayValue(data, r, lenCol))
             ' Tempcraft Lth/Wth/Hgt are finished sizes in FILE order — do not
             ' SortThreeDimensions here. MapTempcraftBomDimsToCmsSteel remaps by
-            ' plate role at steel-fill time (holders/pots are not L≥W≥T).
+            ' plate role at steel-fill time (holders/pots are not L=W=T).
             If tt > 0 And ww > 0 And ll > 0 Then
                 Dim srtL As Double, srtW As Double, srtT As Double
                 SortThreeDimensions tt, ww, ll, srtL, srtW, srtT
@@ -8968,7 +13657,7 @@ On Error GoTo ErrHandler
     Set sh = CreateObject("WScript.Shell")
     Dim cmd As String
     cmd = Chr(34) & exe & Chr(34) & " -layout " & Chr(34) & pdfPath & Chr(34) & " " & Chr(34) & txtPath & Chr(34)
-    sh.Run "cmd /c " & Chr(34) & cmd & Chr(34), 0, True
+    sh.run "cmd /c " & Chr(34) & cmd & Chr(34), 0, True
     If fso.FileExists(txtPath) = False Then
         LogLine "pdftotext produced no output (exe=" & exe & "). Is Poppler installed / on PATH?"
         Exit Sub
@@ -9026,10 +13715,407 @@ ErrHandler:
     ReadAllTextFile = ""
 End Function
 
+' === CMS PATCH PURCHASED PARTS V4 START ===
+' Reads the FULL pdftotext BOM text first, so split rows like:
+'   107 LEADER PIN 1.00"
+'   DIA x 9.25" L Outsource 4 DME CO 5213GL
+' are joined and captured correctly.
+'
+' Also de-dupes purchased rows and handles PCS LSS-300 safety straps as
+' pack-of-2 when CSV/Python gives $20 for qty 2.
+
+Private Function NormalizeTempcraftAllTextV4(ByVal s As String) As String
+On Error GoTo ErrHandler
+
+    s = Replace(s, vbCrLf, vbLf)
+    s = Replace(s, vbCr, vbLf)
+
+    ' Normalize broken vendor words.
+    s = Replace(s, "MANUFACTURIN" & vbLf & "G", "MANUFACTURING")
+    s = Replace(s, "MANUFACTURIN G", "MANUFACTURING")
+    s = Replace(s, "McMASTER" & vbLf & "-CARR", "McMASTER-CARR")
+    s = Replace(s, "MCMASTER" & vbLf & "-CARR", "MCMASTER-CARR")
+
+    ' Turn line breaks into spaces for one big regex pass.
+    s = Replace(s, vbLf, " ")
+
+    Do While InStr(s, "  ") > 0
+        s = Replace(s, "  ", " ")
+    Loop
+
+    ' Add a missing space between a part number and the next 3-digit Det No.
+    ' Examples:
+    '   5213GL108 GUIDE BUSHING
+    '   99142A520110 SAFETY STRAP
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "([A-Z0-9\.\-""])([0-9]{3}\s+[A-Z])"
+    s = re.Replace(s, "$1 $2")
+
+    NormalizeTempcraftAllTextV4 = Trim$(s)
+    Exit Function
+
+ErrHandler:
+    NormalizeTempcraftAllTextV4 = s
+End Function
+
+Private Function IsPurchasedJunkOrBlankV4(ByVal desc As String, ByVal partNo As String) As Boolean
+On Error Resume Next
+
+    Dim u As String
+    u = UCase$(Trim$(desc & " " & partNo))
+
+    IsPurchasedJunkOrBlankV4 = False
+
+    If Trim$(desc) = "" And Trim$(partNo) = "" Then
+        IsPurchasedJunkOrBlankV4 = True
+        Exit Function
+    End If
+
+    If InStr(u, "DET NO") > 0 And InStr(u, "DESCRIPTION") > 0 Then
+        IsPurchasedJunkOrBlankV4 = True
+        Exit Function
+    End If
+
+    If InStr(u, "NO. REQ") > 0 And InStr(u, "NEED-BY") > 0 Then
+        IsPurchasedJunkOrBlankV4 = True
+        Exit Function
+    End If
+
+    If InStr(u, "MANUFACTURER") > 0 And InStr(u, "PURCHASED PARTS") > 0 Then
+        IsPurchasedJunkOrBlankV4 = True
+        Exit Function
+    End If
+
+    If InStr(u, "MAT'L SPEC") > 0 And InStr(u, "MFG") > 0 Then
+        IsPurchasedJunkOrBlankV4 = True
+        Exit Function
+    End If
+
+    If InStr(u, "BILL OF MATERIALS") > 0 And InStr(u, "DET NO") > 0 Then
+        IsPurchasedJunkOrBlankV4 = True
+        Exit Function
+    End If
+End Function
+
+Private Function CanonicalPurchasedComponentV4(ByVal desc As String, ByVal partNo As String) As String
+On Error Resume Next
+
+    Dim d As String
+    Dim p As String
+
+    d = NormalizeKey(desc)
+    p = UCase$(Trim$(partNo))
+
+    If InStr(d, "LEADERPIN") > 0 Or InStr(p, "GL") > 0 Then
+        CanonicalPurchasedComponentV4 = "Leader Pin"
+        Exit Function
+    End If
+
+    If InStr(d, "GUIDEBUSHING") > 0 Or InStr(d, "BUSHING") > 0 Then
+        CanonicalPurchasedComponentV4 = "Guide Bushing"
+        Exit Function
+    End If
+
+    If InStr(d, "INTERNALRETAININGRING") > 0 Or InStr(d, "RETAININGRING") > 0 Or InStr(d, "RETAINERING") > 0 Then
+        CanonicalPurchasedComponentV4 = "Retaining Ring"
+        Exit Function
+    End If
+
+    If InStr(d, "SAFETYSTRAP") > 0 Or InStr(d, "SAFTEYSTRAP") > 0 Then
+        CanonicalPurchasedComponentV4 = "Safety Strap"
+        Exit Function
+    End If
+
+    If InStr(d, "SPACERINSULATION") > 0 Or InStr(d, "INSULATION") > 0 Then
+        CanonicalPurchasedComponentV4 = "Insulation"
+        Exit Function
+    End If
+
+    If InStr(d, "SLEEVEBEARING") > 0 Or InStr(d, "BEARING") > 0 Then
+        CanonicalPurchasedComponentV4 = "Sleeve Bearing"
+        Exit Function
+    End If
+
+    If InStr(d, "PYROPEL") > 0 Then
+        CanonicalPurchasedComponentV4 = "Pyropel"
+        Exit Function
+    End If
+
+    CanonicalPurchasedComponentV4 = ProperCaseText(desc)
+End Function
+
+Private Sub ParseTempcraftVendorPartV4(ByVal tail As String, _
+                                       ByRef vendor As String, _
+                                       ByRef partNo As String)
+On Error GoTo ErrHandler
+
+    vendor = ""
+    partNo = ""
+
+    Dim u As String
+    u = UCase$(Trim$(tail))
+
+    Dim re As Object
+    Dim ms As Object
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+
+    If InStr(u, "DME") > 0 Or InStr(u, "D.M.E") > 0 Then
+
+        vendor = "DME CO"
+
+        re.Pattern = "D\.?M\.?E\.?\s*CO\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+
+        If ms.Count > 0 Then
+            partNo = Trim$(ms(0).SubMatches(0))
+        Else
+            re.Pattern = "D\.?M\.?E\.?\s*([A-Z0-9\-]+)"
+            Set ms = re.Execute(u)
+            If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+        End If
+
+        Exit Sub
+    End If
+
+    If InStr(u, "MCMASTER") > 0 Then
+
+        vendor = "McMaster-Carr"
+
+        re.Pattern = "MCMASTER[\- ]*CARR\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+
+        If ms.Count > 0 Then
+            partNo = Trim$(ms(0).SubMatches(0))
+        Else
+            re.Pattern = "MCMASTER\s*([A-Z0-9\-]+)"
+            Set ms = re.Execute(u)
+            If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+        End If
+
+        Exit Sub
+    End If
+
+    If InStr(u, "PCS") > 0 Then
+
+        vendor = "PCS"
+
+        re.Pattern = "PCS\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+
+        If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+
+        Exit Sub
+    End If
+
+    If InStr(u, "JACO") > 0 Or InStr(u, "JACOMANUFACTURING") > 0 Then
+
+        vendor = "JACO"
+
+        If InStr(u, "HT200") > 0 Then
+            partNo = "HT200"
+        ElseIf InStr(u, "PYROPEL") > 0 Then
+            partNo = "PYROPEL"
+        Else
+            partNo = ""
+        End If
+
+        Exit Sub
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    vendor = ""
+    partNo = ""
+End Sub
+
+Private Function PurchasedDuplicateExistsV4(ByVal desc As String, _
+                                            ByVal vendor As String, _
+                                            ByVal partNo As String, _
+                                            ByVal detNo As String) As Boolean
+On Error Resume Next
+
+    PurchasedDuplicateExistsV4 = False
+
+    If PpCount < 1 Then Exit Function
+
+    Dim i As Long
+    Dim kNewDesc As String
+    Dim kOldDesc As String
+    Dim pNew As String
+    Dim pOld As String
+    Dim dNew As String
+    Dim dOld As String
+
+    kNewDesc = NormalizeKey(desc)
+    pNew = NormalizeKey(partNo)
+    dNew = NormalizeKey(detNo)
+
+    For i = 1 To PpCount
+
+        dOld = NormalizeKey(PpDet(i))
+        pOld = NormalizeKey(PpPartNo(i))
+        kOldDesc = NormalizeKey(PpDesc(i))
+
+        ' Det No. is strongest duplicate key.
+        If dNew <> "" And dOld <> "" Then
+            If dNew = dOld Then
+                PurchasedDuplicateExistsV4 = True
+                Exit Function
+            End If
+        End If
+
+        ' Same part number.
+        If pNew <> "" And pOld <> "" Then
+            If pNew = pOld Then
+                PurchasedDuplicateExistsV4 = True
+                Exit Function
+            End If
+        End If
+
+        ' Same description, especially when a weaker parser has no part number.
+        If kNewDesc <> "" And kOldDesc <> "" Then
+            If kNewDesc = kOldDesc Then
+                If pNew = "" Or pOld = "" Or pNew = pOld Then
+                    PurchasedDuplicateExistsV4 = True
+                    Exit Function
+                End If
+            End If
+        End If
+
+    Next i
+End Function
+
+Private Sub ApplyPurchasedPackPricingV4(ByVal ppIdx As Long)
+On Error Resume Next
+
+    If ppIdx < 1 Or ppIdx > PpCount Then Exit Sub
+
+    Dim compKey As String
+    Dim partKey As String
+
+    compKey = NormalizeKey(PpComp(ppIdx) & " " & PpDesc(ppIdx))
+    partKey = UCase$(Trim$(PpPartNo(ppIdx)))
+
+    ' PCS LSS-300 safety straps are bought as a pack of 2 for $20 total.
+    ' Quote sheet uses Qty * Unit Price, so for BOM qty 2, unit must be $10.
+    If InStr(compKey, "SAFETYSTRAP") > 0 Or partKey = "LSS-300" Then
+        If PpQty(ppIdx) = 2 Then
+            If PpPrice(ppIdx) >= 19# And PpPrice(ppIdx) <= 21# Then
+                PpPrice(ppIdx) = PpPrice(ppIdx) / 2#
+                LogLine "Pack pricing V4: LSS-300 safety strap pack of 2 = $20 total, unit set to $" & FormatNumberForCsv(PpPrice(ppIdx))
+            End If
+        End If
+    End If
+End Sub
+
+Private Sub ParseTempcraftPurchasedRowsFromAllTextV4(ByVal allText As String)
+On Error GoTo ErrHandler
+
+    If Trim$(allText) = "" Then Exit Sub
+
+    Dim s As String
+    s = NormalizeTempcraftAllTextV4(allText)
+
+    If InStr(1, s, "Outsource", vbTextCompare) = 0 Then Exit Sub
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = True
+    re.IgnoreCase = True
+
+    ' Groups:
+    '   0 = Det No
+    '   1 = Description
+    '   2 = Qty
+    '   3 = Tail/vendor/part, up to next 3-digit Det No.
+    re.Pattern = "\b([0-9]{3})\s+(.+?)\s+Outsource\s+([0-9]+)\s+(.+?)(?=\s+[0-9]{3}\s+[A-Z]|$)"
+
+    Dim ms As Object
+    Set ms = re.Execute(s)
+
+    If ms.Count = 0 Then Exit Sub
+
+    Dim m As Object
+    Dim detNo As String
+    Dim desc As String
+    Dim qty As Long
+    Dim tail As String
+    Dim vendor As String
+    Dim partNo As String
+    Dim comp As String
+    Dim beforeCount As Long
+
+    For Each m In ms
+
+        detNo = Trim$(CStr(m.SubMatches(0)))
+        desc = Trim$(CStr(m.SubMatches(1)))
+        qty = CLng(val(m.SubMatches(2)))
+        tail = Trim$(CStr(m.SubMatches(3)))
+
+        If qty <= 0 Then qty = 1
+
+        If IsPurchasedJunkOrBlankV4(desc, "") Then GoTo NextPurchasedV4
+
+        vendor = ""
+        partNo = ""
+
+        ParseTempcraftVendorPartV4 tail, vendor, partNo
+
+        ' Only real purchased-vendor rows.
+        If vendor = "" Then GoTo NextPurchasedV4
+
+        comp = CanonicalPurchasedComponentV4(desc, partNo)
+
+        If PurchasedDuplicateExistsV4(desc, vendor, partNo, detNo) Then GoTo NextPurchasedV4
+
+        beforeCount = PpCount
+
+        CapturePurchased desc, qty, "", 0#, 0#, 0#, partNo, vendor, detNo, "Purchase-PDF-FullText-V4"
+
+        If PpCount > beforeCount Then
+            PpComp(PpCount) = comp
+
+            If PpDesc(PpCount) = "" Then PpDesc(PpCount) = desc
+            If PpVendor(PpCount) = "" Then PpVendor(PpCount) = vendor
+            If PpPartNo(PpCount) = "" Then PpPartNo(PpCount) = partNo
+            If PpDet(PpCount) = "" Then PpDet(PpCount) = detNo
+
+            ApplyPurchasedPackPricingV4 PpCount
+
+            LogLine "Full-text purchased V4 captured: det=" & detNo & _
+                    " comp='" & comp & "'" & _
+                    " desc='" & desc & "'" & _
+                    " qty=" & CStr(qty) & _
+                    " vendor='" & vendor & "'" & _
+                    " part='" & partNo & "'" & _
+                    " price=$" & FormatNumberForCsv(PpPrice(PpCount))
+        End If
+
+NextPurchasedV4:
+    Next m
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ParseTempcraftPurchasedRowsFromAllTextV4 error: " & Err.Description
+End Sub
+' === CMS PATCH PURCHASED PARTS V4 END ===
+
 Private Sub ParseBomTextFromPdf(ByVal allText As String)
 On Error GoTo ErrHandler
     allText = Replace(allText, vbCrLf, vbLf)
     allText = Replace(allText, vbCr, vbLf)
+
+    ' V4: capture purchased components from the full PDF text before line-by-line parsing.
+    ParseTempcraftPurchasedRowsFromAllTextV4 allText
     Dim lines() As String
     lines = Split(allText, vbLf)
     Dim i As Long
@@ -9049,13 +14135,873 @@ On Error Resume Next
 
     If raw = "" Then Exit Sub
 
+    ' V3 purchased-parts parser for collapsed Tempcraft BOM PDFs.
+    Call TryCaptureTempcraftPurchasedRowsV2(raw)
+
     ' Purchase / hardware rows often do NOT have 3 decimal dimensions.
     ' Capture them before the material-line parser rejects them.
     If TryCapturePurchasedPdfLine(raw) Then Exit Sub
 
+    Call TryCapturePurchasedPdfCatalogLine(raw)
+
     ' Material / steel rows with dimensions.
     TryParseTempcraftBasePdfMaterialLine raw
 End Sub
+
+Private Function CmsCatalogVendor(ByVal rawVendor As String) As String
+On Error Resume Next
+
+    Dim u As String
+    u = UCase$(Trim$(rawVendor))
+
+    If InStr(u, "PROGRESSIVE") > 0 Then CmsCatalogVendor = "Progressive": Exit Function
+    If InStr(u, "DME") > 0 Or InStr(u, "D.M.E") > 0 Then CmsCatalogVendor = "DME": Exit Function
+    If InStr(u, "PCS") > 0 Then CmsCatalogVendor = "PCS": Exit Function
+    If InStr(u, "MCMASTER") > 0 Then CmsCatalogVendor = "McMaster-Carr": Exit Function
+    If InStr(u, "JACO") > 0 Then CmsCatalogVendor = "JACO": Exit Function
+    If InStr(u, "MSC") > 0 Then CmsCatalogVendor = "MSC": Exit Function
+
+    CmsCatalogVendor = Trim$(rawVendor)
+End Function
+
+Private Function CmsCatalogComponentFromPartAndDesc(ByVal partNo As String, ByVal desc As String) As String
+On Error Resume Next
+
+    Dim p As String
+    Dim d As String
+
+    p = UCase$(Trim$(partNo))
+    d = UCase$(Trim$(desc))
+
+    If Left$(p, 2) = "LP" Or InStr(d, "LEADER PIN") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Leader Pin"
+        Exit Function
+    End If
+
+    If Left$(p, 3) = "STL" Or InStr(d, "SHOULDER BUSHING") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Bushing"
+        Exit Function
+    End If
+
+    If Left$(p, 3) = "GHB" Or Left$(p, 3) = "GEB" Or InStr(d, "GUIDED EJECTOR BUSH") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Ejector Bushing"
+        Exit Function
+    End If
+
+    If InStr(d, "GUIDED EJECTOR PIN") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Guided Ejector Pin"
+        Exit Function
+    End If
+
+    If Left$(p, 2) = "RP" Or InStr(d, "RETURN PIN") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Return Pin"
+        Exit Function
+    End If
+
+    If Left$(p, 2) = "SP" Or InStr(d, "SUPPORT PILLAR") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Support Pillar"
+        Exit Function
+    End If
+
+    If Left$(p, 2) = "LR" Or InStr(d, "LOCATING RING") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Locating Ring"
+        Exit Function
+    End If
+
+    If Left$(p, 4) = "SPRB" Or InStr(d, "SPRUE BUSH") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Sprue Bushing"
+        Exit Function
+    End If
+
+    If Left$(p, 4) = "SAFT" Or InStr(d, "SAFETY STRAP") > 0 Or InStr(d, "SAFTEY STRAP") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Safety Strap"
+        Exit Function
+    End If
+
+    If InStr(d, "RETAINING RING") > 0 Or InStr(d, "RETAINER RING") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Retaining Ring"
+        Exit Function
+    End If
+
+    If InStr(d, "INSULATION") > 0 Or InStr(d, "PYROPEL") > 0 Or InStr(p, "HT200") > 0 Then
+        CmsCatalogComponentFromPartAndDesc = "Insulation"
+        Exit Function
+    End If
+
+    CmsCatalogComponentFromPartAndDesc = ProperCaseText(desc)
+End Function
+
+Private Function CmsCleanCatalogDescription(ByVal desc As String) As String
+On Error Resume Next
+
+    Dim s As String
+    s = Trim$(desc)
+
+    Dim p As Long
+
+    p = InStr(1, s, ", Ø", vbTextCompare)
+    If p > 0 Then s = Left$(s, p - 1)
+
+    p = InStr(1, s, ", 1.", vbTextCompare)
+    If p > 0 Then s = Left$(s, p - 1)
+
+    p = InStr(1, s, ", .", vbTextCompare)
+    If p > 0 Then s = Left$(s, p - 1)
+
+    CmsCleanCatalogDescription = Trim$(s)
+End Function
+
+Private Function CmsCatalogPurchasedAllowed(ByVal partNo As String, ByVal desc As String) As Boolean
+On Error Resume Next
+
+    Dim p As String
+    Dim d As String
+
+    p = UCase$(Trim$(partNo))
+    d = UCase$(Trim$(desc))
+
+    CmsCatalogPurchasedAllowed = False
+
+    ' Exclude fasteners and shop hardware we do not quote as purchased components.
+    If InStr(d, "SOCKET HEAD") > 0 Then Exit Function
+    If InStr(d, "FLAT HEAD") > 0 Then Exit Function
+    If InStr(d, "SCREW") > 0 Then Exit Function
+    If InStr(d, "SHCS") > 0 Then Exit Function
+    If InStr(d, "FHCS") > 0 Then Exit Function
+    If InStr(d, "DOWEL PIN") > 0 Then Exit Function
+    If InStr(d, "TUBULAR DOWEL") > 0 Then Exit Function
+    If InStr(d, "STOP DISC") > 0 Then Exit Function
+
+    ' Known catalog prefixes / descriptions.
+    If Left$(p, 2) = "LP" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 3) = "STL" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 3) = "GHB" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 3) = "GEB" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 2) = "RP" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 2) = "SP" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 2) = "LR" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 4) = "SPRB" Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If Left$(p, 4) = "SAFT" Then CmsCatalogPurchasedAllowed = True: Exit Function
+
+    If InStr(d, "LEADER PIN") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "BUSHING") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "RETURN PIN") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "SUPPORT PILLAR") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "SPRUE BUSH") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "LOCATING RING") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "SAFETY STRAP") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "SAFTEY STRAP") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "RETAINING RING") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "RETAINER RING") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "INSULATION") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+    If InStr(d, "PYROPEL") > 0 Then CmsCatalogPurchasedAllowed = True: Exit Function
+End Function
+
+' === CMS PATCH PURCHASED PDF PARSER START ===
+' Parses Tempcraft / Howmet BOM PDF text when pdftotext collapses many rows
+' into one long line, e.g.
+'   107 LEADER PIN ... Outsource 4 DME CO 5213GL108 GUIDE BUSHING ...
+Private Function NormalizeCollapsedBomRowBreaks(ByVal raw As String) As String
+On Error GoTo ErrHandler
+
+    NormalizeCollapsedBomRowBreaks = raw
+    If Trim$(raw) = "" Then Exit Function
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = True
+    re.IgnoreCase = True
+
+    ' Insert a line break before a 3-digit Det No. followed by a description.
+    ' Handles no-space joins like:
+    '   1.375102 OD SMED...
+    '   5213GL108 GUIDE BUSHING...
+    '   99142A520110 SAFETY STRAP...
+    re.Pattern = "([A-Z0-9\.\-""])([0-9]{3}\s+[A-Z])"
+
+    Dim oldRaw As String
+    Do
+        oldRaw = raw
+        raw = re.Replace(raw, "$1" & vbLf & "$2")
+    Loop While raw <> oldRaw
+
+    NormalizeCollapsedBomRowBreaks = raw
+    Exit Function
+
+ErrHandler:
+    NormalizeCollapsedBomRowBreaks = raw
+End Function
+
+Private Function TryCaptureTempcraftCollapsedPurchasedRows(ByVal raw As String) As Boolean
+On Error GoTo ErrHandler
+
+    TryCaptureTempcraftCollapsedPurchasedRows = False
+
+    raw = Trim$(raw)
+    If raw = "" Then Exit Function
+
+    Dim u As String
+    u = UCase$(raw)
+
+    If InStr(u, "OUTSOURCE") = 0 Then Exit Function
+
+    Dim norm As String
+    norm = NormalizeCollapsedBomRowBreaks(raw)
+
+    norm = Replace(norm, vbCrLf, vbLf)
+    norm = Replace(norm, vbCr, vbLf)
+
+    Dim rows() As String
+    rows = Split(norm, vbLf)
+
+    Dim i As Long
+    Dim rowText As String
+    Dim capturedAny As Boolean
+
+    capturedAny = False
+
+    For i = LBound(rows) To UBound(rows)
+        rowText = Trim$(rows(i))
+        If rowText <> "" Then
+            If TryCaptureOneTempcraftPurchasedRow(rowText) Then
+                capturedAny = True
+            End If
+        End If
+    Next i
+
+    TryCaptureTempcraftCollapsedPurchasedRows = capturedAny
+    Exit Function
+
+ErrHandler:
+    LogLine "TryCaptureTempcraftCollapsedPurchasedRows error: " & Err.Description & " | " & raw
+    TryCaptureTempcraftCollapsedPurchasedRows = False
+End Function
+
+Private Function TryCaptureOneTempcraftPurchasedRow(ByVal rowText As String) As Boolean
+On Error GoTo ErrHandler
+
+    TryCaptureOneTempcraftPurchasedRow = False
+
+    rowText = Trim$(rowText)
+    If rowText = "" Then Exit Function
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = False
+    re.IgnoreCase = True
+
+    ' SubMatches:
+    '   0 = Det No
+    '   1 = Description
+    '   2 = Qty
+    '   3 = Vendor / part-number tail
+    '
+    ' Examples:
+    '   107 LEADER PIN 1.00"DIA x 9.25" L Outsource 4 DME CO 5213GL
+    '   108 GUIDE BUSHING Outsource 4 DME CO 5503
+    '   109 INTERNALRETAINING RING Outsource 4 McMASTER-CARR 99142A520
+    '   110 SAFETY STRAP Outsource 2 PCS LSS-300
+    '   111 SPACERINSULATION Outsource 2JACOMANUFACTURING COHT200
+    re.Pattern = "^\s*([0-9]{3})\s+(.+?)\s+Outsource\s+([0-9]+)\s*(.*)$"
+
+    Dim ms As Object
+    Set ms = re.Execute(rowText)
+
+    If ms.Count = 0 Then Exit Function
+
+    Dim detNo As String
+    Dim desc As String
+    Dim qty As Long
+    Dim tail As String
+    Dim vendor As String
+    Dim partNo As String
+    Dim comp As String
+    Dim beforeCount As Long
+
+    detNo = Trim$(CStr(ms(0).SubMatches(0)))
+    desc = Trim$(CStr(ms(0).SubMatches(1)))
+    qty = CLng(val(ms(0).SubMatches(2)))
+    tail = Trim$(CStr(ms(0).SubMatches(3)))
+
+    If qty <= 0 Then qty = 1
+
+    vendor = ""
+    partNo = ""
+
+    ParseTempcraftPurchaseVendorPart tail, vendor, partNo
+
+    ' Only capture actual purchased-vendor rows.
+    ' Steel/material outsource rows like 4140, A-2, D-2, Drill Rod intentionally skip.
+    If vendor = "" Then Exit Function
+
+    comp = CmsCatalogComponentFromPartAndDesc(partNo, desc)
+
+    ' Fix common no-space Tempcraft text and force quote component bucket names.
+    If InStr(NormalizeKey(desc), "LEADERPIN") > 0 Then comp = "Leader Pin"
+    If InStr(NormalizeKey(desc), "GUIDEBUSHING") > 0 Then comp = "Guide Bushing"
+    If InStr(NormalizeKey(desc), "RETAININGRING") > 0 Or InStr(NormalizeKey(desc), "INTERNALRETAININGRING") > 0 Then comp = "Retaining Ring"
+    If InStr(NormalizeKey(desc), "SAFETYSTRAP") > 0 Or InStr(NormalizeKey(desc), "SAFTEYSTRAP") > 0 Then comp = "Safety Strap"
+    If InStr(NormalizeKey(desc), "SPACERINSULATION") > 0 Then comp = "Insulation"
+    If InStr(NormalizeKey(desc), "SLEEVEBEARING") > 0 Then comp = "Sleeve Bearing"
+    If InStr(NormalizeKey(desc), "PYROPEL") > 0 Then comp = "Pyropel"
+
+    beforeCount = PpCount
+
+    CapturePurchased desc, qty, "", 0#, 0#, 0#, partNo, vendor, detNo, "Purchase-PDF-Tempcraft"
+
+    If PpCount > beforeCount Then
+        PpComp(PpCount) = comp
+
+        LogLine "Tempcraft PDF purchase captured: det=" & detNo & _
+                " comp='" & comp & "'" & _
+                " desc='" & desc & "'" & _
+                " qty=" & CStr(qty) & _
+                " vendor='" & vendor & "'" & _
+                " part='" & partNo & "'" & _
+                " price=$" & FormatNumberForCsv(PpPrice(PpCount))
+
+        TryCaptureOneTempcraftPurchasedRow = True
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "TryCaptureOneTempcraftPurchasedRow error: " & Err.Description & " | " & rowText
+    TryCaptureOneTempcraftPurchasedRow = False
+End Function
+
+Private Sub ParseTempcraftPurchaseVendorPart(ByVal tail As String, _
+                                             ByRef vendor As String, _
+                                             ByRef partNo As String)
+On Error GoTo ErrHandler
+
+    vendor = ""
+    partNo = ""
+
+    Dim u As String
+    u = UCase$(Trim$(tail))
+
+    Dim re As Object
+    Dim ms As Object
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+
+    If InStr(u, "DME") > 0 Or InStr(u, "D.M.E") > 0 Then
+        vendor = "DME CO"
+
+        re.Pattern = "D\.?M\.?E\.?\s*CO\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+        If ms.Count > 0 Then
+            partNo = Trim$(ms(0).SubMatches(0))
+        Else
+            re.Pattern = "D\.?M\.?E\.?\s*([A-Z0-9\-]+)"
+            Set ms = re.Execute(u)
+            If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+        End If
+
+        Exit Sub
+    End If
+
+    If InStr(u, "MCMASTER") > 0 Then
+        vendor = "McMaster-Carr"
+
+        re.Pattern = "MCMASTER[\- ]*CARR\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+        If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+
+        Exit Sub
+    End If
+
+    If InStr(u, "PCS") > 0 Then
+        vendor = "PCS"
+
+        re.Pattern = "PCS\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+        If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+
+        Exit Sub
+    End If
+
+    If InStr(u, "JACO") > 0 Or InStr(u, "JACOMANUFACTURING") > 0 Then
+        vendor = "JACO"
+
+        If InStr(u, "HT200") > 0 Then
+            partNo = "HT200"
+        ElseIf InStr(u, "PYROPEL") > 0 Then
+            partNo = "PYROPEL"
+        Else
+            partNo = ""
+        End If
+
+        Exit Sub
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    vendor = ""
+    partNo = ""
+End Sub
+' === CMS PATCH PURCHASED PDF PARSER END ===
+
+' === CMS PATCH PURCHASED PARTS V3 START ===
+' Purchased-parts cleanup for Tempcraft/Howmet collapsed PDF BOM text.
+' Fixes:
+'   - header row captured as a fake purchased component
+'   - blank purchased rows
+'   - no-space rows like 5213GL108 GUIDE BUSHING...
+'   - vendor/part parsing for DME, McMaster, PCS, JACO
+Private Function IsPurchasedHeaderJunkV2(ByVal s As String) As Boolean
+On Error Resume Next
+
+    Dim u As String
+    u = UCase$(Trim$(s))
+
+    IsPurchasedHeaderJunkV2 = False
+
+    If u = "" Then
+        IsPurchasedHeaderJunkV2 = True
+        Exit Function
+    End If
+
+    If InStr(u, "DET NO") > 0 And InStr(u, "DESCRIPTION") > 0 Then
+        IsPurchasedHeaderJunkV2 = True
+        Exit Function
+    End If
+
+    If InStr(u, "MANUFACTURER") > 0 And InStr(u, "PURCHASED PARTS") > 0 Then
+        IsPurchasedHeaderJunkV2 = True
+        Exit Function
+    End If
+
+    If InStr(u, "MAT'L SPEC") > 0 And InStr(u, "MFG") > 0 Then
+        IsPurchasedHeaderJunkV2 = True
+        Exit Function
+    End If
+
+    If InStr(u, "NO. REQ") > 0 And InStr(u, "NEED-BY") > 0 Then
+        IsPurchasedHeaderJunkV2 = True
+        Exit Function
+    End If
+
+    If InStr(u, "BILL OF MATERIALS") > 0 And InStr(u, "DET NO") > 0 Then
+        IsPurchasedHeaderJunkV2 = True
+        Exit Function
+    End If
+End Function
+
+Private Function NormalizeCollapsedBomRowsV2(ByVal raw As String) As String
+On Error GoTo ErrHandler
+
+    NormalizeCollapsedBomRowsV2 = raw
+    If Trim$(raw) = "" Then Exit Function
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = True
+    re.IgnoreCase = True
+
+    ' Insert line breaks before Det No. tokens.
+    ' Handles:
+    '   1.375102 OD SMED...
+    '   5213GL108 GUIDE BUSHING...
+    '   99142A520110 SAFETY STRAP...
+    re.Pattern = "([A-Z0-9\.\-""])([0-9]{3}\s+[A-Z])"
+
+    Dim oldRaw As String
+    Do
+        oldRaw = raw
+        raw = re.Replace(raw, "$1" & vbLf & "$2")
+    Loop While raw <> oldRaw
+
+    NormalizeCollapsedBomRowsV2 = raw
+    Exit Function
+
+ErrHandler:
+    NormalizeCollapsedBomRowsV2 = raw
+End Function
+
+Private Function TryCaptureTempcraftPurchasedRowsV2(ByVal raw As String) As Boolean
+On Error GoTo ErrHandler
+
+    TryCaptureTempcraftPurchasedRowsV2 = False
+
+    raw = Trim$(raw)
+    If raw = "" Then Exit Function
+    If InStr(1, raw, "Outsource", vbTextCompare) = 0 Then Exit Function
+
+    Dim norm As String
+    norm = NormalizeCollapsedBomRowsV2(raw)
+    norm = Replace(norm, vbCrLf, vbLf)
+    norm = Replace(norm, vbCr, vbLf)
+
+    Dim lines() As String
+    lines = Split(norm, vbLf)
+
+    Dim i As Long
+    Dim oneLine As String
+    Dim anyHit As Boolean
+
+    anyHit = False
+
+    For i = LBound(lines) To UBound(lines)
+        oneLine = Trim$(lines(i))
+        If oneLine <> "" Then
+            If TryCaptureOneTempcraftPurchasedRowV2(oneLine) Then
+                anyHit = True
+            End If
+        End If
+    Next i
+
+    TryCaptureTempcraftPurchasedRowsV2 = anyHit
+    Exit Function
+
+ErrHandler:
+    LogLine "TryCaptureTempcraftPurchasedRowsV2 error: " & Err.Description & " | " & raw
+    TryCaptureTempcraftPurchasedRowsV2 = False
+End Function
+
+Private Function TryCaptureOneTempcraftPurchasedRowV2(ByVal rowText As String) As Boolean
+On Error GoTo ErrHandler
+
+    TryCaptureOneTempcraftPurchasedRowV2 = False
+
+    rowText = Trim$(rowText)
+    If rowText = "" Then Exit Function
+    If IsPurchasedHeaderJunkV2(rowText) Then Exit Function
+    If InStr(1, rowText, "Outsource", vbTextCompare) = 0 Then Exit Function
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = False
+    re.IgnoreCase = True
+
+    ' Groups:
+    '   1 = Det No
+    '   2 = Description
+    '   3 = Qty
+    '   4 = Vendor / Part tail
+    '
+    ' Examples:
+    '   107 LEADER PIN 1.00"DIA x 9.25" L Outsource 4 DME CO 5213GL
+    '   108 GUIDE BUSHING Outsource 4 DME CO 5503
+    '   109 INTERNALRETAINING RING Outsource 4 McMASTER-CARR 99142A520
+    '   110 SAFETY STRAP Outsource 2 PCS LSS-300
+    '   111 SPACERINSULATION Outsource 2JACOMANUFACTURING COHT200
+    re.Pattern = "^\s*([0-9]{3})\s+(.+?)\s+Outsource\s+([0-9]+)\s*(.*)$"
+
+    Dim ms As Object
+    Set ms = re.Execute(rowText)
+
+    If ms.Count = 0 Then Exit Function
+
+    Dim detNo As String
+    Dim desc As String
+    Dim qty As Long
+    Dim tail As String
+    Dim vendor As String
+    Dim partNo As String
+    Dim comp As String
+    Dim beforeCount As Long
+
+    detNo = Trim$(CStr(ms(0).SubMatches(0)))
+    desc = Trim$(CStr(ms(0).SubMatches(1)))
+    qty = CLng(val(ms(0).SubMatches(2)))
+    tail = Trim$(CStr(ms(0).SubMatches(3)))
+
+    If qty <= 0 Then qty = 1
+
+    vendor = ""
+    partNo = ""
+
+    ParseTempcraftVendorPartV2 tail, vendor, partNo
+
+    ' Only actual purchased vendors get captured.
+    ' Steel rows like 4140 / A-2 / D-2 / DRILL ROD have no purchased vendor and skip.
+    If vendor = "" Then Exit Function
+
+    comp = CanonicalPurchasedComponentV2(desc, partNo)
+
+    beforeCount = PpCount
+
+    CapturePurchased desc, qty, "", 0#, 0#, 0#, partNo, vendor, detNo, "Purchase-PDF-Tempcraft-V2"
+
+    If PpCount > beforeCount Then
+        PpComp(PpCount) = comp
+
+        If PpDesc(PpCount) = "" Then PpDesc(PpCount) = desc
+        If PpVendor(PpCount) = "" Then PpVendor(PpCount) = vendor
+        If PpPartNo(PpCount) = "" Then PpPartNo(PpCount) = partNo
+        If PpDet(PpCount) = "" Then PpDet(PpCount) = detNo
+
+        LogLine "Purchased V2 captured: det=" & detNo & _
+                " comp='" & comp & "'" & _
+                " desc='" & desc & "'" & _
+                " qty=" & CStr(qty) & _
+                " vendor='" & vendor & "'" & _
+                " part='" & partNo & "'" & _
+                " price=$" & FormatNumberForCsv(PpPrice(PpCount))
+
+        TryCaptureOneTempcraftPurchasedRowV2 = True
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "TryCaptureOneTempcraftPurchasedRowV2 error: " & Err.Description & " | " & rowText
+    TryCaptureOneTempcraftPurchasedRowV2 = False
+End Function
+
+Private Sub ParseTempcraftVendorPartV2(ByVal tail As String, _
+                                       ByRef vendor As String, _
+                                       ByRef partNo As String)
+On Error GoTo ErrHandler
+
+    vendor = ""
+    partNo = ""
+
+    Dim u As String
+    u = UCase$(Trim$(tail))
+
+    Dim re As Object
+    Dim ms As Object
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+
+    If InStr(u, "DME") > 0 Or InStr(u, "D.M.E") > 0 Then
+
+        vendor = "DME CO"
+
+        re.Pattern = "D\.?M\.?E\.?\s*CO\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+
+        If ms.Count > 0 Then
+            partNo = Trim$(ms(0).SubMatches(0))
+        Else
+            re.Pattern = "D\.?M\.?E\.?\s*([A-Z0-9\-]+)"
+            Set ms = re.Execute(u)
+            If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+        End If
+
+        Exit Sub
+    End If
+
+    If InStr(u, "MCMASTER") > 0 Then
+
+        vendor = "McMaster-Carr"
+
+        re.Pattern = "MCMASTER[\- ]*CARR\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+
+        If ms.Count > 0 Then
+            partNo = Trim$(ms(0).SubMatches(0))
+        Else
+            re.Pattern = "MCMASTER\s*([A-Z0-9\-]+)"
+            Set ms = re.Execute(u)
+            If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+        End If
+
+        Exit Sub
+    End If
+
+    If InStr(u, "PCS") > 0 Then
+
+        vendor = "PCS"
+
+        re.Pattern = "PCS\s*([A-Z0-9\-]+)"
+        Set ms = re.Execute(u)
+
+        If ms.Count > 0 Then partNo = Trim$(ms(0).SubMatches(0))
+
+        Exit Sub
+    End If
+
+    If InStr(u, "JACO") > 0 Or InStr(u, "JACOMANUFACTURING") > 0 Then
+
+        vendor = "JACO"
+
+        If InStr(u, "HT200") > 0 Then
+            partNo = "HT200"
+        ElseIf InStr(u, "PYROPEL") > 0 Then
+            partNo = "PYROPEL"
+        Else
+            partNo = ""
+        End If
+
+        Exit Sub
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    vendor = ""
+    partNo = ""
+End Sub
+
+Private Function CanonicalPurchasedComponentV2(ByVal desc As String, ByVal partNo As String) As String
+On Error Resume Next
+
+    Dim d As String
+    Dim p As String
+
+    d = NormalizeKey(desc)
+    p = UCase$(Trim$(partNo))
+
+    If InStr(d, "LEADERPIN") > 0 Or Left$(p, 2) = "LP" Or InStr(p, "GL") > 0 Then
+        CanonicalPurchasedComponentV2 = "Leader Pin"
+        Exit Function
+    End If
+
+    If InStr(d, "GUIDEBUSHING") > 0 Or InStr(d, "BUSHING") > 0 Then
+        CanonicalPurchasedComponentV2 = "Guide Bushing"
+        Exit Function
+    End If
+
+    If InStr(d, "INTERNALRETAININGRING") > 0 Or InStr(d, "RETAININGRING") > 0 Or InStr(d, "RETAINERING") > 0 Then
+        CanonicalPurchasedComponentV2 = "Retaining Ring"
+        Exit Function
+    End If
+
+    If InStr(d, "SAFETYSTRAP") > 0 Or InStr(d, "SAFTEYSTRAP") > 0 Then
+        CanonicalPurchasedComponentV2 = "Safety Strap"
+        Exit Function
+    End If
+
+    If InStr(d, "SPACERINSULATION") > 0 Or InStr(d, "INSULATION") > 0 Then
+        CanonicalPurchasedComponentV2 = "Insulation"
+        Exit Function
+    End If
+
+    If InStr(d, "SLEEVEBEARING") > 0 Or InStr(d, "BEARING") > 0 Then
+        CanonicalPurchasedComponentV2 = "Sleeve Bearing"
+        Exit Function
+    End If
+
+    If InStr(d, "PYROPEL") > 0 Then
+        CanonicalPurchasedComponentV2 = "Pyropel"
+        Exit Function
+    End If
+
+    CanonicalPurchasedComponentV2 = ProperCaseText(desc)
+End Function
+' === CMS PATCH PURCHASED PARTS V3 END ===
+
+Private Function TryCapturePurchasedPdfCatalogLine(ByVal raw As String) As Boolean
+On Error GoTo ErrHandler
+
+    TryCapturePurchasedPdfCatalogLine = False
+
+    raw = Trim$(raw)
+    If raw = "" Then Exit Function
+
+    If TryCaptureTempcraftPurchasedRowsV2(raw) Then
+        TryCapturePurchasedPdfCatalogLine = True
+        Exit Function
+    End If
+
+    If TryCaptureTempcraftCollapsedPurchasedRows(raw) Then
+        TryCapturePurchasedPdfCatalogLine = True
+        Exit Function
+    End If
+
+    Dim u As String
+    u = UCase$(raw)
+
+    ' Skip headers.
+    If InStr(u, "DET NO") > 0 And InStr(u, "DESCRIPTION") > 0 Then Exit Function
+    If InStr(u, "BILL OF MATERIALS") > 0 Then Exit Function
+    If InStr(u, "FASTENERS") > 0 Then Exit Function
+
+    ' HTE / Tempcraft PDF row style. This is GLOBAL because pdftotext often
+    ' collapses many BOM rows into one long line.
+    '
+    ' Examples:
+    '   13 X 2150-a00 4 Progressive, LP150L5.75 Leader pin, Ø1.500 x 5-3/4
+    '   20 X 5970-a00 11 Progressive, SP200L4 Support pillar, Ø2.00 x 4.000"
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+
+    re.Global = True
+    re.IgnoreCase = True
+
+    ' Groups:
+    '   1 detail number
+    '   2 qty
+    '   3 vendor
+    '   4 part number
+    '   5 description up to next " N X detail qty vendor,"
+    re.Pattern = "\bX\s+([A-Z0-9][A-Z0-9\-_]*A00|[A-Z0-9][A-Z0-9\-_\.#]*)\s+([0-9]+)\s+([^,\r\n]{2,50}),\s*([#A-Z0-9][#A-Z0-9\.\-\/]*)\s+(.+?)(?=(\s+[0-9]{1,3}\s+X\s+[A-Z0-9])|$)"
+
+    Dim ms As Object
+    Set ms = re.Execute(raw)
+
+    If ms.Count = 0 Then Exit Function
+
+    Dim m As Object
+    Dim detNo As String
+    Dim qty As Long
+    Dim vendor As String
+    Dim partNo As String
+    Dim desc As String
+    Dim comp As String
+    Dim beforeCount As Long
+    Dim capturedAny As Boolean
+
+    capturedAny = False
+
+    For Each m In ms
+
+        detNo = Trim$(CStr(m.SubMatches(0)))
+        qty = CLng(val(m.SubMatches(1)))
+        vendor = CmsCatalogVendor(CStr(m.SubMatches(2)))
+        partNo = Trim$(CStr(m.SubMatches(3)))
+        desc = CmsCleanCatalogDescription(CStr(m.SubMatches(4)))
+
+        If qty <= 0 Then qty = 1
+
+        If desc <> "" Then
+            If CmsCatalogPurchasedAllowed(partNo, desc) Then
+
+                comp = CmsCatalogComponentFromPartAndDesc(partNo, desc)
+                beforeCount = PpCount
+
+                If FILL_PURCHASED_COMPONENTS Then
+                    CapturePurchased desc, qty, "", 0#, 0#, 0#, partNo, vendor, detNo, "Purchase-PDF-Catalog"
+
+                    If PpCount > beforeCount Then
+                        PpComp(PpCount) = comp
+                        If PpDesc(PpCount) = "" Then PpDesc(PpCount) = desc
+                    End If
+                End If
+
+                LogLine "PDF catalog purchase captured: det=" & detNo & _
+                        " comp='" & comp & "'" & _
+                        " desc='" & desc & "'" & _
+                        " qty=" & CStr(qty) & _
+                        " vendor='" & vendor & "'" & _
+                        " part='" & partNo & "'"
+
+                capturedAny = True
+            End If
+        End If
+
+    Next m
+
+    TryCapturePurchasedPdfCatalogLine = capturedAny
+    Exit Function
+
+ErrHandler:
+    LogLine "TryCapturePurchasedPdfCatalogLine error: " & Err.Description & " | " & raw
+    TryCapturePurchasedPdfCatalogLine = False
+End Function
 
 Private Function TryCapturePurchasedPdfLine(ByVal raw As String) As Boolean
 On Error GoTo ErrHandler
@@ -9064,6 +15010,8 @@ On Error GoTo ErrHandler
 
     Dim u As String
     u = UCase(raw)
+
+    If IsPurchasedHeaderJunkV2(raw) Then Exit Function
 
     If InStr(u, " PURCHASE ") = 0 And InStr(u, " PURCHASE") = 0 Then Exit Function
 
@@ -9155,7 +15103,7 @@ On Error GoTo ErrHandler
     Set m = re.Execute(raw)
 
     If m.Count > 0 Then
-        ExtractPdfPurchaseQty = CLng(Val(m(0).SubMatches(0)))
+        ExtractPdfPurchaseQty = CLng(val(m(0).SubMatches(0)))
     End If
 
     If ExtractPdfPurchaseQty <= 0 Then ExtractPdfPurchaseQty = 1
@@ -9245,7 +15193,7 @@ On Error GoTo ErrHandler
 
     For i = 0 To matches.Count - 1
 
-        tok = Trim(CStr(matches(i).Value))
+        tok = Trim(CStr(matches(i).value))
 
         If IsUsefulPurchasePartToken(tok) Then
             ExtractPdfPurchasePartNo = tok
@@ -9364,7 +15312,7 @@ Private Function PickThreeFinishedSizeDims(ByRef nums() As Double, ByVal n As Lo
 End Function
 
 ' True when the "length" looks like Tempcraft Stock Weight (lbs), not inches.
-' Example bug: TCP 1.375 x 15.875 x 117.87  ← 117.87 is weight, real L is 18.
+' Example bug: TCP 1.375 x 15.875 x 117.87  ? 117.87 is weight, real L is 18.
 Private Function BomDimsLookLikeStockWeight(ByVal t As Double, ByVal w As Double, ByVal l As Double) As Boolean
     BomDimsLookLikeStockWeight = False
     If t <= 0 Or w <= 0 Or l <= 0 Then Exit Function
@@ -9373,7 +15321,7 @@ Private Function BomDimsLookLikeStockWeight(ByVal t As Double, ByVal w As Double
         BomDimsLookLikeStockWeight = True
         Exit Function
     End If
-    ' Density sanity: steel ~0.283 lb/in^3. If L were inches, mass ≈ T*W*L*0.283.
+    ' Density sanity: steel ~0.283 lb/in^3. If L were inches, mass ˜ T*W*L*0.283.
     ' If L is actually weight, T*W*L is huge vs any real plate.
     Dim vol As Double
     vol = t * w * l
@@ -9665,6 +15613,42 @@ ErrHandler:
     StandardPlateName = Trim(desc)
 End Function
 
+' True when a FILE / ASSEMBLY name marks it as one half of a mold rather than the
+' whole base, e.g. "7.8 Cap Mold Base A Side.sldasm".
+'
+' Deliberately stricter than IsLikelyIdSideName/IsLikelyOdSideName, which classify
+' individual components and treat bare "ID"/"TOP"/"TCP" as a side cue. Applied to a
+' whole-assembly name those cues fire constantly ("Top Clamp Plate Base.sldasm"),
+' so this needs an explicit half-of-the-mold phrase: a SIDE or HALF qualified by
+' A/B/cavity/core.
+Private Function IsPartialSideAssemblyName(ByVal s As String) As Boolean
+    IsPartialSideAssemblyName = False
+
+    ' NormalizeText only uppercases and squeezes runs of whitespace, so turn the
+    ' separators shops actually use into spaces first -- this job's own CAD lives in
+    ' a folder called "A-side", and "A-Side" must read the same as "A Side".
+    s = UCase(Trim(s))
+    s = Replace(s, "-", " ")
+    s = Replace(s, "_", " ")
+    s = NormalizeText(s)
+    If s = "" Then Exit Function
+
+    ' Pad so a leading or trailing token still matches with spaces on both sides.
+    s = " " & s & " "
+
+    If InStr(s, " A SIDE ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " B SIDE ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " A HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " B HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " CAVITY SIDE ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " CORE SIDE ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " CAVITY HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " CORE HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " STATIONARY HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " MOVING HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+    If InStr(s, " EJECTOR HALF ") > 0 Then IsPartialSideAssemblyName = True: Exit Function
+End Function
+
 Private Function IsLikelyIdSideName(ByVal s As String) As Boolean
     s = NormalizeText(s)
     If InStr(s, "ID ") > 0 Or Left(s, 2) = "ID" Then IsLikelyIdSideName = True: Exit Function
@@ -9697,6 +15681,35 @@ Private Function IsHardwareName(ByVal desc As String) As Boolean
     Dim i As Long
     For i = LBound(hw) To UBound(hw)
         If InStr(s, CStr(hw(i))) > 0 Then IsHardwareName = True: Exit Function
+    Next i
+End Function
+
+' Is this ROLE / plate label a piece of bought hardware rather than a plate the
+' shop cuts?
+'
+' IsHardwareName reads a CAD component name and is defeated by part-number-only
+' names. This reads the role the stack analysis assigned, which is reliable
+' exactly where the name is not. Used to keep the per-part STL sweep to plates.
+Private Function IsHardwareRoleLabel(ByVal roleLabel As String) As Boolean
+    Dim s As String
+    s = NormalizeText(roleLabel)
+    If s = "" Then Exit Function
+    Dim hw As Variant
+    ' TOP/BOTTOM LOCK earns its place here from C18619: four GL150X250_PROGRESSIVE
+    ' guide-lock sub-assemblies, three parts each, all labelled "Top Lock" and all
+    ' nested one level down (GL150X250_PROGRESSIVE_ASM-1/GL150X250_ST-1). A nested
+    ' component cannot be isolated for a standalone STL, so all twelve failed --
+    ' 24 warnings and 179 s of a 476 s run, for files that never appeared and parts
+    ' that are purchased anyway.
+    hw = Array("LEADER PIN", "GUIDE PIN", "GUIDED EJECTOR BUSHING", "BUSHING", _
+               "RETURN PIN", "EJECTOR PIN", "SUPPORT PILLAR", "PILLAR", _
+               "LATCH LOCK", "SAFETY STRAP", "TIE STRAP", "STOP DISC", _
+               "LOCATING RING", "SPRUE BUSHING", "SPRUE PULLER", _
+               "SIDE LOCK", "TOP LOCK", "BOTTOM LOCK", "GUIDE LOCK", "INTERLOCK", _
+               "PURCHASED COMPONENT", "OTHER HARDWARE", "HARDWARE")
+    Dim i As Long
+    For i = LBound(hw) To UBound(hw)
+        If InStr(s, CStr(hw(i))) > 0 Then IsHardwareRoleLabel = True: Exit Function
     Next i
 End Function
 
@@ -9734,9 +15747,198 @@ Private Function ProperCaseText(ByVal s As String) As String
 End Function
 
 ' ============================================================
+' UNQUALIFIED "POT BLOCK" BOM ROWS -> ID / OD
+' ------------------------------------------------------------
+' Real BOMs name both pot blocks the SAME thing. From a live job:
+'
+'   103  Top Holder Block Material     6.875  8.000  13.875
+'   104  Bottom Holder Block Material  5.970  8.000  13.875
+'   105  Pot Block Material            5.500  5.500   6.875
+'   106  Pot Block Material            5.500  5.500   5.970
+'
+' Rows 105 and 106 carry no Top/Bottom/ID/OD token, so IsLikelyIdSideName and
+' IsLikelyOdSideName both return False and StandardPlateName falls through to the
+' generic "POT BLOCK". That is not one of the six BMS roles, so:
+'
+'   * CanonicalHolderQuoteName passes it through unchanged,
+'   * it never matches an ID POT / OD POT row, and
+'   * MapTempcraftBomDimsToCmsSteel hits its Case Else and BLIND-SORTS the dims --
+'     the exact L >= W >= T sort bms_steel_dim_rules.md says must never be applied
+'     to a pot, because a pot's Thickness is its LARGEST size.
+'
+' The result on that job was a phantom seventh steel row reading "Pot Block
+' Material  T=5.5  W=5.5  L=6.875" -- the same block as ID Pot (T=6.875 W=5.5
+' L=5.5) with its axes scrambled -- carrying 67.4 hours and $126.66 of steel that
+' does not exist, on top of the ID Pot and OD Pot rows that were already correct.
+'
+' GROUND THICKNESS TELLS THEM APART. A pot is set into its holder and the two are
+' ground together, so a pot and its own holder measure the same along the stack.
+' Above: holder 6.875 pairs with pot Hgt 6.875, holder 5.970 with pot Hgt 5.970.
+' This is the same rule RefineBmsRolesFromFeatureEvidence applies to CAD geometry,
+' and this BOM is a second, independent confirmation of it.
+'
+' Runs before BuildExportRowsFromBom so every downstream consumer -- export rows,
+' the steel sheet, the BOM match report, the web app -- sees a qualified name and
+' the correct dimension mapping. Nothing here invents a row; it only names rows
+' the BOM already has.
+' ============================================================
+
+' The pot/holder stack dimension out of a BOM row, whichever column order it is in.
+' In Tempcraft file order the fields hold Lth/Wth/Hgt: a holder's stack dimension
+' is Lth and a pot's is Hgt. Already-CMS rows hold real T/W/L.
+Private Function BomStackDimForPot(ByVal i As Long) As Double
+    If i < 1 Or i > BomCount Then Exit Function
+    If BomRows(i).BomIsTempcraftOrder Then
+        BomStackDimForPot = BomRows(i).BomLength      ' Hgt column
+    Else
+        BomStackDimForPot = BomRows(i).BomThickness
+    End If
+End Function
+
+Private Function BomStackDimForHolder(ByVal i As Long) As Double
+    If i < 1 Or i > BomCount Then Exit Function
+    If BomRows(i).BomIsTempcraftOrder Then
+        BomStackDimForHolder = BomRows(i).BomThickness ' Lth column
+    Else
+        BomStackDimForHolder = BomRows(i).BomThickness
+    End If
+End Function
+
+Private Sub ResolveUnqualifiedPotBomRows()
+On Error GoTo eh
+    ' A pot and its holder are ground together, so their stack dimensions agree
+    ' this closely. Wider than the CAD tolerance because BOM sizes are nominal.
+    Const POT_HOLDER_MATCH_TOL As Double = 0.06
+
+    If BomCount < 1 Then Exit Sub
+
+    Dim i As Long, k As String
+    Dim potIdx() As Long, nPot As Long
+    ReDim potIdx(1 To BomCount)
+    nPot = 0
+
+    Dim idhIdx As Long, odhIdx As Long
+    idhIdx = 0: odhIdx = 0
+
+    For i = 1 To BomCount
+        k = NormalizeKey(CanonicalHolderQuoteName(BomRows(i).quoteName))
+        Select Case k
+            Case "POTBLOCK", "POT"
+                nPot = nPot + 1
+                potIdx(nPot) = i
+            Case "IDHOLDER"
+                If idhIdx = 0 Then idhIdx = i
+            Case "ODHOLDER"
+                If odhIdx = 0 Then odhIdx = i
+        End Select
+    Next i
+
+    If nPot < 1 Then Exit Sub
+
+    LogLine "BMS BOM: " & nPot & " pot-block row(s) carry no ID/OD side token; resolving by " & _
+            "ground thickness against the holders."
+
+    Dim tIdh As Double, tOdh As Double
+    If idhIdx > 0 Then tIdh = BomStackDimForHolder(idhIdx)
+    If odhIdx > 0 Then tOdh = BomStackDimForHolder(odhIdx)
+    LogLine "  holder stack dims: ID=" & FormatNumberForCsv(tIdh) & _
+            " (BOM row " & idhIdx & ")  OD=" & FormatNumberForCsv(tOdh) & _
+            " (BOM row " & odhIdx & ")"
+
+    ' --- two unqualified pots: the normal case -----------------------------
+    If nPot = 2 Then
+        Dim ta As Double, tb As Double
+        ta = BomStackDimForPot(potIdx(1))
+        tb = BomStackDimForPot(potIdx(2))
+        LogLine "  pot stack dims: row " & potIdx(1) & "=" & FormatNumberForCsv(ta) & _
+                "  row " & potIdx(2) & "=" & FormatNumberForCsv(tb)
+
+        Dim aIsId As Boolean, decided As Boolean
+        decided = False
+
+        If tIdh > 0# And tOdh > 0# And ta > 0# And tb > 0# Then
+            Dim keepErr As Double, swapErr As Double
+            keepErr = Abs(ta - tIdh) + Abs(tb - tOdh)
+            swapErr = Abs(tb - tIdh) + Abs(ta - tOdh)
+            LogLine "  pairing err: rowA=ID/rowB=OD -> " & FormatNumberForCsv(keepErr) & _
+                    "   rowA=OD/rowB=ID -> " & FormatNumberForCsv(swapErr)
+            If Abs(keepErr - swapErr) > 0.001 Then
+                aIsId = (keepErr < swapErr)
+                decided = True
+                If MinDouble(keepErr, swapErr) > POT_HOLDER_MATCH_TOL * 2# Then
+                    LogLine "*** BMS BOM WARNING: neither pot matches a holder thickness within " & _
+                            FormatNumberForCsv(POT_HOLDER_MATCH_TOL) & _
+                            ". Taking the closer pairing, but CHECK ID/OD POT on the steel order ***"
+                End If
+            End If
+        End If
+
+        If Not decided Then
+            ' No usable holders. Fall back to the shop convention: the ID side is
+            ' the top, and on every reference job the ID pot is the thicker one.
+            aIsId = (ta >= tb)
+            LogLine "  no holder reference; falling back to thicker = ID (shop convention)."
+        End If
+
+        If aIsId Then
+            SetBomPotSide potIdx(1), "ID POT BLOCK", ta
+            SetBomPotSide potIdx(2), "OD POT BLOCK", tb
+        Else
+            SetBomPotSide potIdx(1), "OD POT BLOCK", ta
+            SetBomPotSide potIdx(2), "ID POT BLOCK", tb
+        End If
+        Exit Sub
+    End If
+
+    ' --- one unqualified pot: match it to whichever holder it was ground with --
+    If nPot = 1 Then
+        Dim tp As Double
+        tp = BomStackDimForPot(potIdx(1))
+        If tp > 0# And tIdh > 0# And tOdh > 0# Then
+            If Abs(tp - tIdh) <= Abs(tp - tOdh) Then
+                SetBomPotSide potIdx(1), "ID POT BLOCK", tp
+            Else
+                SetBomPotSide potIdx(1), "OD POT BLOCK", tp
+            End If
+        ElseIf tp > 0# And tIdh > 0# Then
+            SetBomPotSide potIdx(1), "ID POT BLOCK", tp
+        ElseIf tp > 0# And tOdh > 0# Then
+            SetBomPotSide potIdx(1), "OD POT BLOCK", tp
+        Else
+            LogLine "*** BMS BOM WARNING: one unqualified pot-block row and no holder to pair it " & _
+                    "with. Left as '" & BomRows(potIdx(1)).quoteName & "' -- it will not land on " & _
+                    "an ID/OD POT row. Name the side on the BOM or check the steel order ***"
+        End If
+        Exit Sub
+    End If
+
+    LogLine "*** BMS BOM WARNING: " & nPot & " unqualified pot-block rows. Expected one or two, " & _
+            "so none were reassigned -- check the BOM ***"
+    Exit Sub
+eh:
+    LogLine "ResolveUnqualifiedPotBomRows error: " & Err.Description
+End Sub
+
+Private Sub SetBomPotSide(ByVal i As Long, ByVal newName As String, ByVal stackDim As Double)
+    If i < 1 Or i > BomCount Then Exit Sub
+    LogLine "  BMS BOM row " & i & " '" & BomRows(i).Description & "' (stack dim " & _
+            FormatNumberForCsv(stackDim) & ") -> " & newName
+    BomRows(i).quoteName = newName
+End Sub
+
+Private Function MinDouble(ByVal a As Double, ByVal b As Double) As Double
+    If a < b Then MinDouble = a Else MinDouble = b
+End Function
+
+' ============================================================
 ' MATCH BOM -> CAD
 ' ============================================================
 Private Sub BuildExportRowsFromBom()
+    ' Name the pot blocks before anything consumes the BOM. An unqualified
+    ' "Pot Block Material" row that reaches this point becomes a phantom steel row
+    ' with blind-sorted dimensions -- see ResolveUnqualifiedPotBomRows.
+    ResolveUnqualifiedPotBomRows
+
     Dim i As Long, cadIdx As Long
     For i = 1 To BomCount
         cadIdx = FindBestCadMatchForBom(i)
@@ -9764,7 +15966,7 @@ Private Sub AddExportRow(ByVal bomIdx As Long, ByVal cadIdx As Long)
     Else
         ExportRows(ExportCount).HasCad = False
     End If
-    ExportRows(ExportCount).Status = CompareBomToCadStatus(bomIdx, cadIdx)
+    ExportRows(ExportCount).status = CompareBomToCadStatus(bomIdx, cadIdx)
 End Sub
 
 Private Function CanonicalHolderQuoteName(ByVal quoteName As String) As String
@@ -10094,7 +16296,448 @@ ErrHandler:
     LogLine "FindBestCadMatchForBomByDimsAndMassPreference error: " & Err.Description
     FindBestCadMatchForBomByDimsAndMassPreference = 0
 End Function
+' Rails the AI bridge missed, recovered with the geometry detector.
+'
+' Runs only when the bridge reported zero rails. Uses the same
+' IsStandardRailCandidate test BuildStdFromGeometry would have used, so there is
+' one definition of "rail" in the module, then adds a single aggregated Rails row
+' and tags the parts so the per-plate STL export picks them up too.
+' Add structural plates the AI bridge left unnamed, using the same geometry tests
+' BuildStdFromGeometry uses. Never touches a part the AI did name.
+'
+' Guards, each of which matters on one of the reference jobs:
+'   - PartHasNoSolid      : do not resurrect a surface-only copy the AI just
+'                           rejected (C18619 A-PLATE_2 / B-PLATE_2).
+'   - IsDegradedDuplicate : do not add the truncated second copy of a plate
+'                           (C18619 CLAMP-PLATE 0.482 x 15.250, which is small
+'                           enough to pass the ejector footprint test).
+'   - StdCadRole <> ""    : the AI already has a role for this part, including a
+'                           hardware role, so leave it alone.
+'   - already-quoted idx  : never add a second row for a part that has one.
+' Add rails the AI classifier did not label, using the geometry rail test. Only
+' fills gaps: a part the AI already gave any role to is left alone.
+Private Sub TopUpAiRailsFromGeometry(ByRef railIdx() As Long, ByRef nRail As Long)
+On Error GoTo eh
+
+    If PartCount < 1 Then Exit Sub
+
+    Dim i As Long
+    Dim fp As Double, baseFoot As Double, baseW As Double, baseL As Double
+
+    baseFoot = 0#: baseW = 0#: baseL = 0#
+    For i = 1 To PartCount
+        fp = parts(i).Width * parts(i).Length
+        If fp > baseFoot Then
+            baseFoot = fp
+            baseW = parts(i).Width
+            baseL = parts(i).Length
+        End If
+    Next i
+    If baseFoot <= 0# Then Exit Sub
+
+    Dim before As Long
+    before = nRail
+
+    For i = 1 To PartCount
+        If nRail >= 2 Then Exit For
+        If StdCadRole(i) = "" Then
+            If Not PartHasNoSolid(i) Then
+                If Not IsDegradedDuplicatePart(i) Then
+                    If IsStandardRailCandidate(i, baseW, baseL) Then
+                        SetStdCadRole i, "Rails"
+                        AddUniqueIndex railIdx, nRail, i
+                        LogLine "AI bridge rail RECOVERED by geometry: idx " & i & _
+                                " T/W/L=" & FormatNumberForCsv(parts(i).Thickness) & "/" & _
+                                FormatNumberForCsv(parts(i).Width) & "/" & _
+                                FormatNumberForCsv(parts(i).Length) & _
+                                " comp='" & parts(i).componentName & "'"
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    If nRail > before Then
+        LogLine "AI bridge rails: classifier labelled " & before & _
+                "; geometry brought the pair up to " & nRail & "."
+    End If
+
+    Exit Sub
+eh:
+    LogLine "TopUpAiRailsFromGeometry error: " & Err.Description
+End Sub
+
+Private Sub RecoverStructuralPlatesFromGeometryAfterAiBridge()
+On Error GoTo eh
+
+    If PartCount < 1 Then Exit Sub
+
+    Dim i As Long, j As Long
+    Dim fp As Double
+    Dim baseFoot As Double, baseW As Double, baseL As Double
+    Dim maxW As Double, maxL As Double
+
+    baseFoot = 0#: baseW = 0#: baseL = 0#: maxW = 0#: maxL = 0#
+    For i = 1 To PartCount
+        If parts(i).Width > maxW Then maxW = parts(i).Width
+        If parts(i).Length > maxL Then maxL = parts(i).Length
+        fp = parts(i).Width * parts(i).Length
+        If fp > baseFoot Then
+            baseFoot = fp
+            baseW = parts(i).Width
+            baseL = parts(i).Length
+        End If
+    Next i
+    If baseFoot <= 0# Then Exit Sub
+
+    ' Parts that already own a quote row.
+    Dim quoted() As Boolean
+    ReDim quoted(1 To PartCount)
+    For j = 1 To StdCount
+        If StdCadIndex(j) >= 1 And StdCadIndex(j) <= PartCount Then quoted(StdCadIndex(j)) = True
+    Next j
+
+    Dim nAdded As Long
+    Dim roleName As String
+    Dim isFull As Boolean
+    Dim isEj As Boolean
+    Dim thinnestEjT As Double
+    Dim thinnestEjRow As Long
+
+    nAdded = 0
+
+    For i = 1 To PartCount
+
+        If Not quoted(i) Then
+            If StdCadRole(i) = "" Then
+
+                ' A full-footprint plate with no solid body is real steel that did not
+                ' translate. It cannot be measured, so it is not quoted here -- but it
+                ' must not vanish quietly the way it would if this loop just skipped it.
+                If PartHasNoSolid(i) Then
+                    If IsFullFootprintStandardPlate(i, baseFoot, maxW, maxL) Then
+                        LogLine "*** WARNING: a plate at " & _
+                                Format(100# * (parts(i).Width * parts(i).Length) / baseFoot, "0") & _
+                                "% of the base footprint has NO SOLID BODY and no name from " & _
+                                "the classifier, so it is NOT on the quote: idx " & i & _
+                                " '" & parts(i).componentName & "' box " & _
+                                FormatNumberForCsv(parts(i).Thickness) & " x " & _
+                                FormatNumberForCsv(parts(i).Width) & " x " & _
+                                FormatNumberForCsv(parts(i).Length) & _
+                                ". The CAD did not translate cleanly -- check the .err log " & _
+                                "beside the source STEP and add this plate by hand ***"
+                    End If
+                End If
+
+                If Not PartHasNoSolid(i) Then
+                    If Not IsDegradedDuplicatePart(i) Then
+
+                        isFull = IsFullFootprintStandardPlate(i, baseFoot, maxW, maxL)
+                        isEj = False
+                        If Not isFull Then
+                            isEj = IsStandardEjectorPlateCandidate(i, baseW, baseL, baseFoot)
+                        End If
+
+                        If isFull Or isEj Then
+
+                            roleName = HardStandardRoleForCadIndex(i)
+                            If roleName <> "" Then
+                                If IsStandardJobForbiddenBmsRole(roleName) Then roleName = ""
+                            End If
+
+                            If roleName = "" Then
+                                If isFull Then
+                                    roleName = RecoveredFullPlateName(i)
+                                Else
+                                    roleName = "Ejector Plate"
+                                End If
+                            End If
+
+                            ' TWO ROWS WITH THE SAME NAME IS AN UNBUYABLE STEEL SHEET.
+                            '
+                            ' C18599 has an "Ejector Retainer" and an "Ejector Plate" in
+                            ' the CAD, and both name tokens resolve to "Ejector Plate".
+                            ' Left alone the sheet carries that name twice at two
+                            ' thicknesses and both rows fight over the same quote row.
+                            ' The shop's convention -- and the one BuildStdFromGeometry
+                            ' already applies -- is thinner = Ejector Plate, thicker =
+                            ' Bottom Ejector Plate.
+                            If NormalizeKey(roleName) = "EJECTORPLATE" Then
+                                thinnestEjRow = FindStdByName("Ejector Plate")
+                                If thinnestEjRow > 0 Then
+                                    thinnestEjT = StdT(thinnestEjRow)
+                                    If parts(i).Thickness > thinnestEjT + 0.01 Then
+                                        roleName = "Bottom Ejector Plate"
+                                    ElseIf parts(i).Thickness < thinnestEjT - 0.01 Then
+                                        ' This one is thinner, so it is the retainer and
+                                        ' the row already there is the backup.
+                                        stdName(thinnestEjRow) = "Bottom Ejector Plate"
+                                        StdTargetForName "Bottom Ejector Plate", "", _
+                                                         StdGrade(thinnestEjRow), StdQuoteRow(thinnestEjRow)
+                                        If StdCadIndex(thinnestEjRow) >= 1 Then
+                                            SetStdCadRole StdCadIndex(thinnestEjRow), "Bottom Ejector Plate"
+                                        End If
+                                        LogLine "Ejector naming: existing " & _
+                                                FormatNumberForCsv(thinnestEjT) & _
+                                                " row renamed to Bottom Ejector Plate; the thinner " & _
+                                                FormatNumberForCsv(parts(i).Thickness) & _
+                                                " plate is the Ejector Plate."
+                                    End If
+                                End If
+                            End If
+
+                            If roleName <> "" Then
+                                SetStdCadRole i, roleName
+                                Select Case NormalizeKey(roleName)
+                                    Case "APLATE": If gStdCavityCadIndex = 0 Then gStdCavityCadIndex = i
+                                    Case "BPLATE": If gStdCoreCadIndex = 0 Then gStdCoreCadIndex = i
+                                End Select
+                                AddStdPlateFromCad i, roleName
+                                quoted(i) = True
+                                nAdded = nAdded + 1
+
+                                LogLine "AI bridge plate RECOVERED by geometry: idx " & i & _
+                                        " -> " & roleName & _
+                                        " | T=" & FormatNumberForCsv(parts(i).Thickness) & _
+                                        " W=" & FormatNumberForCsv(parts(i).Width) & _
+                                        " L=" & FormatNumberForCsv(parts(i).Length) & _
+                                        " | " & Format(100# * (parts(i).Width * parts(i).Length) / baseFoot, "0") & _
+                                        "% of base footprint" & _
+                                        " | comp='" & parts(i).componentName & "'"
+                            End If
+                        End If
+
+                    End If
+                End If
+            End If
+        End If
+
+    Next i
+
+    If nAdded > 0 Then
+        LogLine "*** " & nAdded & " structural plate(s) the AI classifier did not name were " & _
+                "added from geometry. They are real steel at full base footprint; the " & _
+                "classifier missed them. Names came from the CAD token or from stack " & _
+                "position -- CHECK THE NAMES on the steel sheet ***"
+    End If
+
+    Exit Sub
+eh:
+    LogLine "RecoverStructuralPlatesFromGeometryAfterAiBridge error: " & Err.Description
+End Sub
+
+' Name a recovered full-footprint plate from where it sits in the stack.
+' Extreme-most plate on the stack axis is a clamp plate; otherwise fill the first
+' standard slot that is still free.
+Private Function RecoveredFullPlateName(ByVal idx As Long) As String
+On Error GoTo eh
+
+    RecoveredFullPlateName = ""
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    Dim axis As Integer
+    axis = gQuoteStackAxis
+    If axis < 1 Then axis = 3
+
+    Dim myC As Double
+    myC = PartAxisCenter(idx, axis)
+
+    ' Is anything already quoted further out along the stack than this part?
+    Dim j As Long, ci As Long
+    Dim anyAbove As Boolean, anyBelow As Boolean
+    Dim c As Double
+
+    For j = 1 To StdCount
+        ci = StdCadIndex(j)
+        If ci >= 1 And ci <= PartCount Then
+            c = PartAxisCenter(ci, axis)
+            If c > myC + 0.01 Then anyAbove = True
+            If c < myC - 0.01 Then anyBelow = True
+        End If
+    Next j
+
+    If Not anyAbove Then
+        If FindStdByName("Top Clamp Plate") = 0 Then
+            RecoveredFullPlateName = "Top Clamp Plate"
+            Exit Function
+        End If
+    End If
+
+    If Not anyBelow Then
+        If FindStdByName("Bottom Clamp Plate") = 0 Then
+            RecoveredFullPlateName = "Bottom Clamp Plate"
+            Exit Function
+        End If
+    End If
+
+    If FindStdByName("A Plate") = 0 Then RecoveredFullPlateName = "A Plate": Exit Function
+    If FindStdByName("B Plate") = 0 Then RecoveredFullPlateName = "B Plate": Exit Function
+    If FindStdByName("Support Plate") = 0 Then RecoveredFullPlateName = "Support Plate": Exit Function
+    If FindStdByName("Top Clamp Plate") = 0 Then RecoveredFullPlateName = "Top Clamp Plate": Exit Function
+    If FindStdByName("Bottom Clamp Plate") = 0 Then RecoveredFullPlateName = "Bottom Clamp Plate": Exit Function
+
+    RecoveredFullPlateName = "Plate " & CStr(StdCount + 1)
+    Exit Function
+eh:
+    RecoveredFullPlateName = ""
+End Function
+
+Private Sub RecoverRailsFromGeometryAfterAiBridge()
+On Error GoTo eh
+
+    If PartCount < 1 Then Exit Sub
+
+    ' Base footprint, matching how BuildStdFromGeometry derives it.
+    Dim i As Long
+    Dim baseFoot As Double, fp As Double
+    Dim baseW As Double, baseL As Double
+    baseFoot = 0#: baseW = 0#: baseL = 0#
+    For i = 1 To PartCount
+        fp = parts(i).Width * parts(i).Length
+        If fp > baseFoot Then
+            baseFoot = fp
+            baseW = parts(i).Width
+            baseL = parts(i).Length
+        End If
+    Next i
+    If baseFoot <= 0# Then Exit Sub
+
+    Dim railIdx() As Long
+    Dim n As Long
+    ReDim railIdx(1 To PartCount)
+    n = 0
+
+    For i = 1 To PartCount
+        ' Never steal a part the AI already named.
+        If StdCadRole(i) = "" Then
+            If IsStandardRailCandidate(i, baseW, baseL) Then
+                n = n + 1
+                railIdx(n) = i
+            End If
+        End If
+    Next i
+
+    If n < 1 Then
+        LogLine "AI bridge rails: none reported, and geometry found no rail candidates either."
+        Exit Sub
+    End If
+
+    ' Largest first, so the aggregated row carries the real rail size.
+    Dim a As Long, b As Long, tmp As Long
+    For a = 1 To n - 1
+        For b = a + 1 To n
+            If parts(railIdx(b)).BBoxVolume > parts(railIdx(a)).BBoxVolume Then
+                tmp = railIdx(a): railIdx(a) = railIdx(b): railIdx(b) = tmp
+            End If
+        Next b
+    Next a
+
+    For i = 1 To n
+        SetStdCadRole railIdx(i), "Rails"
+        LogLine "AI bridge rail RECOVERED by geometry: idx=" & railIdx(i) & _
+                " comp='" & parts(railIdx(i)).componentName & "'" & _
+                " T/W/L=" & FormatNumberForCsv(parts(railIdx(i)).Thickness) & _
+                "/" & FormatNumberForCsv(parts(railIdx(i)).Width) & _
+                "/" & FormatNumberForCsv(parts(railIdx(i)).Length)
+    Next i
+
+    AddStdRailsRowFromCad railIdx(1), n
+    LogLine "AI bridge rails recovered from geometry: qty " & n & _
+            " (classifier had called them hardware_other)"
+    Exit Sub
+
+eh:
+    LogLine "RecoverRailsFromGeometryAfterAiBridge error: " & Err.Description
+End Sub
+
+' Geometry CAD index for one of the six BMS roles, or 0 if geometry had no
+' opinion / the part is already claimed by another BOM row.
+Private Function GeometryCadIndexForQuoteName(ByVal quoteName As String) As Long
+On Error GoTo eh
+    GeometryCadIndexForQuoteName = 0
+
+    Dim k As String
+    Dim gi As Long
+    k = NormalizeKey(quoteName)
+    gi = 0
+
+    If k = "TCP" Then gi = gIdxTCP
+    If k = "BCP" Then gi = gIdxBCP
+    If k = "IDHOLDER" Then gi = gIdxIDH
+    If k = "ODHOLDER" Then gi = gIdxODH
+    If k = "IDPOT" Or k = "IDPOTBLOCK" Then gi = gIdxIDP
+    If k = "ODPOT" Or k = "ODPOTBLOCK" Then gi = gIdxODP
+
+    If gi < 1 Or gi > PartCount Then Exit Function
+    If parts(gi).UsedForBomMatch Then Exit Function
+
+    GeometryCadIndexForQuoteName = gi
+    Exit Function
+eh:
+    GeometryCadIndexForQuoteName = 0
+End Function
+
 Private Function FindBestCadMatchForBom(ByVal bomIdx As Long) As Long
+    ' Size + mass first. The CAD scan already identified the six BMS roles from
+    ' real measured geometry -- bounding box, mass, and stack position -- and
+    ' logs them as "Geometry plates: TCP=.. BCP=.. IDholder=..".
+    '
+    ' GetMassPreferenceForQuoteName below is NOT measurement, it is a hardcoded
+    ' assumption (TCP=LIGHT, BCP=HEAVY, ID HOLDER=HEAVY, OD HOLDER=LIGHT) and it
+    ' short-circuits ahead of all dimension scoring. On C18609 that assumption
+    ' was wrong in both pairs -- the OD Holder is the thicker/heavier one there
+    ' (6.875 vs 5.977) and the TCP outweighed the BCP (13.956 vs 13.257) -- so it
+    ' silently swapped TCP<->BCP and ID<->OD HOLDER. Orientation then ran on the
+    ' swapped mapping while the quote and steel sheet used the geometry mapping.
+    '
+    ' Geometry now wins; the LIGHT/HEAVY guess only runs when geometry could not
+    ' name the role at all.
+    ' BMS/pot jobs only. The gIdx* role globals are populated on every job, but
+    ' the module's own warning applies: they can be wrong on standard molds, so
+    ' a standard BOM row reading "Top Clamping Plate" must not get force-mapped
+    ' to the largest-footprint plate pair.
+    If GEOMETRY_WINS_OVER_BOM_MASS_PREFERENCE And Not gJobIsStandardBase Then
+        Dim geoIdx As Long
+        geoIdx = GeometryCadIndexForQuoteName(BomRows(bomIdx).quoteName)
+
+        ' Sanity-check against the BOM's own dimensions when it has them, so a
+        ' bad geometry pick falls through to the scoring loop instead of being
+        ' trusted blind. The path this pre-empts had an equivalent guard.
+        '
+        ' Skipped for Tempcraft-ordered rows: those still hold the raw Lth/Wth/Hgt
+        ' file order and are not remapped to CMS T/W/L until later (see
+        ' BomIsTempcraftOrder, consumed around lines 13746/13946). Comparing them
+        ' axis-for-axis here would score a correct clamping-plate pick at roughly
+        ' |18.000 - 1.375| x 2 and throw away a good match.
+        If geoIdx > 0 And BomRows(bomIdx).hasDims And Not BomRows(bomIdx).BomIsTempcraftOrder Then
+            Dim gDiff As Double
+            gDiff = Abs(parts(geoIdx).Length - BomRows(bomIdx).BomLength) + _
+                    Abs(parts(geoIdx).Width - BomRows(bomIdx).BomWidth) + _
+                    Abs(parts(geoIdx).Thickness - BomRows(bomIdx).BomThickness)
+            If gDiff > DIM_MAX_MATCH_TOTAL_DIFF Then
+                LogLine "Geometry-first match REJECTED for " & BomRows(bomIdx).quoteName & _
+                        ": CAD idx=" & geoIdx & " total dim diff=" & _
+                        FormatNumberForCsv(gDiff) & " > " & _
+                        FormatNumberForCsv(DIM_MAX_MATCH_TOTAL_DIFF) & _
+                        ". Falling through to dimension scoring."
+                geoIdx = 0
+            End If
+        End If
+
+        If geoIdx > 0 Then
+            LogLine "Geometry-first match (size/mass): " & BomRows(bomIdx).quoteName & _
+                    " -> CAD idx=" & geoIdx & _
+                    " '" & parts(geoIdx).componentName & "'" & _
+                    " T/W/L=" & FormatNumberForCsv(parts(geoIdx).Thickness) & _
+                    "/" & FormatNumberForCsv(parts(geoIdx).Width) & _
+                    "/" & FormatNumberForCsv(parts(geoIdx).Length) & _
+                    " mass=" & FormatNumberForCsv(parts(geoIdx).massValue) & _
+                    "  [BOM LIGHT/HEAVY guess skipped]"
+            FindBestCadMatchForBom = geoIdx
+            Exit Function
+        End If
+    End If
+
     If ShouldUseSameSizePairMassRule(bomIdx) Then
         Dim pref As String
         Dim massIdx As Long
@@ -10267,15 +16910,15 @@ On Error GoTo ErrHandler
 
     For i = 1 To PartCount
 
-        If IsPyropelPartIndex(i) Then GoTo NextPart
+        If IsPyropelPartIndex(i) Then GoTo nextPart
 
         t = parts(i).Thickness
         w = parts(i).Width
         l = parts(i).Length
         fp = w * l
 
-        If t < PLATE_MIN_THICKNESS Then GoTo NextPart
-        If fp < PLATE_MIN_FOOTPRINT Then GoTo NextPart
+        If t < PLATE_MIN_THICKNESS Then GoTo nextPart
+        If fp < PLATE_MIN_FOOTPRINT Then GoTo nextPart
 
         ' First separate true pot blocks.
         If IsPotBlockGeometry(t, w, l, maxFp) Then
@@ -10302,7 +16945,7 @@ On Error GoTo ErrHandler
 
         End If
 
-NextPart:
+nextPart:
     Next i
 
     ' Sort remaining major candidates by footprint descending.
@@ -10329,6 +16972,14 @@ NextPart:
         SortIndexArrayByVolumeDesc potList, nPot
         AssignPairTopBottom potList, nPot, gIdxIDP, gIdxODP
     End If
+
+    ' Everything above split each pair on its own, from bounding boxes and center
+    ' positions. Cross-check the pot/holder pairing against measured features --
+    ' ground thickness, nesting, and which way each block's molding face opens --
+    ' BEFORE the clamp plates are validated against the holder/pot pair, so the
+    ' TCP/BCP check below reads a corrected reference. No-ops on a standard base
+    ' (no pot pair) and when the CAD imported without solids.
+    RefineBmsRolesFromFeatureEvidence
 
     ' Make the thin clamp labels agree with the holder/pot top side.
     ValidateAndCorrectBmsTcpBcpAgainstHolderPot
@@ -10429,15 +17080,15 @@ On Error GoTo ErrHandler
 
     If refTop > PartCount Or refBot > PartCount Then Exit Sub
 
-    Dim ax As Integer
-    ax = DominantAxisBetweenParts(refTop, refBot)
-    If ax < 1 Or ax > 3 Then Exit Sub
+    Dim aX As Integer
+    aX = DominantAxisBetweenParts(refTop, refBot)
+    If aX < 1 Or aX > 3 Then Exit Sub
 
     Dim refDelta As Double
     Dim tcpDelta As Double
 
-    refDelta = AxisDeltaBetweenParts(refTop, refBot, ax)
-    tcpDelta = AxisDeltaBetweenParts(gIdxTCP, gIdxBCP, ax)
+    refDelta = AxisDeltaBetweenParts(refTop, refBot, aX)
+    tcpDelta = AxisDeltaBetweenParts(gIdxTCP, gIdxBCP, aX)
 
     If Abs(refDelta) < 0.001 Or Abs(tcpDelta) < 0.001 Then
         LogLine "BMS TCP/BCP validation skipped: tiny axis delta. refDelta=" & _
@@ -10446,7 +17097,7 @@ On Error GoTo ErrHandler
     End If
 
     LogLine "BMS TCP/BCP validation against " & refLabel & _
-            ": axis=" & CStr(ax) & _
+            ": axis=" & CStr(aX) & _
             " refDelta=" & FormatNumberForCsv(refDelta) & _
             " tcpDelta=" & FormatNumberForCsv(tcpDelta)
 
@@ -10714,7 +17365,7 @@ Private Function IsHolderBlockGeometry(ByVal t As Double, _
     ' Holders can be much smaller than TCP/BCP footprint.
     ' Example: 6.5 x 12.875 compared with 15.875 x 16.
     If maxFp > 0# Then
-        If fp < 0.20 * maxFp Then Exit Function
+        If fp < 0.2 * maxFp Then Exit Function
     End If
 
     ' Holders are elongated, not compact pots.
@@ -10804,21 +17455,21 @@ On Error GoTo ErrHandler
     dy = parts(a).AsmCenterY - parts(b).AsmCenterY
     dz = parts(a).AsmCenterZ - parts(b).AsmCenterZ
 
-    Dim ax As Double
-    Dim ay As Double
-    Dim az As Double
+    Dim aX As Double
+    Dim aY As Double
+    Dim aZ As Double
 
-    ax = Abs(dx)
-    ay = Abs(dy)
-    az = Abs(dz)
+    aX = Abs(dx)
+    aY = Abs(dy)
+    aZ = Abs(dz)
 
     Dim aIsTop As Boolean
 
     ' Use the dominant separation axis, same idea as OrientTcpTopFromCenters.
     ' Do NOT assume Z is top/bottom.
-    If ay >= ax And ay >= az Then
+    If aY >= aX And aY >= aZ Then
         aIsTop = (dy >= 0#)
-    ElseIf az >= ax And az >= ay Then
+    ElseIf aZ >= aX And aZ >= aY Then
         aIsTop = (dz >= 0#)
     Else
         aIsTop = (dx >= 0#)
@@ -10861,7 +17512,7 @@ Private Function GetPlateDims(ByVal stdName As String, ByVal pipeKeys As String,
                               ByRef t As Double, ByRef w As Double, ByRef l As Double, ByRef srcOut As String) As Boolean
     ' Prefer CAD finished bbox after CMS view-frame L/W/T axes are applied.
     ' BOM is backup only when CAD has no match — Tempcraft order is remapped
-    ' by plate role (never blind L≥W≥T; holders/pots can have T as largest).
+    ' by plate role (never blind L=W=T; holders/pots can have T as largest).
     GetPlateDims = False
     Dim ci As Long
     ci = FindPartIndexByKeys(pipeKeys, usedPart)
@@ -10906,8 +17557,8 @@ End Function
 ' order — NOT CMS Thickness/Width/Length. Map by plate role (from correct J000
 ' steel sheets + shop dimensioned DXF):
 '   TCP/BCP:     smallest=T; of remaining, larger=L smaller=W
-'   Holders:     Lth=T, Wth=L, Hgt=W   (e.g. 6.875 x 7.000 x 13.875 → T6.875 W13.875 L7)
-'   Pot blocks:  Lth=W, Wth=L, Hgt=T   (e.g. 5.500 x 5.500 x 6.875 → T6.875 W5.5 L5.5)
+'   Holders:     Lth=T, Wth=L, Hgt=W   (e.g. 6.875 x 7.000 x 13.875 ? T6.875 W13.875 L7)
+'   Pot blocks:  Lth=W, Wth=L, Hgt=T   (e.g. 5.500 x 5.500 x 6.875 ? T6.875 W5.5 L5.5)
 Private Sub MapTempcraftBomDimsToCmsSteel(ByVal stdName As String, _
                                           ByRef t As Double, ByRef w As Double, ByRef l As Double)
     Dim a As Double, b As Double, c As Double
@@ -10918,10 +17569,16 @@ Private Sub MapTempcraftBomDimsToCmsSteel(ByVal stdName As String, _
             SortThreeDimensions a, b, c, l, w, t
         Case "IDHOLDER", "ODHOLDER"
             t = a: l = b: w = c
-        Case "IDPOT", "IDPOTBLOCK", "ODPOT", "ODPOTBLOCK"
+        ' POTBLOCK / POT are the UNQUALIFIED spellings. ResolveUnqualifiedPotBomRows
+        ' should have turned those into ID/OD before anything gets here, but they are
+        ' listed anyway: the Case Else below blind-sorts, and a blind sort on a pot is
+        ' the one thing bms_steel_dim_rules.md says must never happen, because a pot's
+        ' Thickness is its LARGEST dimension. Getting the side wrong costs a label;
+        ' getting the axes wrong costs a mis-cut block.
+        Case "IDPOT", "IDPOTBLOCK", "ODPOT", "ODPOTBLOCK", "POTBLOCK", "POT"
             w = a: l = b: t = c
         Case Else
-            ' Unknown extras: keep prior L≥W≥T behavior.
+            ' Unknown extras: keep prior L=W=T behavior.
             SortThreeDimensions a, b, c, l, w, t
     End Select
 End Sub
@@ -10972,10 +17629,29 @@ End Function
 
 ' Steel STOCK thickness for the quote: add STEEL_THICKNESS_ALLOWANCE (0.250") to
 ' the finished thickness, then round UP to the nearest 0.05".
+' Steel STOCK thickness for the quote:
+' finished thickness + 1/8 inch, then round UP to nearest .05 inch.
+' Steel STOCK thickness for the quote:
+' leave finished thickness exactly as-is. No add. No rounding.
+' Steel STOCK thickness for the quote:
+' leave finished thickness exactly as-is. No add. No rounding.
 Private Function SteelStockThickness(ByVal finished As Double) As Double
     If finished <= 0 Then Exit Function
-    SteelStockThickness = RoundUpToNickel(finished + STEEL_THICKNESS_ALLOWANCE)
+    SteelStockThickness = finished
 End Function
+
+' Steel STOCK width/length for the quote:
+' finished width/length + 1/4 inch, then round UP to nearest .05 inch.
+Private Function SteelStockWidthLength(ByVal finished As Double) As Double
+    If finished <= 0 Then Exit Function
+    SteelStockWidthLength = RoundUpToNickel(finished + STEEL_WIDTH_LENGTH_ALLOWANCE)
+End Function
+
+' Steel STOCK width/length for the quote:
+' finished width/length + 1/4 inch, then round UP to nearest .05 inch.
+
+' Steel STOCK width/length for the quote:
+' finished width/length + 1/4 inch, then round UP to nearest .05 inch.
 
 ' Write today's date and the job ref number next to their labels on every
 ' sheet of a workbook (DATE -> today; REF #/JOB # -> C-number). Robust to
@@ -11069,7 +17745,7 @@ Private Function CollectExtra4140Parts(ByRef exDesc() As String, ByRef exQty() A
                         exW(n) = BomRows(i).BomWidth
                         exL(n) = BomRows(i).BomLength
                         If BomRows(i).BomIsTempcraftOrder Then
-                            ' Extras are not in the six-plate map; use L≥W≥T for steel sheet.
+                            ' Extras are not in the six-plate map; use L=W=T for steel sheet.
                             MapTempcraftBomDimsToCmsSteel "", ext(n), exW(n), exL(n)
                         End If
                     End If
@@ -11137,18 +17813,36 @@ On Error GoTo ErrHandler
     Dim i As Long
     Dim tt As Double, ww As Double, ll As Double, src As String
     Dim qt As Double, qw As Double, ql As Double
+
+    ' Same thickness banding the standard flow uses -- the shop's rule covers pot
+    ' and holder blocks too. Rows 31-34 are ALREADY the premium rows, so a pot at
+    ' 6.875" simply stays put; it is the 5.5" pots (C18609, C18611) that move down
+    ' to a 1.88/lb row, and the 10.443" TCP/BCP of C18602-05 that move UP.
+    Dim usedQuoteRows(1 To 200) As Boolean
+    Dim wr As Long
     For i = 1 To 6
         If GetPlateDims(stdN(i), keys(i), usedPart, tt, ww, ll, src) Then
-            qt = tt: qw = RoundUpToNickel(ww): ql = RoundUpToNickel(ll)
+            qt = tt
+            qw = ww
+            ql = ll
+
             If QUOTE_ROUND_UP_TO_QUARTER Then
-                qt = SteelStockThickness(tt)
+                qt = tt
+                qw = SteelStockWidthLength(ww)
+                ql = SteelStockWidthLength(ll)
             End If
-            xlWs.Cells(rowN(i), 1).value = stdN(i)
-            xlWs.Cells(rowN(i), 3).value = 1
-            xlWs.Cells(rowN(i), 4).value = qt
-            xlWs.Cells(rowN(i), 5).value = qw
-            xlWs.Cells(rowN(i), 6).value = ql
-            LogLine "Quote row " & rowN(i) & " (" & stdN(i) & ") <- " & src & _
+            wr = StdBandedQuoteRow(usedQuoteRows, "4140", qt, rowN(i), stdN(i))
+            usedQuoteRows(wr) = True
+            ' Column A is written ONLY on a move. The template already labels
+            ' 22/23/31-34 with these six names, but rows 26-29 are blank, so a
+            ' pot that drops to a standard row would otherwise land on the quote
+            ' with no description at all.
+            If wr <> rowN(i) Then xlWs.Cells(wr, 1).value = stdN(i)
+            xlWs.Cells(wr, 3).value = 1
+            xlWs.Cells(wr, 4).value = qt
+            xlWs.Cells(wr, 5).value = qw
+            xlWs.Cells(wr, 6).value = ql
+            LogLine "Quote row " & wr & " (" & stdN(i) & ") <- " & src & _
                     " stock T=" & qt & " W=" & qw & " L=" & ql
         Else
             LogLine "Quote row " & rowN(i) & " (" & stdN(i) & ") : no CAD or BOM match"
@@ -11159,24 +17853,36 @@ On Error GoTo ErrHandler
     Dim exDesc() As String, exQty() As Long, ext() As Double, exW() As Double, exL() As Double
     Dim nx As Long
     nx = CollectExtra4140Parts(exDesc, exQty, ext, exW, exL)
-    Dim spare As Variant
-    spare = Array(26, 27, 28, 29, 24, 25, 30)
-    Dim sp As Long, exr As Long, rr As Long, et As Double, ew As Double, el As Double
-    sp = 0
+    ' ALLOCATED, NOT HARD-CODED.
+    '
+    ' This used to walk a fixed Array(26, 27, 28, 29, 24, 25, 30) with its own
+    ' index and no knowledge of what the six pot rows above had taken. That was
+    ' safe only while those rows were fixed at 22/23/31-34; now that a thin pot
+    ' can drop to row 26, a hard-coded list would write an extra part straight
+    ' over it. NextStdSpareQuoteRow owns the free-row question, and passing the
+    ' extra part's own thickness keeps it in the right price band too.
+    Dim exr As Long, rr As Long, et As Double, ew As Double, el As Double
     For exr = 1 To nx
-        If sp > UBound(spare) Then
+        et = ext(exr)
+        ew = exW(exr)
+        el = exL(exr)
+
+        If QUOTE_ROUND_UP_TO_QUARTER Then
+            et = ext(exr)
+            ew = SteelStockWidthLength(ew)
+            el = SteelStockWidthLength(el)
+        End If
+        rr = NextStdSpareQuoteRow(usedQuoteRows, "4140", et)
+        If rr = 0 Then
             LogLine "Quote: no spare row for extra 4140 part: " & exDesc(exr)
         Else
-            rr = CLng(spare(sp))
-            et = ext(exr): ew = exW(exr): el = exL(exr)
-            If QUOTE_ROUND_UP_TO_QUARTER Then et = SteelStockThickness(et)
+            usedQuoteRows(rr) = True
             xlWs.Cells(rr, 1).value = exDesc(exr)
             xlWs.Cells(rr, 3).value = exQty(exr)
             xlWs.Cells(rr, 4).value = et
             xlWs.Cells(rr, 5).value = ew
             xlWs.Cells(rr, 6).value = el
             LogLine "Quote extra 4140 row " & rr & " <- " & exDesc(exr) & " qty " & exQty(exr)
-            sp = sp + 1
         End If
     Next exr
 
@@ -11187,13 +17893,6 @@ On Error GoTo ErrHandler
         WritePurchasedCategoryToSheet xlWs
     End If
     StampWorkbookDateAndRef xlWb, FormatRefNumber
-    ' Force formula calc so the webapp can read hours/price with data_only.
-    On Error Resume Next
-    xlApp.Calculation = -4105   ' xlCalculationAutomatic
-    xlApp.CalculateFull
-    xlWs.Calculate
-    Err.Clear
-    On Error GoTo ErrHandler
     xlWb.Save
     xlWb.Close False
     xlApp.Quit
@@ -11279,7 +17978,7 @@ On Error GoTo ErrHandler
                     ws.Cells(writeRow, 1).value = 1
                     ws.Cells(writeRow, 2).value = names(i)
                     ' CMS steel sheet: C=Thickness, E=Width, G=Length
-                    ' from CMS view-frame axes (TOP X=W, TOP Y=L, RIGHT X=T) — not L≥W≥T sort.
+                    ' from CMS view-frame axes (TOP X=W, TOP Y=L, RIGHT X=T) — not L=W=T sort.
                     ws.Cells(writeRow, 3).value = ft(i)   ' C = Thickness / Height
                     ws.Cells(writeRow, 5).value = fw(i)   ' E = Width
                     ws.Cells(writeRow, 7).value = fl(i)   ' G = Length
@@ -11309,7 +18008,7 @@ On Error GoTo ErrHandler
         Set refSh = Nothing
         Set refSh = xlWb.Sheets(CStr(refNm))
         If Not refSh Is Nothing Then
-            refSh.Cells(11, 9).Value = FormatRefNumber
+            refSh.Cells(11, 9).value = FormatRefNumber
             refSh.Cells(12, 10).ClearContents
         End If
     Next refNm
@@ -11344,7 +18043,7 @@ Private Sub HarmonizeOneBmsFootprintPair(ByRef found() As Boolean, _
     Dim wa As Double, la As Double, wb As Double, lb As Double
     wa = fw(a): la = fl(a): wb = fw(b): lb = fl(b)
 
-    ' Detect W↔L swap between the pair (same sizes, axes flipped).
+    ' Detect W?L swap between the pair (same sizes, axes flipped).
     If Abs(wa - lb) < 0.2 And Abs(la - wb) < 0.2 And Abs(wa - wb) > 0.25 Then
         LogLine "J000 " & label & ": footprint W/L swapped between pair — aligning to first plate."
         fw(b) = wa: fl(b) = la
@@ -11500,6 +18199,299 @@ Private Function PartAxisCenter(ByVal idx As Long, ByVal axis As Integer) As Dou
         Case 2: PartAxisCenter = parts(idx).AsmCenterY
         Case Else: PartAxisCenter = parts(idx).AsmCenterZ
     End Select
+End Function
+
+' Bounding-box extent of a part along a model axis (1=X, 2=Y, 3=Z).
+Private Function PartAxisExtent(ByVal idx As Long, ByVal axis As Integer) As Double
+    If idx < 1 Or idx > PartCount Then Exit Function
+    Select Case axis
+        Case 1: PartAxisExtent = parts(idx).BoxDx
+        Case 2: PartAxisExtent = parts(idx).BoxDy
+        Case Else: PartAxisExtent = parts(idx).BoxDz
+    End Select
+End Function
+
+' Which model axis the plates stack along, taken as the THINNEST axis of the
+' largest-footprint part. A full-footprint plate is by definition thin along the
+' stack and wide across it, so that one part settles the axis for the whole base
+' without needing the classifier to have run first.
+'
+' Verified against all five hand-quoted reference jobs:
+'   C18599 A plate 17.875 x 11.910 x 35.500 -> Y     C18616 -> Z
+'   C18619 A plate 22.000 x  4.398 x 25.500 -> Y     C18621 -> Z    C18597 -> Y
+Private Function ResolveQuoteStackAxis() As Integer
+    ResolveQuoteStackAxis = 0
+    If PartCount < 1 Then Exit Function
+
+    Dim i As Long, bestIdx As Long
+    Dim fp As Double, bestFoot As Double
+
+    bestFoot = 0#
+    bestIdx = 0
+    For i = 1 To PartCount
+        If parts(i).BoxDx > 0# And parts(i).BoxDy > 0# And parts(i).BoxDz > 0# Then
+            fp = parts(i).Width * parts(i).Length
+            If fp > bestFoot Then
+                bestFoot = fp
+                bestIdx = i
+            End If
+        End If
+    Next i
+
+    If bestIdx < 1 Then Exit Function
+
+    Dim dx As Double, dy As Double, dz As Double
+    dx = parts(bestIdx).BoxDx
+    dy = parts(bestIdx).BoxDy
+    dz = parts(bestIdx).BoxDz
+
+    If dx <= dy And dx <= dz Then
+        ResolveQuoteStackAxis = 1
+    ElseIf dy <= dx And dy <= dz Then
+        ResolveQuoteStackAxis = 2
+    Else
+        ResolveQuoteStackAxis = 3
+    End If
+End Function
+
+' THICKNESS IS THE STACK-AXIS EXTENT, NOT THE SMALLEST DIMENSION.
+'
+' When the CMS view frame is unavailable, parts().Thickness comes from
+' SortThreeDimensions, i.e. thickness = smallest of the three. That is right for a
+' thin plate and wrong for anything standing up in the stack, and rails stand up:
+'
+'   job     rail box (Dx/Dy/Dz)        sorted T   stack-axis T   hand-quoted T
+'   C18599  1.875 / 10.000 / 35.500      1.875       10.000          10.0
+'   C18616  36.500 / 3.375 /  4.500      3.375        4.500           4.5
+'   C18619  22.000 / 4.500 /  3.625      3.625        4.500           4.5
+'
+' Getting it wrong keeps the volume (so the weight looks fine) but swaps which
+' face is the ground face: C18599's rails were quoted with a 10.000 x 35.500
+' Blanchard face, 355 sq in, where the real ground face is 1.875 x 35.250, 66 sq in.
+' That is a five-fold overquote on grinding, on every job with rails.
+'
+' Returns the whole T/W/L triple, because thickness cannot be re-pointed on its own.
+'
+' The sorted triple for a C18599 rail is T=1.875 W=10.000 L=35.500. The stack-axis
+' thickness is 10.000 -- which is the value sitting in W. Writing thickness alone
+' gives 10.000 x 10.000 x 35.500: the 1.875 dimension is gone, the volume goes from
+' 666 to 3552 cubic inches and the rail is quoted at five times its weight.
+'
+' So take all three from the box: T is the stack-axis extent and W/L are the other
+' two, keeping the smaller-in-W / larger-in-L order the sorted path already used.
+' For a normal thin plate this returns exactly what was there before.
+'
+' False when the box is unusable or the axis is unresolved -- callers keep the
+' existing measurement.
+Private Function StackAxisDimsForPart(ByVal idx As Long, _
+                                      ByRef t As Double, _
+                                      ByRef w As Double, _
+                                      ByRef l As Double) As Boolean
+    StackAxisDimsForPart = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If gQuoteStackAxis < 1 Or gQuoteStackAxis > 3 Then Exit Function
+    If parts(idx).BoxDx <= 0# Or parts(idx).BoxDy <= 0# Or parts(idx).BoxDz <= 0# Then Exit Function
+
+    Dim a As Double, b As Double
+    Select Case gQuoteStackAxis
+        Case 1
+            t = parts(idx).BoxDx
+            a = parts(idx).BoxDy
+            b = parts(idx).BoxDz
+        Case 2
+            t = parts(idx).BoxDy
+            a = parts(idx).BoxDx
+            b = parts(idx).BoxDz
+        Case Else
+            t = parts(idx).BoxDz
+            a = parts(idx).BoxDx
+            b = parts(idx).BoxDy
+    End Select
+
+    If a <= b Then
+        w = a
+        l = b
+    Else
+        w = b
+        l = a
+    End If
+
+    StackAxisDimsForPart = (t > 0# And w > 0# And l > 0#)
+End Function
+
+' Component name with the path prefix and the trailing SolidWorks instance numbers
+' removed: "MOLDBASE_ASM-1/2223605_B-PLATE_2-1" -> "2223605_B-PLATE_2".
+Private Function PartBaseName(ByVal rawName As String) As String
+    Dim s As String
+    Dim p As Long
+
+    s = UCase(Trim(rawName))
+    If s = "" Then Exit Function
+
+    p = InStrRev(s, "/")
+    If p > 0 Then s = Mid(s, p + 1)
+
+    Do While Len(s) > 0
+        p = InStrRev(s, "-")
+        If p = 0 Then Exit Do
+        If Not IsNumeric(Mid(s, p + 1)) Then Exit Do
+        s = Left(s, p - 1)
+    Loop
+
+    PartBaseName = Trim(s)
+End Function
+
+' Two component names that differ ONLY by a translator copy marker, i.e. one is the
+' other with "_2" / "-2" / " 2" appended.
+'
+' This deliberately does NOT strip trailing digits from a name to build a shared
+' key. That approach looked tidy and was badly wrong on generic STEP output:
+' C18621 arrives as Imported, Imported_2, Imported_3 ... Imported_16, where the
+' trailing number IS the identity. Stripping it collapsed seven unrelated parts
+' into one "IMPORTED" family and the real Top Clamp Plate got discarded as a
+' duplicate of a corner block.
+Private Function SameNameFamily(ByVal nameA As String, ByVal nameB As String) As Boolean
+    SameNameFamily = False
+
+    Dim a As String, b As String
+    a = PartBaseName(nameA)
+    b = PartBaseName(nameB)
+    If a = "" Or b = "" Then Exit Function
+
+    If a = b Then
+        SameNameFamily = True
+        Exit Function
+    End If
+
+    ' Longer one must be the shorter plus a copy marker.
+    Dim lng As String, sht As String
+    If Len(a) > Len(b) Then
+        lng = a: sht = b
+    Else
+        lng = b: sht = a
+    End If
+
+    If Len(lng) <= Len(sht) + 1 Then Exit Function
+    If Left(lng, Len(sht)) <> sht Then Exit Function
+
+    Dim tail As String
+    tail = Mid(lng, Len(sht) + 1)
+    If Len(tail) < 2 Then Exit Function
+
+    Dim sep As String
+    sep = Left(tail, 1)
+    If sep <> "_" And sep <> "-" And sep <> " " Then Exit Function
+    If Not IsNumeric(Mid(tail, 2)) Then Exit Function
+
+    SameNameFamily = True
+End Function
+
+' ONE PLATE THAT ARRIVED TWICE MUST NOT BE QUOTED TWICE.
+'
+' A STEP file that only partly translates can yield a second component for the
+' same physical plate whose solid stitched far enough to report a mass -- so
+' PartHasNoSolid clears it -- but whose bounding box is short. C18616 shipped every
+' plate family twice and the quote came out at 11 rows against a hand-written 6:
+'
+'   2223605_B-PLATE_2      5.875 x 25.000 x 36.500      <- real
+'   2223605_B-PLATE        3.879 x 25.000 x 36.500      <- same plate, truncated
+'   2223605_EJ-RET-PLATE_2 0.625 x 18.000 x 36.500      <- real
+'   2223605_EJ-RET-PLATE   0.625 x 18.000 x 31.875      <- same plate, truncated
+'
+' C18619 does the same and its short copy (CLAMP-PLATE, 0.482 x 15.250 x 16.625
+' against a real 1.375 x 22.000 x 25.500) is small enough to pass the ejector-plate
+' footprint test, so it would otherwise be recovered as an extra ejector plate.
+'
+' Test, all four parts of which are required:
+'   1. names differ only by a copy marker (SameNameFamily),
+'   2. the two occupy the same place IN PLANE -- not just overlapping on the stack
+'      axis. Without this, C18621's four identical corner blocks (Imported,
+'      Imported_2, ... all 1.750 x 1.750 x 3.375, sitting at the four corners
+'      12 inches apart) look like copies of each other,
+'   3. they overlap along the stack axis,
+'   4. this one is the smaller of the pair.
+Private Function IsDegradedDuplicatePart(ByVal idx As Long) As Boolean
+On Error GoTo eh
+
+    IsDegradedDuplicatePart = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If gQuoteStackAxis < 1 Then Exit Function
+
+    Dim ax1 As Integer, ax2 As Integer
+    Select Case gQuoteStackAxis
+        Case 1: ax1 = 2: ax2 = 3
+        Case 2: ax1 = 1: ax2 = 3
+        Case Else: ax1 = 1: ax2 = 2
+    End Select
+
+    Dim myT As Double, myFoot As Double, myC As Double
+    myT = PartAxisExtent(idx, gQuoteStackAxis)
+    myFoot = parts(idx).Width * parts(idx).Length
+    myC = PartAxisCenter(idx, gQuoteStackAxis)
+    If myT <= 0# Or myFoot <= 0# Then Exit Function
+
+    Dim j As Long
+    Dim oT As Double, oFoot As Double, oC As Double
+    Dim gap As Double
+
+    For j = 1 To PartCount
+        If j <> idx Then
+            If SameNameFamily(parts(idx).componentName, parts(j).componentName) Then
+
+                oT = PartAxisExtent(j, gQuoteStackAxis)
+                oFoot = parts(j).Width * parts(j).Length
+                oC = PartAxisCenter(j, gQuoteStackAxis)
+
+                If oT > 0# And oFoot > 0# Then
+                    If InPlaneCoincident(idx, j, ax1) Then
+                        If InPlaneCoincident(idx, j, ax2) Then
+
+                            ' Overlap along the stack axis.
+                            gap = Abs(oC - myC)
+                            If gap < 0.5 * (myT + oT) Then
+
+                                ' Sibling is materially thicker, or the same thickness
+                                ' over a bigger footprint. Either way this is the
+                                ' truncated copy.
+                                If oT > myT + 0.01 Then
+                                    IsDegradedDuplicatePart = True
+                                    Exit Function
+                                End If
+
+                                If Abs(oT - myT) <= 0.01 And oFoot > myFoot + 0.5 Then
+                                    IsDegradedDuplicatePart = True
+                                    Exit Function
+                                End If
+                            End If
+
+                        End If
+                    End If
+                End If
+
+            End If
+        End If
+    Next j
+
+    Exit Function
+eh:
+    IsDegradedDuplicatePart = False
+End Function
+
+' Two parts centred at effectively the same place along one axis. Tolerance scales
+' with the part so a big plate is allowed a bigger absolute offset, with a floor for
+' small parts.
+Private Function InPlaneCoincident(ByVal idxA As Long, ByVal idxB As Long, ByVal axis As Integer) As Boolean
+    Dim d As Double, tol As Double, biggest As Double
+
+    d = Abs(PartAxisCenter(idxA, axis) - PartAxisCenter(idxB, axis))
+
+    biggest = PartAxisExtent(idxA, axis)
+    If PartAxisExtent(idxB, axis) > biggest Then biggest = PartAxisExtent(idxB, axis)
+
+    tol = 0.15 * biggest
+    If tol < 0.5 Then tol = 0.5
+
+    InPlaneCoincident = (d <= tol)
 End Function
 
 Private Sub StdSortByAxisDesc(ByRef idx() As Long, ByVal n As Long, ByVal axis As Integer)
@@ -11916,7 +18908,7 @@ On Error GoTo ErrHandler
 
     For i = 1 To PartCount
 
-        If IsPyropelPartIndex(i) Then GoTo NextPart
+        If IsPyropelPartIndex(i) Then GoTo nextPart
 
         fp = parts(i).Width * parts(i).Length
 
@@ -11940,7 +18932,7 @@ On Error GoTo ErrHandler
             nThinSheet = nThinSheet + 1
         End If
 
-NextPart:
+nextPart:
     Next i
 
     Exit Sub
@@ -11967,7 +18959,7 @@ Private Function CountPcsStandardPlateNameHits() As Long
         If InStr(u, "SUPPORT") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
         If InStr(u, "STRIPPER") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextPcsHit
         If InStr(u, "RAIL") > 0 Then n = n + 1: GoTo NextPcsHit
-        If StandardPlateNameStd(parts(i).componentName) <> "" Then n = n + 1
+        If StandardPlateNameStd(parts(i).componentName) <> "" Or PdfRoleHintForCadIndex(i) <> "" Then n = n + 1
 NextPcsHit:
     Next i
     CountPcsStandardPlateNameHits = n
@@ -11990,6 +18982,7 @@ Private Function CountPcsStrongPlateNameHits() As Long
         If InStr(u, "SUPPORT") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextStrong
         If InStr(u, "STRIPPER") > 0 And InStr(u, "PLATE") > 0 Then n = n + 1: GoTo NextStrong
         nm = StandardPlateNameStd(parts(i).componentName)
+        If nm = "" Then nm = PdfRoleHintForCadIndex(i)
         If nm <> "" Then
             If InStr(UCase$(nm), "PLATE") > 0 Or InStr(UCase$(nm), "CLAMP") > 0 Then n = n + 1
         End If
@@ -12143,16 +19136,204 @@ Private Sub AddStdPlate(ByVal nm As String, _
     StdQuoteRow(StdCount) = qr
 End Sub
 
+' One dimension out of a bracketed size token, e.g. "5-78" -> 5.875, "35-12" -> 35.5.
+' The shop writes n-<num><den>, so 17-78 is 17 and 7/8, 35-12 is 35 and 1/2.
+Private Function ShopFracToInches(ByVal tok As String) As Double
+    Dim s As String, whole As String, num As String, den As String
+    Dim dash As Long, i As Long
+
+    ShopFracToInches = 0
+    s = Trim$(UCase$(tok))
+    If s = "" Then Exit Function
+
+    dash = InStr(s, "-")
+    If dash = 0 Then
+        If IsNumeric(s) Then ShopFracToInches = CDbl(s)
+        Exit Function
+    End If
+
+    whole = Left$(s, dash - 1)
+    num = Mid$(s, dash + 1)
+    If Not IsNumeric(whole) Then Exit Function
+
+    ' The fraction is written as digits with no separator: 78 = 7/8, 12 = 1/2,
+    ' 38 = 3/8, 316 = 3/16. Split so the LAST digit(s) are the denominator.
+    If Len(num) = 2 Then
+        den = Right$(num, 1): num = Left$(num, 1)
+    ElseIf Len(num) = 3 Then
+        den = Right$(num, 2): num = Left$(num, 1)
+    Else
+        Exit Function
+    End If
+
+    If Not IsNumeric(num) Or Not IsNumeric(den) Then Exit Function
+    If CDbl(den) = 0 Then Exit Function
+
+    ShopFracToInches = CDbl(whole) + CDbl(num) / CDbl(den)
+End Function
+
+' Thickness the NAME claims, from a bracketed W x L x T token, or 0 if absent.
+'
+' C18599 names its plates "A PLATE(17-78X35-12X5-78)" -- 17-7/8 x 35-1/2 x 5-7/8.
+' That is the shop stating the plate size explicitly, and it is worth checking the
+' measurement against.
+Private Function NamedThicknessInches(ByVal rawName As String) As Double
+    Dim s As String, inside As String
+    Dim p1 As Long, p2 As Long
+    Dim tokens() As String
+
+    NamedThicknessInches = 0
+    s = UCase$(rawName)
+    p1 = InStr(s, "(")
+    If p1 = 0 Then Exit Function
+    p2 = InStr(p1 + 1, s, ")")
+    If p2 = 0 Then Exit Function
+
+    inside = Mid$(s, p1 + 1, p2 - p1 - 1)
+    tokens = Split(inside, "X")
+    ' Need all three dimensions for the third to be the thickness.
+    If UBound(tokens) <> 2 Then Exit Function
+
+    NamedThicknessInches = ShopFracToInches(tokens(2))
+End Function
+
 Private Sub AddStdPlateFromCad(ByVal idx As Long, ByVal nm As String)
     If idx < 1 Or idx > PartCount Then Exit Sub
 
+    Dim t As Double, w As Double, l As Double
+    t = parts(idx).Thickness
+    w = parts(idx).Width
+    l = parts(idx).Length
+
+    ' Re-point T/W/L onto the stack axis. See StackAxisDimsForPart.
+    Dim aT As Double, aW As Double, aL As Double
+    If StackAxisDimsForPart(idx, aT, aW, aL) Then
+        If Abs(aT - t) > 0.005 Then
+            LogLine "DIMS from stack axis: " & nm & _
+                    " T/W/L " & Format(t, "0.000") & "/" & Format(w, "0.000") & "/" & Format(l, "0.000") & _
+                    " -> " & Format(aT, "0.000") & "/" & Format(aW, "0.000") & "/" & Format(aL, "0.000") & _
+                    " (box " & FormatNumberForCsv(parts(idx).BoxDx) & "/" & _
+                    FormatNumberForCsv(parts(idx).BoxDy) & "/" & _
+                    FormatNumberForCsv(parts(idx).BoxDz) & ", axis " & _
+                    Choose(gQuoteStackAxis, "X", "Y", "Z") & ")."
+        End If
+        t = aT
+        w = aW
+        l = aL
+    End If
+
+    ' A NAME THAT DISAGREES WITH THE MEASUREMENT IS A QUESTION, NOT AN ANSWER.
+    '
+    ' This used to override the measurement whenever it was a near-exact multiple of
+    ' the size in the component's own name, on the theory that a 2x box means two
+    ' coincident instances merged into one bounding box. C18599's A plate was the
+    ' case it was written for:
+    '
+    '     A PLATE(17-78X35-12X5-78)   named 5.875   measured 11.910   ratio 2.03
+    '
+    ' The hand-written steel sheet for C18599 settles it: that plate is quoted at
+    ' 11.875 -- the measurement was right and the name token was stale. The stack
+    ' confirms it, because the gap between the Top Clamp Plate above (bottom face at
+    ' 21.886) and the B plate below (top face at 10.013) is 11.873, so nothing but
+    ' an 11.875 plate fits there.
+    '
+    ' Overriding turned the most expensive plate in the base -- 17.875 x 35.500 P20 --
+    ' into half a plate, silently. So: never override. Say the two disagree and let
+    ' the estimator look, which is what this module does everywhere else that steel
+    ' is uncertain.
+    Dim namedT As Double, ratio As Double
+    namedT = NamedThicknessInches(nm)
+    If namedT <= 0 Then namedT = NamedThicknessInches(parts(idx).componentName)
+
+    If namedT > 0.01 And t > 0.01 Then
+        ratio = t / namedT
+        If Abs(ratio - 1) > 0.03 Then
+            LogLine "WARNING: PLATE THICKNESS DISAGREES: " & nm & _
+                    " measures T=" & Format(t, "0.000") & " but its name states " & _
+                    Format(namedT, "0.000") & " (ratio " & Format(ratio, "0.00") & _
+                    "). The MEASURED value is quoted. Check this plate on the steel " & _
+                    "sheet before cutting: either the CAD name is stale or the box is " & _
+                    "picking up more than one body."
+        End If
+    End If
+
     AddStdPlate nm, _
-                parts(idx).Thickness, _
-                parts(idx).Width, _
-                parts(idx).Length, _
+                t, _
+                w, _
+                l, _
                 1, _
-                "", _
+                BomGradeForCadIndex(idx), _
                 idx
+End Sub
+
+' Steel grade the BOM gave for a CAD part. "" when that part matched no BOM row.
+'
+' WHY THIS EXISTS
+'     This path used to pass "" as the grade hint, and that threw away a material
+'     the macro had already read correctly. C18638 (Hewitt 25-424) is the proof:
+'     XT_Export_BOM_Match_Report.csv shows all nine plates matched their BOM row
+'     with Material=420SS and Status=OK -- NormalizeSteelType had resolved the
+'     sheet's "#7 steel" exactly as intended -- and yet every row of
+'     Standard_Quote_Rows_Debug.csv came out 4140, because ResolveStdGrade saw an
+'     empty hint, fell through to DefaultStandardGradeForSlot, and returned
+'     STD_DEFAULT_GRADE_ALL. The whole base was quoted out of the #2 block when
+'     the customer specified #7, which is a different price per pound and a
+'     different set of workbook rows.
+'
+'     STD_DEFAULT_GRADE_ALL's own note (~line 546) already promised that "any
+'     explicit grade from the BOM or the CAD material still wins over this". On
+'     the BOM-driven path (~21517) that was true. On this CAD-driven path -- the
+'     one every job with a CAD file takes -- it never was. This closes that gap
+'     rather than weakening the default, so jobs whose BOM says nothing still get
+'     one grade for the whole base.
+'
+'     Safe to call here: BuildExportRowsFromBom runs at ~1311, well before
+'     ClassifyStandardBasePlates reaches this Sub, so ExportRows is fully built.
+Private Function BomGradeForCadIndex(ByVal cadIdx As Long) As String
+On Error Resume Next
+    BomGradeForCadIndex = ""
+    If cadIdx < 1 Then Exit Function
+    Dim i As Long
+    For i = 1 To ExportCount
+        If ExportRows(i).HasCad Then
+            If ExportRows(i).CadPartIndex = cadIdx Then
+                BomGradeForCadIndex = ExportRows(i).material
+                Exit Function
+            End If
+        End If
+    Next i
+End Function
+
+' Single place the Rails row is emitted, so all three callers (geometry, AI bridge,
+' AI-bridge-with-geometry-recovery) get stack-axis thickness. A rail is the part
+' most often mis-measured: it stands up in the stack, so its thickness is not its
+' smallest dimension, and the grind face is the small one.
+Private Sub AddStdRailsRowFromCad(ByVal idx As Long, ByVal qty As Long)
+    If idx < 1 Or idx > PartCount Then Exit Sub
+
+    Dim t As Double, w As Double, l As Double
+    t = parts(idx).Thickness
+    w = parts(idx).Width
+    l = parts(idx).Length
+
+    Dim aT As Double, aW As Double, aL As Double
+    If StackAxisDimsForPart(idx, aT, aW, aL) Then
+        If Abs(aT - t) > 0.005 Then
+            LogLine "RAILS dims from stack axis: T/W/L " & _
+                    Format(t, "0.000") & "/" & Format(w, "0.000") & "/" & Format(l, "0.000") & _
+                    " -> " & Format(aT, "0.000") & "/" & Format(aW, "0.000") & "/" & Format(aL, "0.000") & _
+                    " (box " & FormatNumberForCsv(parts(idx).BoxDx) & "/" & _
+                    FormatNumberForCsv(parts(idx).BoxDy) & "/" & FormatNumberForCsv(parts(idx).BoxDz) & _
+                    ", axis " & Choose(gQuoteStackAxis, "X", "Y", "Z") & "). Grind face " & _
+                    Format(aW, "0.000") & " x " & Format(aL, "0.000") & "."
+        End If
+        t = aT
+        w = aW
+        l = aL
+    End If
+
+    ' Rails take the grade from their own BOM row too -- see BomGradeForCadIndex.
+    AddStdPlate "Rails", t, w, l, qty, BomGradeForCadIndex(idx), idx
 End Sub
 
 ' Grade + Quote row for a standard plate name (gradeHint from BOM material, "" if unknown).
@@ -12230,9 +19411,29 @@ Private Function StdFullPlateNameFromGeometry(ByVal pos As Long, ByVal nFull As 
 
     ' Exact shop-standard tokens from imported STEP files are stronger than the
     ' generic stack pattern. Keep using geometry for generic/mixed names.
+    ' MANIFOLDPLATE belongs on this list and was missing.
+    '
+    ' StandardPlateNameStd already recognises " MANIFOLD " / " MAN PLT " in a CAD
+    ' component name, but the name it returned could never survive: it is not one
+    ' of the strong tokens here, so control fell through to the
+    ' STD_TRUST_CAD_NAMES_FOR_STANDARD_STACK test, which is False, which discards
+    ' the hint and returns the positional guess. And the positional guess can
+    ' never say "Manifold Plate" -- neither StdFullPlateName nor
+    ' StdInnerStackName has a manifold case at any plate count. So a hot-runner
+    ' base had no path to a manifold plate at all, however plainly the CAD named
+    ' it.
+    '
+    ' C17879 is the cost: five full-footprint plates at 1.875 / 4.875 / 3.875 /
+    ' 3.875 / 1.375, which is Top Clamp / MANIFOLD / A / B / Bottom Clamp. With no
+    ' manifold case the inner three were read as A / B / Support, so the 4.875
+    ' manifold was quoted as the A plate, the real 3.875 A plate as the B plate,
+    ' the real B plate as a Support Plate that does not exist in this mold, and
+    ' the #2 manifold row 29 was left empty. Three plates in the wrong workbook
+    ' rows and one invented.
     Select Case NormalizeKey(hinted)
         Case "APLATE", "BPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", _
-             "BOTTOMCLAMPPLATE", "TOPCLAMPPLATE", "SUPPORTPLATE", "STRIPPERPLATE"
+             "BOTTOMCLAMPPLATE", "TOPCLAMPPLATE", "SUPPORTPLATE", "STRIPPERPLATE", _
+             "MANIFOLDPLATE"
             StdFullPlateNameFromGeometry = hinted
             Exit Function
     End Select
@@ -12436,7 +19637,7 @@ End Function
 
 Private Function StdLeaderPinOrientationTopIsFirst(ByRef fullIdx() As Long, ByVal nFull As Long, _
                                                    ByRef lpIdx() As Long, ByVal nLp As Long, _
-                                                   ByVal ax As Integer, ByRef topIsFirstOut As Boolean) As Boolean
+                                                   ByVal aX As Integer, ByRef topIsFirstOut As Boolean) As Boolean
     ' Fallback ONLY when rails/ejector anchors are missing (Qwen rule).
     ' Prefer PRIMARY leader pins (matched to shoulder/LBB bushings). Never let
     ' SECONDARY (guided-ejector) pins decide stack orientation.
@@ -12458,10 +19659,10 @@ Private Function StdLeaderPinOrientationTopIsFirst(ByRef fullIdx() As Long, ByVa
         Select Case roleKey
             Case "LEADERPIN"
                 If setTag = "SECONDARY" Then GoTo nextLp
-                pinMean = pinMean + PartAxisCenter(lpIdx(i), ax)
+                pinMean = pinMean + PartAxisCenter(lpIdx(i), aX)
                 pinCount = pinCount + 1
             Case "LEADERPINBUSHING"
-                bushMean = bushMean + PartAxisCenter(lpIdx(i), ax)
+                bushMean = bushMean + PartAxisCenter(lpIdx(i), aX)
                 bushCount = bushCount + 1
             ' Guided-ejector bushings intentionally ignored for orientation.
         End Select
@@ -12470,8 +19671,8 @@ nextLp:
 
     Dim firstC As Double
     Dim lastC As Double
-    firstC = PartAxisCenter(fullIdx(1), ax)
-    lastC = PartAxisCenter(fullIdx(nFull), ax)
+    firstC = PartAxisCenter(fullIdx(1), aX)
+    lastC = PartAxisCenter(fullIdx(nFull), aX)
 
     ' DME/common mold-base rule: leader pins are on the B/core side, bushings
     ' are on the A/cavity side. Prefer pins first because the B side also has
@@ -12490,16 +19691,16 @@ nextLp:
     End If
 End Function
 
-Private Sub StdSetPartingLineFromRoles(ByVal ax As Integer)
+Private Sub StdSetPartingLineFromRoles(ByVal aX As Integer)
     gStdPartingLineAxis = 0
     gStdPartingLinePos = 0#
     If gStdCavityCadIndex < 1 Or gStdCoreCadIndex < 1 Then Exit Sub
 
-    gStdPartingLineAxis = ax
-    gStdPartingLinePos = (PartAxisCenter(gStdCavityCadIndex, ax) + PartAxisCenter(gStdCoreCadIndex, ax)) / 2#
+    gStdPartingLineAxis = aX
+    gStdPartingLinePos = (PartAxisCenter(gStdCavityCadIndex, aX) + PartAxisCenter(gStdCoreCadIndex, aX)) / 2#
     LogLine "Standard parting line rule: A/cavity idx " & gStdCavityCadIndex & _
             " and B/core idx " & gStdCoreCadIndex & _
-            " -> axis " & ax & " pos " & FormatNumberForCsv(gStdPartingLinePos)
+            " -> axis " & aX & " pos " & FormatNumberForCsv(gStdPartingLinePos)
 End Sub
 
 Private Function StdPartingSideForCadIndex(ByVal idx As Long) As String
@@ -12521,6 +19722,9 @@ End Function
 Private Function IsStandardRailCandidate(ByVal idx As Long, ByVal baseW As Double, ByVal baseL As Double) As Boolean
     IsStandardRailCandidate = False
     If idx < 1 Or idx > PartCount Then Exit Function
+    If IsScrewFastenerName(parts(idx).componentName) Then Exit Function
+    If IsDowelOrMinorRoundHardwareName(parts(idx).componentName) Then Exit Function
+    If IsRoundBarLike(idx) Then Exit Function
 
     Dim t As Double
     Dim w As Double
@@ -12541,7 +19745,7 @@ Private Function IsStandardRailCandidate(ByVal idx As Long, ByVal baseW As Doubl
     ' usually rods, pins, or pillars from the CAD bounding box, not rail steel.
     crossRatio = w / t
     If crossRatio < 1# Then crossRatio = 1# / crossRatio
-    If crossRatio < 1.35 Then Exit Function
+    If crossRatio < 1.2 Then Exit Function
 
     slenderRatio = l / w
     If slenderRatio < 2.25 Then Exit Function
@@ -12574,388 +19778,575 @@ Private Function IsStandardEjectorPlateCandidate(ByVal idx As Long, ByVal baseW 
 
     IsStandardEjectorPlateCandidate = True
 End Function
+Private Function IsStandardJobForbiddenBmsRole(ByVal roleName As String) As Boolean
+    Select Case NormalizeKey(roleName)
+        Case "TCP", "BCP", "IDHOLDER", "ODHOLDER", "IDPOT", "ODPOT"
+            IsStandardJobForbiddenBmsRole = True
+    End Select
+End Function
+
+
+
+Private Function IsFullFootprintStandardPlate(ByVal idx As Long, ByVal baseFoot As Double, ByVal maxW As Double, ByVal maxL As Double) As Boolean
+    IsFullFootprintStandardPlate = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    If parts(idx).Thickness < STD_MIN_PLATE_THICKNESS Then Exit Function
+    If IsRoundBarLike(idx) Then Exit Function
+    If IsScrewFastenerName(parts(idx).componentName) Then Exit Function
+    If IsDowelOrMinorRoundHardwareName(parts(idx).componentName) Then Exit Function
+
+    Dim roleHard As String
+    roleHard = HardStandardRoleForCadIndex(idx)
+
+    If NormalizeKey(roleHard) = "RAILS" Then Exit Function
+    If NormalizeKey(roleHard) = "EJECTORPLATE" Then Exit Function
+    If NormalizeKey(roleHard) = "BOTTOMEJECTORPLATE" Then Exit Function
+
+    Dim fp As Double
+    fp = parts(idx).Width * parts(idx).Length
+
+    If baseFoot > 0# Then
+        If fp >= (1# - STD_FOOTPRINT_TOL) * baseFoot Then
+            IsFullFootprintStandardPlate = True
+            Exit Function
+        End If
+    End If
+
+    If maxW > 0# And maxL > 0# Then
+        If parts(idx).Width >= 0.8 * maxW And parts(idx).Length >= 0.8 * maxL Then
+            IsFullFootprintStandardPlate = True
+            Exit Function
+        End If
+    End If
+End Function
+
+
+
+Private Function IsHardOrGeometryRail(ByVal idx As Long, ByVal baseW As Double, ByVal baseL As Double) As Boolean
+    IsHardOrGeometryRail = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    If IsScrewFastenerName(parts(idx).componentName) Then Exit Function
+    If IsDowelOrMinorRoundHardwareName(parts(idx).componentName) Then Exit Function
+    If IsRoundBarLike(idx) Then Exit Function
+
+    If NormalizeKey(HardStandardRoleForCadIndex(idx)) = "RAILS" Then
+        IsHardOrGeometryRail = True
+        Exit Function
+    End If
+
+    If IsStandardRailCandidate(idx, baseW, baseL) Then
+        IsHardOrGeometryRail = True
+        Exit Function
+    End If
+End Function
+
+
+
+Private Function IsHardOrGeometryEjectorPlate(ByVal idx As Long, ByVal baseW As Double, ByVal baseL As Double, ByVal baseFoot As Double) As Boolean
+    IsHardOrGeometryEjectorPlate = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+
+    If IsScrewFastenerName(parts(idx).componentName) Then Exit Function
+    If IsDowelOrMinorRoundHardwareName(parts(idx).componentName) Then Exit Function
+    If IsRoundBarLike(idx) Then Exit Function
+
+    Select Case NormalizeKey(HardStandardRoleForCadIndex(idx))
+        Case "EJECTORPLATE", "BOTTOMEJECTORPLATE"
+            IsHardOrGeometryEjectorPlate = True
+            Exit Function
+    End Select
+
+
+    ' === CMS PATCH FINAL EJECTOR FULL-FOOTPRINT EXCLUDE ===
+    If IsFullFootprintStandardPlate(idx, baseFoot, baseW, baseL) Then Exit Function
+    If IsStandardEjectorPlateCandidate(idx, baseW, baseL, baseFoot) Then
+        IsHardOrGeometryEjectorPlate = True
+        Exit Function
+    End If
+End Function
+
+
+
+Private Function IndexArrayContains(ByRef arr() As Long, ByVal n As Long, ByVal idx As Long) As Boolean
+    Dim i As Long
+    For i = 1 To n
+        If arr(i) = idx Then IndexArrayContains = True: Exit Function
+    Next i
+End Function
+
+
+
+Private Sub AddUniqueIndex(ByRef arr() As Long, ByRef n As Long, ByVal idx As Long)
+    If idx <= 0 Then Exit Sub
+    If IndexArrayContains(arr, n, idx) Then Exit Sub
+    If n >= UBound(arr) Then Exit Sub
+    n = n + 1
+    arr(n) = idx
+End Sub
+
+
+
+Private Sub SortIndexArrayByPartVolumeDescLocal(ByRef arr() As Long, ByVal n As Long)
+    If n < 2 Then Exit Sub
+    Dim i As Long, j As Long, tmp As Long
+    For i = 1 To n - 1
+        For j = i + 1 To n
+            If parts(arr(j)).BBoxVolume > parts(arr(i)).BBoxVolume Then
+                tmp = arr(i): arr(i) = arr(j): arr(j) = tmp
+            End If
+        Next j
+    Next i
+End Sub
+
+
+
+Private Sub KeepTopNIndexes(ByRef arr() As Long, ByRef n As Long, ByVal keepN As Long)
+    If n <= keepN Then Exit Sub
+    n = keepN
+End Sub
+
+
+
+Private Function BestFullPlateFallbackRole(ByVal pos As Long, ByVal nFull As Long, ByVal hasA As Boolean, ByVal hasB As Boolean) As String
+    BestFullPlateFallbackRole = ""
+
+    If nFull <= 0 Then Exit Function
+
+    If pos = 1 Then
+        BestFullPlateFallbackRole = "Top Clamp Plate"
+        Exit Function
+    End If
+
+    If pos = nFull Then
+        BestFullPlateFallbackRole = "Bottom Clamp Plate"
+        Exit Function
+    End If
+
+    If Not hasA Then
+        BestFullPlateFallbackRole = "A Plate"
+        Exit Function
+    End If
+
+    If Not hasB Then
+        BestFullPlateFallbackRole = "B Plate"
+        Exit Function
+    End If
+
+    If pos = nFull - 1 Then
+        BestFullPlateFallbackRole = "Support Plate"
+        Exit Function
+    End If
+
+    BestFullPlateFallbackRole = "Plate " & CStr(pos)
+End Function
+
 Private Sub BuildStdFromGeometry()
+On Error GoTo ErrHandler
+
     If PartCount < 1 Then Exit Sub
 
-    ' ================================================================
-    ' Qwen classify_geometry parity — full offline stack thinking:
-    '   1. Strong shop-name tokens (A-PLATE, LDR-PIN, LBB, RAIL, EJ-*, SC-*)
-    '   2. Full-footprint plates -> stack axis -> top-to-bottom order
-    '   3. Bottom-up orientation from rails/ejector (pins only if missing)
-    '   4. Two-half mold pattern when only 2 full plates
-    '   5. Zone-based rails + ejector plates near support/bottom
-    '   6. Round hardware by diameter/length + pin-bushing plane match
-    '   7. Latch-lock sequenced / SC stack naming
-    '   8. Measure pin top/bottom direction WITHOUT flipping A/B
-    ' ================================================================
+    Dim i As Long, j As Long
+    Dim fp As Double
+    Dim baseFoot As Double
+    Dim baseW As Double
+    Dim baseL As Double
+    Dim maxW As Double
+    Dim maxL As Double
 
-    Dim i As Long, j As Long, fp As Double, baseFoot As Double, baseW As Double, baseL As Double
-    Dim maxW As Double, maxL As Double
-    baseFoot = 0: baseW = 0: baseL = 0: maxW = 0: maxL = 0
+    baseFoot = 0#
+    baseW = 0#
+    baseL = 0#
+    maxW = 0#
+    maxL = 0#
+
     For i = 1 To PartCount
-        fp = parts(i).Width * parts(i).Length
         If parts(i).Width > maxW Then maxW = parts(i).Width
         If parts(i).Length > maxL Then maxL = parts(i).Length
-        If fp > baseFoot Then baseFoot = fp: baseW = parts(i).Width: baseL = parts(i).Length
-    Next i
-    If baseFoot <= 0 Then Exit Sub
 
-    Dim fullIdx(1 To 60) As Long, nFull As Long
-    Dim railIdx(1 To 60) As Long, nRail As Long
-    Dim ejIdx(1 To 60) As Long, nEj As Long
-    Dim lpIdx(1 To 120) As Long, nLp As Long
-    Dim shopLocked() As Boolean
-    Dim shopPlateName As String
-    Dim t As Double, w As Double, l As Double
-    Dim rr As String, uName As String
-    Dim already As Boolean
-    Dim alreadyFull As Boolean
-    nFull = 0: nRail = 0: nEj = 0: nLp = 0
-    ReDim shopLocked(1 To PartCount)
-
-    ' --- Pass 0: latch-lock / sequenced detection ---
-    For i = 1 To PartCount
-        If IsLatchLockName(parts(i).componentName) Then
-            gStdSequencedLatchLock = True
-            Exit For
+        fp = parts(i).Width * parts(i).Length
+        If fp > baseFoot Then
+            baseFoot = fp
+            baseW = parts(i).Width
+            baseL = parts(i).Length
         End If
     Next i
 
-    ' --- Pass 1: collect candidates; shop tokens lock roles early ---
-    For i = 1 To PartCount
-        t = parts(i).Thickness: w = parts(i).Width: l = parts(i).Length
-        uName = UCase(parts(i).componentName)
-        shopPlateName = StandardPlateNameStd(parts(i).componentName)
-        fp = w * l
+    If baseFoot <= 0# Then Exit Sub
 
-        ' Latch-lock hardware
+    Dim fullIdx(1 To 120) As Long, nFull As Long
+    Dim railCand(1 To 120) As Long, nRailCand As Long
+    Dim ejCand(1 To 120) As Long, nEjCand As Long
+    Dim lpIdx(1 To 160) As Long, nLp As Long
+
+    nFull = 0
+    nRailCand = 0
+    nEjCand = 0
+    nLp = 0
+
+    Dim roleHard As String
+    Dim roleRound As String
+
+    ' ------------------------------------------------------------
+    ' Collect geometric candidates.
+    ' ------------------------------------------------------------
+    For i = 1 To PartCount
+
+        roleHard = HardStandardRoleForCadIndex(i)
+
         If IsLatchLockName(parts(i).componentName) Then
             SetStdCadRole i, "Latch Lock / Safety Strap"
-            shopLocked(i) = True
+            gStdSequencedLatchLock = True
         End If
 
-        ' Shop-token rails
-        If (InStr(uName, "RAIL-") > 0 Or InStr(uName, "_RAIL") > 0 Or InStr(uName, "/RAIL") > 0 Or _
-            InStr(uName, " RAIL") > 0) And NormalizeKey(shopPlateName) <> "APLATE" Then
-            If nRail < UBound(railIdx) Then
-                nRail = nRail + 1: railIdx(nRail) = i
-                SetStdCadRole i, "Rails"
-                shopLocked(i) = True
-            End If
-            GoTo nextCollect
-        End If
-
-        ' Shop-token ejector stack plates
-        If NormalizeKey(shopPlateName) = "EJECTORPLATE" Or NormalizeKey(shopPlateName) = "BOTTOMEJECTORPLATE" Then
-            If nEj < UBound(ejIdx) Then
-                nEj = nEj + 1: ejIdx(nEj) = i
-                SetStdCadRole i, shopPlateName
-                shopLocked(i) = True
-            End If
-            GoTo nextCollect
-        End If
-
-        ' Shop-token structural plates (A/B/SC/clamp/support) — lock role even
-        ' when footprint is under the full-plate threshold (Qwen applies tokens
-        ' before geometry filters). Only add to fullIdx when footprint qualifies.
-        If shopPlateName <> "" Then
-            Select Case NormalizeKey(shopPlateName)
-                Case "APLATE", "BPLATE", "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
-                     "SUPPORTPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", "STRIPPERPLATE"
-                    SetStdCadRole i, shopPlateName
-                    shopLocked(i) = True
-                    If (w >= maxW * 0.85 And l >= maxL * 0.85 And t >= 0.5) Or _
-                       (fp >= (1 - STD_FOOTPRINT_TOL) * baseFoot And t >= STD_MIN_PLATE_THICKNESS) Then
-                        alreadyFull = False
-                        For j = 1 To nFull
-                            If fullIdx(j) = i Then alreadyFull = True: Exit For
-                        Next j
-                        If Not alreadyFull And nFull < UBound(fullIdx) Then
-                            nFull = nFull + 1
-                            fullIdx(nFull) = i
-                        End If
-                    End If
-                    GoTo nextCollect
-            End Select
-        End If
-
-        If t >= STD_MIN_PLATE_THICKNESS Then
-            ' Full-footprint: Qwen uses >= 85% of max W AND max L; macro uses footprint tol.
-            If (w >= maxW * 0.85 And l >= maxL * 0.85 And t >= 0.5) Or _
-               (fp >= (1 - STD_FOOTPRINT_TOL) * baseFoot And t >= STD_MIN_PLATE_THICKNESS) Then
-                If nFull < UBound(fullIdx) Then
-                    nFull = nFull + 1
-                    fullIdx(nFull) = i
-                End If
-            ElseIf Not shopLocked(i) And IsStandardRailCandidate(i, baseW, baseL) Then
-                If nRail < UBound(railIdx) Then
-                    nRail = nRail + 1
-                    railIdx(nRail) = i
-                End If
-            ElseIf Not shopLocked(i) And IsStandardEjectorPlateCandidate(i, baseW, baseL, baseFoot) Then
-                If nEj < UBound(ejIdx) Then
-                    nEj = nEj + 1
-                    ejIdx(nEj) = i
-                End If
+        If IsFullFootprintStandardPlate(i, baseFoot, maxW, maxL) Then
+            AddUniqueIndex fullIdx, nFull, i
+            If roleHard <> "" And Not IsStandardJobForbiddenBmsRole(roleHard) Then
+                SetStdCadRole i, roleHard
             End If
         End If
 
-        ' Round guide hardware (leader / bushing / return / pillar)
+        If IsHardOrGeometryRail(i, baseW, baseL) Then
+            AddUniqueIndex railCand, nRailCand, i
+        End If
+
+        If IsHardOrGeometryEjectorPlate(i, baseW, baseL, baseFoot) Then
+            AddUniqueIndex ejCand, nEjCand, i
+        End If
+
         If IsRoundBarLike(i) Then
-            rr = NormalizeKey(StandardRoundComponentRole(i))
-            If rr = "LEADERPIN" Or rr = "LEADERPINBUSHING" Or rr = "GUIDEDEJECTORBUSHING" Or _
-               rr = "RETURNPIN" Or rr = "EJECTORRETURNPIN" Or rr = "SUPPORTPILLAR" Then
-                If rr = "LEADERPIN" Or rr = "LEADERPINBUSHING" Or rr = "GUIDEDEJECTORBUSHING" Then
-                    If nLp < UBound(lpIdx) Then
-                        nLp = nLp + 1
-                        lpIdx(nLp) = i
-                    End If
-                End If
-                If InStr(uName, "LDR-PIN") > 0 Or InStr(uName, "LDR_PIN") > 0 Or _
-                   InStr(uName, "LBB_") > 0 Or InStr(uName, "/LBB_") > 0 Then
-                    shopLocked(i) = True
-                End If
+            roleRound = StandardRoundComponentRole(i)
+            Select Case NormalizeKey(roleRound)
+                Case "LEADERPIN", "LEADERPINBUSHING", "GUIDEDEJECTORBUSHING"
+                    AddUniqueIndex lpIdx, nLp, i
+            End Select
+            If roleRound <> "" Then SetStdCadRole i, roleRound
+        End If
+
+    Next i
+
+    If nFull < 1 Then
+        LogLine "Standard geometry-first: no full-footprint plates found."
+        Exit Sub
+    End If
+
+    ' ------------------------------------------------------------
+    ' Determine stack axis from full plates.
+    ' ------------------------------------------------------------
+    Dim aX As Integer
+    Dim bestRange As Double
+    Dim a As Integer
+    Dim mn As Double
+    Dim mx As Double
+    Dim v As Double
+
+    ' Stack axis = the axis with the widest spread of full-plate centers.
+    '
+    ' Two guards, both of which used to be missing:
+    '   1. nFull < 2 means there is no spread to measure on ANY axis, so every
+    '      axis ties at 0 and the loop below would pick axis 1 (CenterX) purely
+    '      because it is evaluated first. Every downstream comparison -- the
+    '      rails/ejector anchor, the parting line, leader-pin clustering,
+    '      FindStandardStackExtremeIndex -- would then run along a meaningless
+    '      axis. The AI path already guards this (If nFull >= 2); this one did not.
+    '   2. `> bestRange` with bestRange seeded at -1 meant a genuine 3-way tie
+    '      still landed on axis 1, because 0 > -1. Seeding at 0 instead means a
+    '      zero-spread axis can never displace the aX = 3 (CenterZ) seed, which
+    '      is the usual CMS stack axis, and the +0.001 margin stops a later
+    '      equal-spread axis from displacing an earlier one.
+    bestRange = 0#
+    aX = 3
+
+    If nFull >= 2 Then
+        For a = 1 To 3
+            mn = 1E+30
+            mx = -1E+30
+
+            For i = 1 To nFull
+                v = PartAxisCenter(fullIdx(i), a)
+                If v < mn Then mn = v
+                If v > mx Then mx = v
+            Next i
+
+            If (mx - mn) > bestRange + 0.001 Then
+                bestRange = (mx - mn)
+                aX = a
+            End If
+        Next a
+    Else
+        LogLine "WARNING: standard stack axis not measurable (nFull=" & CStr(nFull) & _
+                "). Defaulting to CenterZ."
+    End If
+
+    StdSortByAxisDesc fullIdx, nFull, aX
+
+    ' ------------------------------------------------------------
+    ' Determine A/top side vs B/ejector side from rails/ejector anchor.
+    ' ------------------------------------------------------------
+    Dim topIsHigh As Boolean
+    Dim anchorMean As Double
+    Dim anchorCount As Long
+
+    topIsHigh = True
+    anchorMean = 0#
+    anchorCount = 0
+
+    ' Keep only the two largest true rails.
+    If nRailCand > 0 Then
+        SortIndexArrayByPartVolumeDescLocal railCand, nRailCand
+        KeepTopNIndexes railCand, nRailCand, 2
+        For i = 1 To nRailCand
+            anchorMean = anchorMean + PartAxisCenter(railCand(i), aX)
+            anchorCount = anchorCount + 1
+        Next i
+    End If
+
+    If nEjCand > 0 Then
+        SortIndexArrayByPartVolumeDescLocal ejCand, nEjCand
+        KeepTopNIndexes ejCand, nEjCand, 2
+        For i = 1 To nEjCand
+            anchorMean = anchorMean + PartAxisCenter(ejCand(i), aX)
+            anchorCount = anchorCount + 1
+        Next i
+    End If
+
+    If anchorCount > 0 Then
+        anchorMean = anchorMean / CDbl(anchorCount)
+        If Abs(PartAxisCenter(fullIdx(1), aX) - anchorMean) < Abs(PartAxisCenter(fullIdx(nFull), aX) - anchorMean) Then
+            topIsHigh = False
+            StdReverse fullIdx, nFull
+        End If
+        gStdOrientationConfidence = "HIGH"
+        LogLine "Standard geometry-first orientation: rails/ejector anchor set topIsHigh=" & CStr(topIsHigh) & _
+                " anchorMean=" & FormatNumberForCsv(anchorMean)
+    Else
+        ' Fallback to main leader-pin set only if rails/ejector are unavailable.
+        Dim orientResolved As Boolean
+        orientResolved = False
+
+        If nLp > 0 Then
+            ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, aX, 0#
+            If StdLeaderPinOrientationTopIsFirst(fullIdx, nFull, lpIdx, nLp, aX, topIsHigh) Then
+                If Not topIsHigh Then StdReverse fullIdx, nFull
+                orientResolved = True
+                LogLine "Standard geometry-first orientation: primary guide set set topIsHigh=" & CStr(topIsHigh)
             End If
         End If
-nextCollect:
-    Next i
-    If nFull < 1 Then Exit Sub
 
-    ' --- Stack axis = greatest center spread among full plates (Qwen) ---
-    Dim ax As Integer, bestRange As Double, a As Integer, mn As Double, mx As Double, v As Double
-    bestRange = -1: ax = 3
-    For a = 1 To 3
-        mn = 1E+30: mx = -1E+30
-        For i = 1 To nFull
-            v = PartAxisCenter(fullIdx(i), a)
-            If v < mn Then mn = v
-            If v > mx Then mx = v
-        Next i
-        If (mx - mn) > bestRange Then bestRange = (mx - mn): ax = a
-    Next a
-
-    StdSortByAxisDesc fullIdx, nFull, ax
-
-    ' Pre-classify leader-pin PRIMARY/SECONDARY before orientation.
-    Dim supportPosGuess As Double
-    supportPosGuess = 0#
-    If nFull >= 4 Then supportPosGuess = PartAxisCenter(fullIdx(nFull - 1), ax)
-    If nLp > 0 Then ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPosGuess
-
-    ' --- Orientation: rails/ejector first; pins only if missing (Qwen) ---
-    Dim topIsFirst As Boolean
-    topIsFirst = True
-    Dim leaderOriented As Boolean
-    leaderOriented = False
-    If nEj > 0 Or nRail > 0 Then
-        Dim anchorMean As Double
-        Dim anchorCount As Long
-        anchorMean = 0: anchorCount = 0
-        If nEj > 0 Then
-            For i = 1 To nEj
-                anchorMean = anchorMean + PartAxisCenter(ejIdx(i), ax)
-                anchorCount = anchorCount + 1
-            Next i
+        If Not orientResolved Then
+            ' Nothing anchored the stack: no rails, no ejector plates, no usable
+            ' leader pins. topIsHigh keeps its True initialiser, i.e. we ASSUME
+            ' the higher-axis plate is the Top Clamp. If that assumption is
+            ' wrong the whole stack is inverted and every name flips
+            ' (A <-> B, Top Clamp <-> Bottom Clamp), so say so loudly instead of
+            ' failing silently the way this branch used to.
+            gStdOrientationConfidence = "LOW"
+            LogLine "WARNING: standard stack orientation UNRESOLVED " & _
+                    "(no rails / ejector / leader-pin anchor on axis " & CStr(aX) & "). " & _
+                    "Assuming higher center = TOP. Plate names may be inverted - REVIEW."
         Else
-            For i = 1 To nRail
-                anchorMean = anchorMean + PartAxisCenter(railIdx(i), ax)
-                anchorCount = anchorCount + 1
-            Next i
-        End If
-        If anchorCount > 0 Then
-            anchorMean = anchorMean / anchorCount
-            If Abs(PartAxisCenter(fullIdx(1), ax) - anchorMean) < Abs(PartAxisCenter(fullIdx(nFull), ax) - anchorMean) Then topIsFirst = False
-            LogLine "Standard orientation rule: rails/ejector stack set topIsFirst=" & CStr(topIsFirst)
-        End If
-    ElseIf StdLeaderPinOrientationTopIsFirst(fullIdx, nFull, lpIdx, nLp, ax, topIsFirst) Then
-        leaderOriented = True
-        LogLine "Standard orientation rule: PRIMARY leader pins/bushings set topIsFirst=" & CStr(topIsFirst)
-    Else
-        Dim firstNm As String, lastNm As String
-        firstNm = StandardPlateNameStd(parts(fullIdx(1)).componentName)
-        lastNm = StandardPlateNameStd(parts(fullIdx(nFull)).componentName)
-        If InStr(UCase(firstNm), "BOTTOM CLAMP") > 0 Or InStr(UCase(lastNm), "TOP CLAMP") > 0 Then
-            topIsFirst = False
-        ElseIf InStr(UCase(firstNm), "TOP CLAMP") > 0 Or InStr(UCase(lastNm), "BOTTOM CLAMP") > 0 Then
-            topIsFirst = True
-        ElseIf parts(fullIdx(1)).Thickness > parts(fullIdx(nFull)).Thickness + 0.25 Then
-            topIsFirst = False
-        ElseIf parts(fullIdx(nFull)).Thickness > parts(fullIdx(1)).Thickness + 0.25 Then
-            topIsFirst = True
+            gStdOrientationConfidence = "MEDIUM"
         End If
     End If
-    If Not topIsFirst Then StdReverse fullIdx, nFull
-    gStdStackAxis = ax
-    gStdTopIsFirst = topIsFirst
 
+    gStdStackAxis = aX
+    gStdTopIsFirst = topIsHigh
+
+    ' ------------------------------------------------------------
+    ' Assign full-plate roles. Hard names win when present.
+    ' Geometry fills the blanks.
+    ' ------------------------------------------------------------
+    Dim hasA As Boolean
+    Dim hasB As Boolean
     Dim roleName As String
-    Dim topPos As Double, bottomPos As Double, supportPos As Double
-    Dim retainerIdx As Long
-    Dim minEjT As Double
-    Dim ejRole As String
-    Dim nLatch As Long
 
-    ' --- TWO-HALF mold pattern (Qwen: len(full_plates) == 2) ---
-    If nFull = 2 Then
-        BuildStdTwoHalfMoldPattern fullIdx, nFull, ax, maxW, maxL, baseFoot, railIdx, nRail, ejIdx, nEj
-        gStdDmeStackFamily = "Two-half mold pattern" & IIf(nRail > 0, " + rails", "") & IIf(nEj > 0, " + ejector", "")
-        LogLine "Standard DME stack family: " & gStdDmeStackFamily
-        GoTo afterPlates
-    End If
+    hasA = False
+    hasB = False
 
-    gStdDmeStackFamily = StdDmeStackFamilyName(nFull, StdTopClampAppearsPresent(fullIdx, nFull), (nRail > 0), (nEj > 0), nLp)
-    If gStdSequencedLatchLock Then gStdDmeStackFamily = gStdDmeStackFamily & " + latch-lock sequenced"
-    LogLine "Standard DME stack family: " & gStdDmeStackFamily
-
-    ' --- Name full plates top -> bottom (shop tokens win; else stack pattern / SC) ---
     For i = 1 To nFull
-        If shopLocked(fullIdx(i)) And StdCadRole(fullIdx(i)) <> "" Then
-            roleName = StdCadRole(fullIdx(i))
-        Else
-            roleName = StdFullPlateNameFromGeometry(i, nFull, fullIdx(i), fullIdx, (nRail > 0), (nEj > 0))
-            SetStdCadRole fullIdx(i), roleName
-        End If
-        Select Case NormalizeKey(roleName)
-            Case "APLATE", "CAVITYPLATE"
-                gStdCavityCadIndex = fullIdx(i)
-            Case "BPLATE", "COREPLATE"
-                gStdCoreCadIndex = fullIdx(i)
-        End Select
-        AddStdPlateFromCad fullIdx(i), roleName
-        LogLine "Standard full plate rule: pos " & i & "/" & nFull & _
-                " idx " & fullIdx(i) & " -> " & roleName & _
-                " | T=" & parts(fullIdx(i)).Thickness & " W=" & parts(fullIdx(i)).Width & " L=" & parts(fullIdx(i)).Length & _
-                " | name=" & parts(fullIdx(i)).componentName & _
-                IIf(shopLocked(fullIdx(i)), " [SHOP TOKEN]", "")
+        roleName = StdCadRole(fullIdx(i))
+        If roleName = "" Then roleName = HardStandardRoleForCadIndex(fullIdx(i))
+
+        If NormalizeKey(roleName) = "APLATE" Then hasA = True
+        If NormalizeKey(roleName) = "BPLATE" Then hasB = True
     Next i
 
-afterPlates:
-    StdSetPartingLineFromRoles ax
+    For i = 1 To nFull
 
-    ' Quote any shop-token structural plates that were locked but not already
-    ' added via the full-footprint naming loop (e.g. SC plates under footprint).
+        roleName = StdCadRole(fullIdx(i))
+        If roleName = "" Then roleName = HardStandardRoleForCadIndex(fullIdx(i))
+
+        If roleName = "" Or IsStandardJobForbiddenBmsRole(roleName) Then
+            roleName = BestFullPlateFallbackRole(i, nFull, hasA, hasB)
+        End If
+
+        If NormalizeKey(roleName) = "APLATE" Then
+            hasA = True
+            gStdCavityCadIndex = fullIdx(i)
+        ElseIf NormalizeKey(roleName) = "BPLATE" Then
+            hasB = True
+            gStdCoreCadIndex = fullIdx(i)
+        End If
+
+        SetStdCadRole fullIdx(i), roleName
+        AddStdPlateFromCad fullIdx(i), roleName
+
+        LogLine "Standard geometry-first full plate: pos " & i & "/" & nFull & _
+                " idx " & fullIdx(i) & " -> " & roleName & _
+                " | T=" & parts(fullIdx(i)).Thickness & _
+                " W=" & parts(fullIdx(i)).Width & _
+                " L=" & parts(fullIdx(i)).Length & _
+                " | name=" & parts(fullIdx(i)).componentName
+    Next i
+
+    ' If A/B still were not found, use plates around the parting line by position.
+    If gStdCavityCadIndex = 0 And nFull >= 2 Then
+        If nFull >= 4 Then
+            gStdCavityCadIndex = fullIdx(2)
+            SetStdCadRole fullIdx(2), "A Plate"
+        Else
+            gStdCavityCadIndex = fullIdx(1)
+            SetStdCadRole fullIdx(1), "A Plate"
+        End If
+    End If
+
+    If gStdCoreCadIndex = 0 And nFull >= 2 Then
+        If nFull >= 4 Then
+            gStdCoreCadIndex = fullIdx(3)
+            SetStdCadRole fullIdx(3), "B Plate"
+        Else
+            gStdCoreCadIndex = fullIdx(2)
+            SetStdCadRole fullIdx(2), "B Plate"
+        End If
+    End If
+
+    StdSetPartingLineFromRoles aX
+
+    ' ------------------------------------------------------------
+    ' Rails.
+    ' ------------------------------------------------------------
+    If nRailCand > 0 Then
+        SortIndexArrayByPartVolumeDescLocal railCand, nRailCand
+        KeepTopNIndexes railCand, nRailCand, 2
+
+        For i = 1 To nRailCand
+            SetStdCadRole railCand(i), "Rails"
+        Next i
+
+        AddStdRailsRowFromCad railCand(1), nRailCand
+
+        LogLine "Standard geometry-first rails: qty=" & nRailCand & _
+                " using idx " & railCand(1) & _
+                " T=" & parts(railCand(1)).Thickness & _
+                " W=" & parts(railCand(1)).Width & _
+                " L=" & parts(railCand(1)).Length
+    End If
+
+    ' ------------------------------------------------------------
+    ' Ejector plates.
+    ' ------------------------------------------------------------
+    If nEjCand > 0 Then
+        SortIndexArrayByPartVolumeDescLocal ejCand, nEjCand
+        KeepTopNIndexes ejCand, nEjCand, 2
+
+        If nEjCand = 1 Then
+            roleName = HardStandardRoleForCadIndex(ejCand(1))
+            If roleName = "" Then roleName = "Ejector Plate"
+            SetStdCadRole ejCand(1), roleName
+            AddStdPlateFromCad ejCand(1), roleName
+            LogLine "Standard geometry-first ejector single: idx " & ejCand(1) & " -> " & roleName
+
+        Else
+            Dim ejA As Long
+            Dim ejB As Long
+            Dim roleA As String
+            Dim roleB As String
+
+            ejA = ejCand(1)
+            ejB = ejCand(2)
+
+            roleA = HardStandardRoleForCadIndex(ejA)
+            roleB = HardStandardRoleForCadIndex(ejB)
+
+            If roleA = "" And roleB = "" Then
+                If parts(ejA).Thickness <= parts(ejB).Thickness Then
+                    roleA = "Ejector Plate"
+                    roleB = "Bottom Ejector Plate"
+                Else
+                    roleA = "Bottom Ejector Plate"
+                    roleB = "Ejector Plate"
+                End If
+            Else
+                If roleA = "" Then
+                    If NormalizeKey(roleB) = "EJECTORPLATE" Then roleA = "Bottom Ejector Plate" Else roleA = "Ejector Plate"
+                End If
+                If roleB = "" Then
+                    If NormalizeKey(roleA) = "EJECTORPLATE" Then roleB = "Bottom Ejector Plate" Else roleB = "Ejector Plate"
+                End If
+            End If
+
+            SetStdCadRole ejA, roleA
+            SetStdCadRole ejB, roleB
+            AddStdPlateFromCad ejA, roleA
+            AddStdPlateFromCad ejB, roleB
+
+            LogLine "Standard geometry-first ejector pair: idx " & ejA & " -> " & roleA & _
+                    ", idx " & ejB & " -> " & roleB
+        End If
+    End If
+
+    ' ------------------------------------------------------------
+    ' Round guide hardware and leader-pin set analysis.
+    ' ------------------------------------------------------------
+    nLp = 0
     For i = 1 To PartCount
-        If shopLocked(i) Then
-            roleName = StdCadRole(i)
-            Select Case NormalizeKey(roleName)
-                Case "APLATE", "BPLATE", "TOPCLAMPPLATE", "BOTTOMCLAMPPLATE", _
-                     "SUPPORTPLATE", "SCRETAINERPLATE", "SCBACKUPPLATE", "STRIPPERPLATE"
-                    If FindStdByName(roleName) = 0 Then
-                        AddStdPlateFromCad i, roleName
-                        Select Case NormalizeKey(roleName)
-                            Case "APLATE": gStdCavityCadIndex = i
-                            Case "BPLATE": gStdCoreCadIndex = i
-                        End Select
-                        LogLine "Shop-token plate (non-full or unlocked stack): idx " & i & " -> " & roleName
-                    End If
+        If IsRoundBarLike(i) Then
+            roleRound = StandardRoundComponentRole(i)
+            If roleRound <> "" Then SetStdCadRole i, roleRound
+
+            Select Case NormalizeKey(roleRound)
+                Case "LEADERPIN", "LEADERPINBUSHING", "GUIDEDEJECTORBUSHING"
+                    AddUniqueIndex lpIdx, nLp, i
             End Select
         End If
     Next i
 
-    ' --- Zone-based rail / ejector refinement (Qwen side_offset / centered) ---
-    topPos = PartAxisCenter(fullIdx(1), ax)
-    bottomPos = PartAxisCenter(fullIdx(nFull), ax)
+    Dim supportPos As Double
     supportPos = 0#
     For i = 1 To nFull
-        rr = NormalizeKey(StdCadRole(fullIdx(i)))
-        If rr = "SUPPORTPLATE" Or rr = "SCBACKUPPLATE" Then
-            supportPos = PartAxisCenter(fullIdx(i), ax)
+        If NormalizeKey(StdCadRole(fullIdx(i))) = "SUPPORTPLATE" Then
+            supportPos = PartAxisCenter(fullIdx(i), aX)
             Exit For
         End If
     Next i
-    If supportPos = 0# And nFull >= 2 Then supportPos = PartAxisCenter(fullIdx(nFull - 1), ax)
 
-    RefineRailsAndEjectorsByZone ax, maxW, maxL, topPos, bottomPos, supportPos, _
-                                 railIdx, nRail, ejIdx, nEj, shopLocked
-
-    ' Rails
-    If nRail > 0 Then
-        For i = 1 To nRail
-            If Not shopLocked(railIdx(i)) Or StdCadRole(railIdx(i)) = "" Then SetStdCadRole railIdx(i), "Rails"
-        Next i
-        AddStdPlate "Rails", parts(railIdx(1)).Thickness, parts(railIdx(1)).Width, parts(railIdx(1)).Length, nRail
-        LogLine "Standard rail rule: qty " & nRail & " using idx " & railIdx(1) & _
-                " | T=" & parts(railIdx(1)).Thickness & " W=" & parts(railIdx(1)).Width & " L=" & parts(railIdx(1)).Length
+    If nLp > 0 Then
+        ClassifyBushingsBySupportZone aX, supportPos
+        ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, aX, supportPos
+        MeasureLeaderPinTopBottomDirection aX
     End If
 
-    ' Ejector stack: thinner = Ejector Plate; thicker/lower = Bottom Ejector Plate
-    If nEj > 0 Then
-        StdSortByAxisDesc ejIdx, nEj, ax
-        If Not topIsFirst Then StdReverse ejIdx, nEj
-        retainerIdx = ejIdx(1)
-        minEjT = parts(ejIdx(1)).Thickness
-        For j = 2 To nEj
-            If parts(ejIdx(j)).Thickness < minEjT Then
-                minEjT = parts(ejIdx(j)).Thickness
-                retainerIdx = ejIdx(j)
-            End If
-        Next j
-        For j = 1 To nEj
-            ' Preserve shop-token EJ-RET / EJ-BACKUP names when present.
-            If shopLocked(ejIdx(j)) And StdCadRole(ejIdx(j)) <> "" Then
-                ejRole = StdCadRole(ejIdx(j))
-            ElseIf ejIdx(j) = retainerIdx Then
-                ejRole = "Ejector Plate"
-            Else
-                ejRole = "Bottom Ejector Plate"
-            End If
-            SetStdCadRole ejIdx(j), ejRole
-            AddStdPlateFromCad ejIdx(j), ejRole
-            LogLine "Standard ejector-stack rule: idx " & ejIdx(j) & " -> " & ejRole & _
-                    " | T=" & parts(ejIdx(j)).Thickness & " | name=" & parts(ejIdx(j)).componentName
-        Next j
-    End If
+    gStdDmeStackFamily = StdDmeStackFamilyName(nFull, True, (nRailCand > 0), (nEjCand > 0), nLp)
+    BuildStdStackAnalysisText aX, nFull, nRailCand, nEjCand, nLp
 
-    ' Round hardware roles (all guide / return / pillar)
-    For i = 1 To PartCount
-        If IsRoundBarLike(i) Then
-            rr = StandardRoundComponentRole(i)
-            If rr <> "" Then
-                If StdCadRole(i) = "" Or Not shopLocked(i) Then SetStdCadRole i, rr
-                If NormalizeKey(rr) = "LEADERPIN" Or NormalizeKey(rr) = "LEADERPINBUSHING" Or _
-                   NormalizeKey(rr) = "GUIDEDEJECTORBUSHING" Then
-                    already = False
-                    For j = 1 To nLp
-                        If lpIdx(j) = i Then already = True: Exit For
-                    Next j
-                    If Not already And nLp < UBound(lpIdx) Then
-                        nLp = nLp + 1: lpIdx(nLp) = i
-                    End If
-                End If
-            End If
-        End If
-    Next i
-    If nLp > 0 Then LogLine "Standard leader-pin stack rule: round leader/bushing components=" & nLp
+    LogLine "Standard geometry-first summary: full=" & nFull & _
+            " rails=" & nRailCand & _
+            " ejector=" & nEjCand & _
+            " leaderStack=" & nLp & _
+            " axis=" & StdStackAxisName(aX)
 
-    ' Qwen: short bushings above support = leader_pin_bushing; below = guided_ejector_bushing
-    ClassifyBushingsBySupportZone ax, supportPos
+    Exit Sub
 
-    ' Latch-lock tags
-    nLatch = 0
-    For i = 1 To PartCount
-        If IsLatchLockName(parts(i).componentName) Then
-            SetStdCadRole i, "Latch Lock / Safety Strap"
-            nLatch = nLatch + 1
-        End If
-    Next i
-    If nLatch > 0 Then
-        gStdSequencedLatchLock = True
-        LogLine "Standard latch-lock rule: " & nLatch & " PLC/latch-lock/safety-strap parts (sequenced base; must not flip A/B)"
-    End If
-
-    ' Pin-bushing plane match + top/bottom direction (never flips A/B)
-    ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPos
-    MeasureLeaderPinTopBottomDirection ax
-    BuildStdStackAnalysisText ax, nFull, nRail, nEj, nLp
-
-    LogLine "Standard base (geometry): full=" & nFull & " rails=" & nRail & " ejector=" & nEj & " leaderStack=" & nLp & " (stack axis " & StdStackAxisName(ax) & ")"
-    LogLine "Standard parting_line: " & gStdPartingLineText
+ErrHandler:
+    LogLine "BuildStdFromGeometry GEOMETRY-FIRST error: " & Err.Description
 End Sub
+
 
 ' Qwen two-half mold pattern: 2 full-footprint clamps + large inner A/B blocks
 ' + thin rails + ejector-stack plates from remaining thin-large parts.
 Private Sub BuildStdTwoHalfMoldPattern(ByRef fullIdx() As Long, ByVal nFull As Long, _
-                                       ByVal ax As Integer, ByVal maxW As Double, ByVal maxL As Double, _
+                                       ByVal aX As Integer, ByVal maxW As Double, ByVal maxL As Double, _
                                        ByVal baseFoot As Double, _
                                        ByRef railIdx() As Long, ByRef nRail As Long, _
                                        ByRef ejIdx() As Long, ByRef nEj As Long)
@@ -12963,7 +20354,7 @@ Private Sub BuildStdTwoHalfMoldPattern(ByRef fullIdx() As Long, ByVal nFull As L
     Dim hiFull As Long, loFull As Long
     Dim roleName As String
 
-    If PartAxisCenter(fullIdx(1), ax) >= PartAxisCenter(fullIdx(2), ax) Then
+    If PartAxisCenter(fullIdx(1), aX) >= PartAxisCenter(fullIdx(2), aX) Then
         hiFull = fullIdx(1): loFull = fullIdx(2)
     Else
         hiFull = fullIdx(2): loFull = fullIdx(1)
@@ -13005,7 +20396,7 @@ nextBlk:
 
     If nBlock >= 2 Then
         Dim aIdx As Long, bIdx As Long
-        If PartAxisCenter(blockIdx(1), ax) >= PartAxisCenter(blockIdx(2), ax) Then
+        If PartAxisCenter(blockIdx(1), aX) >= PartAxisCenter(blockIdx(2), aX) Then
             aIdx = blockIdx(1): bIdx = blockIdx(2)
         Else
             aIdx = blockIdx(2): bIdx = blockIdx(1)
@@ -13070,7 +20461,7 @@ End Sub
 
 ' Qwen zone rules: rails = long narrow side-offset in ejector/rail zone;
 ' ejector plates = long centered medium-width between bottom and support.
-Private Sub RefineRailsAndEjectorsByZone(ByVal ax As Integer, ByVal maxW As Double, ByVal maxL As Double, _
+Private Sub RefineRailsAndEjectorsByZone(ByVal aX As Integer, ByVal maxW As Double, ByVal maxL As Double, _
                                          ByVal topPos As Double, ByVal bottomPos As Double, ByVal supportPos As Double, _
                                          ByRef railIdx() As Long, ByRef nRail As Long, _
                                          ByRef ejIdx() As Long, ByRef nEj As Long, _
@@ -13105,7 +20496,7 @@ Private Sub RefineRailsAndEjectorsByZone(ByVal ax As Integer, ByVal maxW As Doub
         If Not longFull Then GoTo nextZone
 
         ' Lateral offset from mold center in the two non-stack axes.
-        Select Case ax
+        Select Case aX
             Case 1: a1 = parts(i).AsmCenterY: a2 = parts(i).AsmCenterZ
             Case 2: a1 = parts(i).AsmCenterX: a2 = parts(i).AsmCenterZ
             Case Else: a1 = parts(i).AsmCenterX: a2 = parts(i).AsmCenterY
@@ -13117,7 +20508,7 @@ Private Sub RefineRailsAndEjectorsByZone(ByVal ax As Integer, ByVal maxW As Doub
         ejectorWidth = (w >= maxW * 0.58 And w <= maxW * 0.86)
         sideBlock = (sideOffset >= maxW * 0.25)
         centeredSide = (sideOffset <= maxW * 0.15)
-        axisPos = PartAxisCenter(i, ax)
+        axisPos = PartAxisCenter(i, aX)
 
         already = False
         For j = 1 To nRail
@@ -13148,7 +20539,7 @@ End Sub
 
 ' Qwen: short round cylinders at/above support = leader_pin_bushing;
 ' below support = guided_ejector_bushing. Does not override LDR-PIN/LBB tokens.
-Private Sub ClassifyBushingsBySupportZone(ByVal ax As Integer, ByVal supportPos As Double)
+Private Sub ClassifyBushingsBySupportZone(ByVal aX As Integer, ByVal supportPos As Double)
     Dim i As Long
     Dim dia As Double, axisLen As Double, ratio As Double
     Dim roleKey As String
@@ -13176,7 +20567,7 @@ Private Sub ClassifyBushingsBySupportZone(ByVal ax As Integer, ByVal supportPos 
             GoTo nextBush
         End If
 
-        axisPos = PartAxisCenter(i, ax)
+        axisPos = PartAxisCenter(i, aX)
         If axisPos >= supportPos Then
             SetStdCadRole i, "Leader Pin Bushing"
         Else
@@ -13197,28 +20588,182 @@ Private Function StdSteelTypeFor(ByVal grade As String) As String
     End Select
 End Function
 
-Private Function NextStdSpareQuoteRow(ByRef usedRows() As Boolean, ByVal grade As String) As Long
-On Error GoTo Done
-    Dim rows As Variant, i As Long, r As Long
+' ============================================================================
+' THICK-PLATE PRICE BAND  -- the YELLOW rows on QuoteWorksheet
+'
+' Thick stock costs more per pound, so every grade block on the quote sheet
+' ends with a short run of premium rows, highlighted yellow in the template and
+' labelled "Thicker plaes over 2.00" (#1) or "plates over 5.875 thick" (#3, #7).
+' They carry a higher multiplier in column H:
+'
+'     block        normal $/lb   premium rows   premium $/lb
+'     #1 A-36         1.38        16, 17, 18       1.58
+'     #2 4140         1.88        30 - 34          2.18
+'     #3 P20          2.45        46, 47, 48       3.75
+'     #7 420-SS       3.85/3.95   62, 63, 64       3.95
+'     ALM 6061        3.50        (none)             --
+'
+' THE RULE (from the shop, 2026-08-05): a plate goes in the premium rows when
+' it is 5.875" thick or more -- except in #1, where the cut is 2.00". Inclusive
+' at the boundary: exactly 5.875 is premium. Applies to pot and holder blocks
+' the same as anything else.
+'
+' NOTHING IMPLEMENTED THIS BEFORE, AND IT WAS COSTING MONEY BOTH WAYS.
+'
+' StdQuoteRowFor routes purely by SLOT, and NextStdSpareQuoteRow never listed
+' rows 16-18, 46-48 or 62-64 at all -- so in three of the five blocks the
+' premium rows had never once been filled. Meanwhile the 4140 slot map sends
+' EJECTOR to 30 and X/Y to 31/32, which ARE premium rows, so thin ejector and
+' die plates were being quoted at 2.18/lb.
+'
+' Across the 28 jobs in the registry that was 26 plates in the wrong band and
+' $1,304.62 net under-quoted -- worst case C18602/04/05, whose 10.443" TCP and
+' BCP sat on the 1.88 rows for a $475.72 shortfall per job.
+' ============================================================================
+' THICK_MIN_A36 / THICK_MIN_OTHER / THICK_EPS are declared with the other
+' module-level constants (see "Premium (thick plate) pricing bands", ~line 551).
+' VBA rejects module-level declarations placed below the first procedure.
+
+Private Function StdThickMinFor(ByVal grade As String) As Double
     Select Case UCase(grade)
-        Case "4140"
-            rows = Array(24, 25, 30, 31, 32, 33, 34, 26, 27, 28, 29)
-        Case "P20"
-            rows = Array(41, 42, 43, 38, 39, 40)
-        Case "420SS"
-            rows = Array(52, 53, 54, 55, 56, 57, 58, 59, 60, 61)
-        Case "6061"
-            rows = Array(68, 69, 70, 71, 72, 73, 74, 75, 76, 77)
-        Case Else
-            rows = Array(13, 6, 7, 8, 9, 10, 11, 12, 14, 15)
+        Case "4140", "P20", "420SS": StdThickMinFor = THICK_MIN_OTHER
+        Case "6061":                 StdThickMinFor = 0        ' block has no premium rows
+        Case Else:                   StdThickMinFor = THICK_MIN_A36  ' #1, plus A2/O1 which price there
     End Select
+End Function
+
+Private Function StdThickRowsFor(ByVal grade As String) As Variant
+    Select Case UCase(grade)
+        Case "4140":  StdThickRowsFor = Array(30, 31, 32, 33, 34)
+        Case "P20":   StdThickRowsFor = Array(46, 47, 48)
+        Case "420SS": StdThickRowsFor = Array(62, 63, 64)
+        Case "6061":  StdThickRowsFor = Array()
+        Case Else:    StdThickRowsFor = Array(16, 17, 18)
+    End Select
+End Function
+
+Private Function StdGradeHasThickRows(ByVal grade As String) As Boolean
+    Dim rows As Variant
+    rows = StdThickRowsFor(grade)
+    StdGradeHasThickRows = (UBound(rows) >= LBound(rows))
+End Function
+
+Private Function StdIsThickPlate(ByVal grade As String, ByVal t As Double) As Boolean
+    Dim mn As Double
+    mn = StdThickMinFor(grade)
+    StdIsThickPlate = (mn > 0) And (t >= mn - THICK_EPS)
+End Function
+
+Private Function StdIsThickRow(ByVal grade As String, ByVal r As Long) As Boolean
+    Dim rows As Variant, i As Long
+    StdIsThickRow = False
+    rows = StdThickRowsFor(grade)
+    For i = LBound(rows) To UBound(rows)
+        If CLng(rows(i)) = r Then StdIsThickRow = True: Exit Function
+    Next i
+End Function
+
+Private Function NextStdThickQuoteRow(ByRef usedRows() As Boolean, ByVal grade As String) As Long
+On Error GoTo done
+    Dim rows As Variant, i As Long, r As Long
+    NextStdThickQuoteRow = 0
+    rows = StdThickRowsFor(grade)
     For i = LBound(rows) To UBound(rows)
         r = CLng(rows(i))
         If r >= LBound(usedRows) And r <= UBound(usedRows) Then
-            If Not usedRows(r) Then NextStdSpareQuoteRow = r: Exit Function
+            If Not usedRows(r) Then NextStdThickQuoteRow = r: Exit Function
         End If
     Next i
-Done:
+done:
+End Function
+
+' The row a plate belongs on once THICKNESS is taken into account, given the row
+' its slot would otherwise have chosen. Returns `preferred` unchanged whenever
+' the slot row is already in the right band, which is the common case.
+Private Function StdBandedQuoteRow(ByRef usedRows() As Boolean, ByVal grade As String, _
+                                   ByVal t As Double, ByVal preferred As Long, _
+                                   ByVal nameForLog As String) As Long
+    Dim wantThick As Boolean, rowIsThick As Boolean, alt As Long
+    StdBandedQuoteRow = preferred
+    If Not StdGradeHasThickRows(grade) Then Exit Function
+    If preferred <= 0 Then Exit Function
+
+    wantThick = StdIsThickPlate(grade, t)
+    rowIsThick = StdIsThickRow(grade, preferred)
+    If wantThick = rowIsThick Then Exit Function
+
+    If wantThick Then
+        alt = NextStdThickQuoteRow(usedRows, grade)
+        If alt > 0 Then
+            LogLine "Quote band: " & nameForLog & " T=" & Format(t, "0.000") & " >= " & _
+                    Format(StdThickMinFor(grade), "0.000") & " -> premium " & grade & _
+                    " row " & alt & " (slot wanted row " & preferred & ")"
+            StdBandedQuoteRow = alt
+        Else
+            ' Better a slightly low price than a plate that is not on the quote.
+            LogLine "Quote band WARNING: " & nameForLog & " is thick for " & grade & _
+                    " but every premium row is taken; left on row " & preferred & _
+                    " at the standard rate."
+        End If
+    Else
+        alt = NextStdSpareQuoteRow(usedRows, grade, t)
+        If alt > 0 Then
+            LogLine "Quote band: " & nameForLog & " T=" & Format(t, "0.000") & " < " & _
+                    Format(StdThickMinFor(grade), "0.000") & " -> standard " & grade & _
+                    " row " & alt & " (slot wanted premium row " & preferred & ")"
+            StdBandedQuoteRow = alt
+        Else
+            LogLine "Quote band WARNING: " & nameForLog & " is thin for " & grade & _
+                    " but no standard row is free; left on premium row " & preferred & "."
+        End If
+    End If
+End Function
+
+Private Function NextStdSpareQuoteRow(ByRef usedRows() As Boolean, ByVal grade As String, _
+                                      Optional ByVal thickness As Double = -1) As Long
+On Error GoTo done
+    Dim rows As Variant, i As Long, r As Long, pass As Long
+    Dim knowT As Boolean, wantThick As Boolean
+    NextStdSpareQuoteRow = 0
+    Select Case UCase(grade)
+        Case "4140"
+            ' PLAIN SPARES BEFORE THE PREMIUM ONES. The old order was
+            ' 24,25,30,31,32,33,34,26,27,28,29 -- grouped by the template's
+            ' flipper and pot labels, which handed the third overflow plate a
+            ' 2.18/lb row while the 1.88/lb rows 26-29 sat empty.
+            rows = Array(24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)
+        Case "P20"
+            rows = Array(41, 42, 43, 38, 39, 40, 46, 47, 48)
+        Case "420SS"
+            rows = Array(52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64)
+        Case "6061"
+            rows = Array(68, 69, 70, 71, 72, 73, 74, 75, 76, 77)
+        Case Else
+            rows = Array(13, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 17, 18)
+    End Select
+
+    knowT = (thickness >= 0)
+    If knowT Then wantThick = StdIsThickPlate(grade, thickness)
+
+    ' Pass 1 keeps the plate inside its own price band. Pass 2 takes any free
+    ' row at all, because a plate priced in the wrong band is still far better
+    ' than a plate missing from the quote. Callers that pass no thickness get
+    ' pass-1 behaviour identical to the old single loop.
+    For pass = 1 To 2
+        For i = LBound(rows) To UBound(rows)
+            r = CLng(rows(i))
+            If r >= LBound(usedRows) And r <= UBound(usedRows) Then
+                If Not usedRows(r) Then
+                    If pass = 2 Or Not knowT Then
+                        NextStdSpareQuoteRow = r: Exit Function
+                    ElseIf StdIsThickRow(grade, r) = wantThick Then
+                        NextStdSpareQuoteRow = r: Exit Function
+                    End If
+                End If
+            End If
+        Next i
+    Next pass
+done:
 End Function
 Private Sub FillStandardBaseQuote()
 On Error GoTo ErrHandler
@@ -13276,17 +20821,33 @@ On Error GoTo ErrHandler
         baseRow = StdQuoteRow(i)
         targetRow = baseRow
         If targetRow > 0 And usedQuoteRows(targetRow) Then
-            targetRow = NextStdSpareQuoteRow(usedQuoteRows, StdGrade(i))
+            targetRow = NextStdSpareQuoteRow(usedQuoteRows, StdGrade(i), StdT(i))
             If targetRow > 0 Then LogLine "Quote: moved duplicate " & StdGrade(i) & " item from row " & baseRow & " to open row " & targetRow
         ElseIf targetRow = 0 Then
-            targetRow = NextStdSpareQuoteRow(usedQuoteRows, StdGrade(i))
+            targetRow = NextStdSpareQuoteRow(usedQuoteRows, StdGrade(i), StdT(i))
             If targetRow > 0 Then LogLine "Quote: placed extra " & StdGrade(i) & " item on open row " & targetRow
+        End If
+
+        ' THICKNESS DECIDES THE PRICE BAND, NOT THE SLOT.
+        '
+        ' The slot map above answers "which plate is this"; it says nothing about
+        ' what the steel costs. A 10.443" TCP and a 0.875" TCP both slot to row
+        ' 22, and only one of them is premium stock. See StdBandedQuoteRow.
+        If targetRow > 0 Then
+            targetRow = StdBandedQuoteRow(usedQuoteRows, StdGrade(i), StdT(i), targetRow, stdName(i))
         End If
 
         If targetRow > 0 Then
             usedQuoteRows(targetRow) = True
-            qt = StdT(i): qw = RoundUpToNickel(StdW(i)): ql = RoundUpToNickel(StdL(i))
-            If QUOTE_ROUND_UP_TO_QUARTER Then qt = SteelStockThickness(qt)
+            qt = StdT(i)
+            qw = StdW(i)
+            ql = StdL(i)
+
+            If QUOTE_ROUND_UP_TO_QUARTER Then
+                qt = StdT(i)
+                qw = SteelStockWidthLength(qw)
+                ql = SteelStockWidthLength(ql)
+            End If
             xlWs.Cells(targetRow, 1).value = stdName(i)
             xlWs.Cells(targetRow, 3).value = StdQty(i)
             xlWs.Cells(targetRow, 4).value = qt
@@ -13305,13 +20866,6 @@ On Error GoTo ErrHandler
         WritePurchasedCategoryToSheet xlWs
     End If
     StampWorkbookDateAndRef xlWb, FormatRefNumber
-    ' Force formula calc so the webapp can read hours/price with data_only.
-    On Error Resume Next
-    xlApp.Calculation = -4105   ' xlCalculationAutomatic
-    xlApp.CalculateFull
-    xlWs.Calculate
-    Err.Clear
-    On Error GoTo ErrHandler
     xlWb.Save
     xlWb.Close False
     xlApp.Quit
@@ -13323,6 +20877,65 @@ ErrHandler:
     On Error Resume Next
     If Not xlWb Is Nothing Then xlWb.Close False
     If Not xlApp Is Nothing Then xlApp.Quit
+End Sub
+
+' Total pieces of steel, not rows: Rails qty 2 is two plates on the count.
+Private Function StdTotalPlateQty() As Long
+    Dim i As Long, n As Long
+    For i = 1 To StdCount
+        If StdQty(i) > 0 Then n = n + StdQty(i) Else n = n + 1
+    Next i
+    StdTotalPlateQty = n
+End Function
+
+' Blank the plate block from firstRow down to the "Total # of plates" label, so a
+' shorter plate list cannot inherit the template's rows. Stops at the label rather
+' than clearing a fixed range, because the two tabs put it in different places
+' (Steel Order at 30, Machining Sheet at 27).
+Private Sub ClearStdSteelRowsBelow(ByVal ws As Object, ByVal firstRow As Long)
+On Error GoTo eh
+    Dim r As Long, lbl As String, cleared As Long
+    For r = firstRow To firstRow + 60
+        lbl = ""
+        lbl = UCase(Trim(CStr(ws.Cells(r, 2).value & "")))
+        If InStr(lbl, "TOTAL") > 0 Then Exit For
+
+        ws.Cells(r, 1).ClearContents
+        ws.Cells(r, 2).ClearContents
+        ws.Cells(r, 3).ClearContents
+        ws.Cells(r, 5).ClearContents
+        ws.Cells(r, 7).ClearContents
+        ws.Cells(r, 8).ClearContents
+        cleared = cleared + 1
+    Next r
+    Exit Sub
+eh:
+    LogLine "ClearStdSteelRowsBelow error: " & Err.Description
+End Sub
+
+' Put the piece count on the "Total # of plates" line. The templates disagree about
+' where it goes: Steel Order holds it in column A of the row ABOVE the label,
+' Machining Sheet in column A of the label row itself. Write whichever already
+' carries a number, and the label row when neither does.
+Private Sub WriteStdSteelPlateTotal(ByVal ws As Object, ByVal total As Long)
+On Error GoTo eh
+    Dim r As Long, lbl As String
+    For r = 19 To 90
+        lbl = UCase(Trim(CStr(ws.Cells(r, 2).value & "")))
+        If InStr(lbl, "TOTAL") > 0 And InStr(lbl, "PLATE") > 0 Then
+            If IsNumeric(ws.Cells(r, 1).value & "") And Trim(CStr(ws.Cells(r, 1).value & "")) <> "" Then
+                ws.Cells(r, 1).value = total
+            ElseIf r > 19 And IsNumeric(ws.Cells(r - 1, 1).value & "") And Trim(CStr(ws.Cells(r - 1, 1).value & "")) <> "" Then
+                ws.Cells(r - 1, 1).value = total
+            Else
+                ws.Cells(r, 1).value = total
+            End If
+            Exit Sub
+        End If
+    Next r
+    Exit Sub
+eh:
+    LogLine "WriteStdSteelPlateTotal error: " & Err.Description
 End Sub
 
 Private Sub FillStandardBaseSteel()
@@ -13362,7 +20975,24 @@ On Error GoTo ErrHandler
                 ws.Cells(writeRow, 8).value = StdSteelTypeFor(StdGrade(i))
                 writeRow = writeRow + 1
             Next i
-            LogLine "Filled '" & CStr(sName) & "' rows 19.." & (writeRow - 1)
+
+            ' A PLATE LIST SHORTER THAN THE TEMPLATE'S LEAVES THE TEMPLATE'S PLATES BEHIND.
+            '
+            ' The J000 template does not ship blank -- it carries whatever job it was
+            ' last saved from. Writing rows 19..18+StdCount and stopping means every
+            ' row below that survives, and reads as part of this job's steel.
+            '
+            ' C18500 is a 5-plate base. Its Machining Sheet came out holding the five
+            ' real plates on 19-23 and then the template's leftovers on 24-26 --
+            ' Rails 1.688 x 2.5 x 12, Pin Plate 0.5 x 7.375 x 11.985, Ejector Plate
+            ' 1 x 7.375 x 11.985 -- with the total still reading 9. Three plates on
+            ' the quote that are not in the mold, and a vendor could have cut them.
+            ClearStdSteelRowsBelow ws, writeRow
+            WriteStdSteelPlateTotal ws, StdTotalPlateQty()
+
+            LogLine "Filled '" & CStr(sName) & "' rows 19.." & (writeRow - 1) & _
+                    "; cleared any leftover template rows below and set the plate total to " & _
+                    CStr(StdTotalPlateQty())
         End If
     Next sName
 
@@ -13374,7 +21004,7 @@ On Error GoTo ErrHandler
         Set refSh = Nothing
         Set refSh = xlWb.Sheets(CStr(refNm))
         If Not refSh Is Nothing Then
-            refSh.Cells(11, 9).Value = FormatRefNumber
+            refSh.Cells(11, 9).value = FormatRefNumber
             refSh.Cells(12, 10).ClearContents
         End If
     Next refNm
@@ -13400,11 +21030,41 @@ End Sub
 
 ' (PULLCORE_RATE constant is declared with the other settings at the top.)
 
+' Normalise a CAD/BOM name so the " TOKEN " tests below can match it.
+'
+' PARENTHESES ARE DELIMITERS. This is the bug that lost the A plate, the B plate
+' and the support plate on C18599.
+'
+' That job names its plates with the size encoded in brackets, straight after the
+' word PLATE and with no space:
+'
+'     A PLATE(17-78X35-12X5-78)-1
+'     B PLATE(17-78X35-12X3-38)-1
+'     SUPPORT PLATE(17-78X35-12)-1
+'     EJECTOR PLATE(EP-1835)-1
+'
+' Every plate test in StandardPlateNameStd looks for a SPACE-DELIMITED token --
+' " A PLATE ", " SUPPORT PLATE " -- because that is what stops "CAVITY PLATE"
+' matching " A PLATE ". Without "(" in this list the cleaned string reads
+' " A PLATE(17 78X35 12X5 78) 1 ", the token is "PLATE(" not "PLATE ", and NOTHING
+' matches. 347 of 397 components on that job came back with no role, the A and B
+' plates never reached the quote sheet, and the steel sheet had four rows instead
+' of eight.
+'
+' "RAIL A(45-1835)" matched only by luck: its test is " RAIL " and there happens
+' to be a space after RAIL. That near-miss is why the failure looked partial
+' rather than total.
+'
+' Square brackets, # and & are included for the same reason -- they show up in
+' customer part names and none of them should ever glue two words together.
 Private Function StdCleanName(ByVal raw As String) As String
     Dim s As String
     s = UCase(raw)
     s = Replace(s, "_", " "): s = Replace(s, "-", " "): s = Replace(s, "/", " ")
     s = Replace(s, ".", " "): s = Replace(s, ",", " "): s = Replace(s, Chr(34), " ")
+    s = Replace(s, "(", " "): s = Replace(s, ")", " ")
+    s = Replace(s, "[", " "): s = Replace(s, "]", " ")
+    s = Replace(s, "#", " "): s = Replace(s, "&", " ")
     Do While InStr(s, "  ") > 0: s = Replace(s, "  ", " "): Loop
     StdCleanName = " " & Trim(s) & " "
 End Function
@@ -13421,7 +21081,26 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     StandardPlateNameStd = ""
     If IsHardwareName(raw) Then Exit Function
 
+    Dim hardStdRole As String
+    hardStdRole = HardStandardRoleFromCadName(raw)
+    If hardStdRole <> "" Then
+        StandardPlateNameStd = hardStdRole
+        Exit Function
+    End If
+
+
+
     ' --- Strong shop STEP tokens (hyphen/underscore forms before spaced cleanup) ---
+    If InStr(u, "RAIL-TOP") > 0 Or InStr(u, "RAIL_BOTTOM") > 0 Or InStr(u, "RAIL-BOTTOM") > 0 Or InStr(u, "RAIL_TOP") > 0 Then StandardPlateNameStd = "Rails": Exit Function
+    If InStr(u, "LDRPIN") > 0 Or InStr(u, "LDR-PIN") > 0 Or InStr(u, "LDR_PIN") > 0 Then StandardPlateNameStd = "Leader Pin": Exit Function
+    If InStr(u, "EJ_LDR_PIN") > 0 Or InStr(u, "EJ-LDR-PIN") > 0 Then StandardPlateNameStd = "Secondary Leader Pin": Exit Function
+    If InStr(u, "LBB_") > 0 Or InStr(u, "LBB-") > 0 Or InStr(u, "/LBB") > 0 Then StandardPlateNameStd = "Leader Pin Bushing": Exit Function
+    If InStr(u, "GEB_") > 0 Or InStr(u, "GEB-") > 0 Or InStr(u, "GUIDED EJECTOR") > 0 Then StandardPlateNameStd = "Guided Ejector Bushing": Exit Function
+    If InStr(u, "RETURN-PIN") > 0 Or InStr(u, "RETURN_PIN") > 0 Then StandardPlateNameStd = "Return Pin": Exit Function
+    If InStr(u, "PILLAR_D") > 0 Or InStr(u, "SUPPORT PILLAR") > 0 Then StandardPlateNameStd = "Support Pillar": Exit Function
+    If InStr(u, "TOP LOCK") > 0 Or InStr(u, "GL150") > 0 Then StandardPlateNameStd = "Top Lock": Exit Function
+    If InStr(u, "ALIGNMENT KEY") > 0 Then StandardPlateNameStd = "Alignment Key": Exit Function
+
     If InStr(u, "A-PLATE") > 0 Or InStr(u, "A_PLATE") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
     If InStr(u, "B-PLATE") > 0 Or InStr(u, "B_PLATE") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
     If InStr(u, "SC-RETAINER-PLATE") > 0 Or InStr(u, "SC_RETAINER_PLATE") > 0 Then StandardPlateNameStd = "SC Retainer Plate": Exit Function
@@ -13429,7 +21108,8 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     If InStr(u, "EJ-BACKUP-PLATE") > 0 Or InStr(u, "EJ_BACKUP_PLATE") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
     If InStr(u, "EJ-RET-PLATE") > 0 Or InStr(u, "EJ_RET_PLATE") > 0 Then StandardPlateNameStd = "Ejector Plate": Exit Function
     If InStr(u, "CLAMP-PLATE") > 0 Or InStr(u, "CLAMP_PLATE") > 0 Then
-        If InStr(u, "TOP") = 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
+        If InStr(u, "TOP") > 0 Or InStr(u, "TCP") > 0 Then StandardPlateNameStd = "Top Clamp Plate": Exit Function
+        If InStr(u, "BOTTOM") > 0 Or InStr(u, "BOT") > 0 Or InStr(u, "BCP") > 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
     End If
 
     If InStr(s, " LOWER BASE ") > 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
@@ -13442,12 +21122,26 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     ' CMS naming: the thicker/lower backing plate is the "Bottom Ejector Plate"
     ' (never "Ejector Retainer Plate"). Same PIN quote row as before.
     If InStr(s, " EJECTOR BACKUP ") > 0 Or InStr(s, " EJECTOR BACK UP ") > 0 Or InStr(s, " EJ BACKUP ") > 0 Then StandardPlateNameStd = "Bottom Ejector Plate": Exit Function
+    ' The four RETAINER spellings that name a real A or B plate must be tested
+    ' before the generic " RETAINER " catch-all below. They used to sit ~7 lines
+    ' AFTER it, which made them dead code: "Cavity Retainer" matched the generic
+    ' rule, came back as its own proper-cased name, and then StdSlotForName
+    ' matched " RETAINER " too and quoted the cavity plate out of the PIN
+    ' (ejector) row. Stationary/movable are the same two plates named by which
+    ' half of the press they ride on.
+    If InStr(s, " CAVITY RETAINER ") > 0 Or InStr(s, " STATIONARY RETAINER ") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
+    If InStr(s, " CORE RETAINER ") > 0 Or InStr(s, " MOVABLE RETAINER ") > 0 Or InStr(s, " MOVEABLE RETAINER ") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
     If InStr(s, " RETAINER ") > 0 Or InStr(s, " RETAINER PLATE ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " HOLDER MOUNT ") > 0 Or InStr(s, " MOUNT ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " RUNNER STRIPPER ") > 0 Then StandardPlateNameStd = "Runner Stripper Plate": Exit Function
     If InStr(s, " STRIPPER ") > 0 Or InStr(s, " STRIPPER PLT ") > 0 Then StandardPlateNameStd = "Stripper Plate": Exit Function
     If InStr(s, " TCP ") > 0 Or InStr(s, " TOP CLAMP ") > 0 Or InStr(s, " TOP CLP ") > 0 Then StandardPlateNameStd = "Top Clamp Plate": Exit Function
     If InStr(s, " BCP ") > 0 Or InStr(s, " BOTTOM CLAMP ") > 0 Or InStr(s, " BOT CLAMP ") > 0 Then StandardPlateNameStd = "Bottom Clamp Plate": Exit Function
+    ' Hot runner. "Manifold Backing Plate" is the plate that BACKS the manifold,
+    ' so it must be tested before the bare MANIFOLD token below or the more
+    ' specific name loses to the more general one.
+    If InStr(s, " MANIFOLD BACKING ") > 0 Or InStr(s, " MANIFOLD BACKUP ") > 0 Or InStr(s, " MANIFOLD BACK UP ") > 0 Then StandardPlateNameStd = "Backing Plate": Exit Function
+    If InStr(s, " BACKING PLATE ") > 0 Or InStr(s, " BACKING PLT ") > 0 Then StandardPlateNameStd = "Backing Plate": Exit Function
     If InStr(s, " MANIFOLD ") > 0 Or InStr(s, " MAN PLT ") > 0 Then StandardPlateNameStd = "Manifold Plate": Exit Function
     If InStr(s, " CAVITY PLT ") > 0 Or InStr(s, " CAVITY PLATE ") > 0 Or InStr(s, " CAVITY RETAINER ") > 0 Or InStr(s, " STATIONARY RETAINER ") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
     If InStr(s, " CORE PLT ") > 0 Or InStr(s, " CORE PLATE ") > 0 Or InStr(s, " CORE RETAINER ") > 0 Or InStr(s, " MOVABLE RETAINER ") > 0 Or InStr(s, " MOVEABLE RETAINER ") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
@@ -13460,6 +21154,13 @@ Private Function StandardPlateNameStd(ByVal raw As String) As String
     If InStr(s, " RAIL ") > 0 Or InStr(s, " RAILS ") > 0 Or InStr(s, " RISER ") > 0 Or InStr(s, " RISERS ") > 0 Or InStr(s, " SPACER ") > 0 Then StandardPlateNameStd = ProperCaseText(raw): Exit Function
     If InStr(s, " A PLATE ") > 0 Or InStr(s, " A PLT ") > 0 Or InStr(s, " A SIDE ") > 0 Then StandardPlateNameStd = "A Plate": Exit Function
     If InStr(s, " B PLATE ") > 0 Or InStr(s, " B PLT ") > 0 Or InStr(s, " B SIDE ") > 0 Then StandardPlateNameStd = "B Plate": Exit Function
+    ' T series (three-plate). A BOM writes these as "X-1 Plate" / "X-2 Plate";
+    ' StdCleanName turns the hyphen into a space, giving " X 1 PLATE ". Neither
+    ' that nor " X1 PLATE " contains " X PLATE ", so before this they matched
+    ' nothing at all and the two floating plates came back unnamed.
+    If InStr(s, " X1 PLATE ") > 0 Or InStr(s, " X 1 PLATE ") > 0 Or InStr(s, " X1 PLT ") > 0 Then StandardPlateNameStd = "X1 Plate": Exit Function
+    If InStr(s, " X2 PLATE ") > 0 Or InStr(s, " X 2 PLATE ") > 0 Or InStr(s, " X2 PLT ") > 0 Then StandardPlateNameStd = "X2 Plate": Exit Function
+
     If InStr(s, " X PLATE ") > 0 Or InStr(s, " X PLT ") > 0 Then StandardPlateNameStd = """X"" Plate": Exit Function
     If InStr(s, " Y PLATE ") > 0 Or InStr(s, " Y PLT ") > 0 Then StandardPlateNameStd = """Y"" Plate": Exit Function
 End Function
@@ -13489,8 +21190,24 @@ Private Function StdSlotForName(ByVal nm As String) As String
     If InStr(s, " RAIL ") > 0 Or InStr(s, " RAILS ") > 0 Or InStr(s, " RISER ") > 0 Or InStr(s, " RISERS ") > 0 Then StdSlotForName = "RAILS": Exit Function
     If InStr(s, " DIE BACKUP ") > 0 Or InStr(s, " DIE BACK UP ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
     If InStr(s, " DIE ") > 0 Then StdSlotForName = "X": Exit Function
+    ' Hot-runner backing plate: plain steel that backs up the manifold, so it
+    ' prices off the SUPPORT row (A36), not the MANIFOLD row (P20). Tested
+    ' before MANIFOLD so "Manifold Backing Plate" lands on the backing row.
+    If InStr(s, " BACKING ") > 0 Then StdSlotForName = "SUPPORT": Exit Function
     If InStr(s, " MANIFOLD ") > 0 Then StdSlotForName = "MANIFOLD": Exit Function
     If InStr(s, " BALANCE ") > 0 Then StdSlotForName = "A": Exit Function
+
+    ' --- T series (three-plate) ------------------------------------------------
+    ' X-1 is the runner stripper (its own X row). X-2 IS the cavity plate, so it
+    ' belongs on the A row. These MUST be tested before the " PLATE " catch-all
+    ' at the bottom: " X1 PLATE " does not contain " X PLATE ", so without these
+    ' both floating plates fell through to the generic rule and were quoted out
+    ' of the A row, competing with the real A plate for one row of the grade
+    ' block. StdCleanName turns a hyphen into a space, so a BOM that says
+    ' "X-1 Plate" arrives as " X 1 PLATE " -- both spellings are covered.
+    If InStr(s, " X1 PLATE ") > 0 Or InStr(s, " X 1 PLATE ") > 0 Then StdSlotForName = "X": Exit Function
+    If InStr(s, " X2 PLATE ") > 0 Or InStr(s, " X 2 PLATE ") > 0 Then StdSlotForName = "A": Exit Function
+
     If InStr(s, " X PLATE ") > 0 Then StdSlotForName = "X": Exit Function
     If InStr(s, " Y PLATE ") > 0 Then StdSlotForName = "Y": Exit Function
     If InStr(s, " PLATE ") > 0 Then StdSlotForName = "A": Exit Function
@@ -13498,6 +21215,12 @@ End Function
 
 ' Decide the steel block for a plate from its material hint (and slot if unknown).
 Private Function DefaultStandardGradeForSlot(ByVal slot As String) As String
+    ' Whole base on one grade when STD_DEFAULT_GRADE_ALL is set. See its note.
+    If STD_DEFAULT_GRADE_ALL <> "" Then
+        DefaultStandardGradeForSlot = STD_DEFAULT_GRADE_ALL
+        Exit Function
+    End If
+
     Select Case UCase(Trim(slot))
         Case "A", "B"
             DefaultStandardGradeForSlot = STD_A_B_GRADE   ' normally P20
@@ -13692,6 +21415,7 @@ Private Sub StdResetArrays()
     End If
     gStdStackAxis = 0
     gStdTopIsFirst = True
+    gStdOrientationConfidence = ""
     gStdDmeStackFamily = ""
     gStdPartingLineAxis = 0
     gStdPartingLinePos = 0#
@@ -13704,6 +21428,175 @@ Private Sub StdResetArrays()
     gStdStackRules = ""
     gStdPartingLineText = ""
 End Sub
+
+' Forget any earlier best list. Call once per classification run.
+Private Sub StdClearBestSnapshot()
+    stdBakCount = 0
+    stdBakSource = ""
+    Erase stdBakRoleByPart
+    Erase stdBakLeaderPinSetByPart
+End Sub
+
+' Remember the current list if it beats the best one seen so far.
+' "Beats" = more plate rows, because every stage names the same stack and a
+' longer list means more of that stack was actually identified.
+Private Sub StdKeepBestSnapshot(ByVal sourceLabel As String)
+On Error GoTo eh
+
+    If StdCount <= stdBakCount Then Exit Sub
+
+    ' The Std arrays are fixed at 80 rows everywhere in this module. Bail before
+    ' touching the snapshot rather than part-writing it: a half-copied list under a
+    ' stale stdBakCount would restore rows from two different classifications.
+    If StdCount > 80 Then
+        LogLine "StdKeepBestSnapshot: " & StdCount & " rows exceeds the 80-row array; snapshot skipped."
+        Exit Sub
+    End If
+
+    ReDim stdBakName(1 To 80)
+    ReDim stdBakT(1 To 80)
+    ReDim stdBakW(1 To 80)
+    ReDim stdBakL(1 To 80)
+    ReDim stdBakQty(1 To 80)
+    ReDim stdBakGrade(1 To 80)
+    ReDim stdBakQuoteRow(1 To 80)
+    ReDim stdBakCadIndex(1 To 80)
+
+    Dim i As Long
+    For i = 1 To StdCount
+        stdBakName(i) = stdName(i)
+        stdBakT(i) = StdT(i)
+        stdBakW(i) = StdW(i)
+        stdBakL(i) = StdL(i)
+        stdBakQty(i) = StdQty(i)
+        stdBakGrade(i) = StdGrade(i)
+        stdBakQuoteRow(i) = StdQuoteRow(i)
+        stdBakCadIndex(i) = StdCadIndex(i)
+    Next i
+
+    stdBakCount = StdCount
+    stdBakSource = sourceLabel
+
+    ' Per-part roles and the stack scalars belong to the same answer -- restoring
+    ' rows without them would leave the STL/orientation/report code reading roles
+    ' from a classification that was thrown away.
+    Erase stdBakRoleByPart
+    Erase stdBakLeaderPinSetByPart
+    If PartCount > 0 Then
+        ReDim stdBakRoleByPart(1 To PartCount)
+        ReDim stdBakLeaderPinSetByPart(1 To PartCount)
+        For i = 1 To PartCount
+            stdBakRoleByPart(i) = StdCadRole(i)
+            If StdLeaderPinSetArrayReady() Then stdBakLeaderPinSetByPart(i) = gStdLeaderPinSetByPart(i)
+        Next i
+    End If
+
+    stdBakStackAxis = gStdStackAxis
+    stdBakTopIsFirst = gStdTopIsFirst
+    stdBakOrientationConfidence = gStdOrientationConfidence
+    stdBakDmeStackFamily = gStdDmeStackFamily
+    stdBakPartingLineAxis = gStdPartingLineAxis
+    stdBakPartingLinePos = gStdPartingLinePos
+    stdBakCavityCadIndex = gStdCavityCadIndex
+    stdBakCoreCadIndex = gStdCoreCadIndex
+    stdBakLeaderPinFromTop = gStdLeaderPinFromTop
+    stdBakLeaderPinFromKnown = gStdLeaderPinFromKnown
+    stdBakLeaderPinReversed = gStdLeaderPinReversed
+    stdBakSequencedLatchLock = gStdSequencedLatchLock
+    stdBakStackRules = gStdStackRules
+    stdBakPartingLineText = gStdPartingLineText
+
+    Exit Sub
+eh:
+    LogLine "StdKeepBestSnapshot error: " & Err.Description
+End Sub
+
+' Put the best list back when the stage that is currently loaded did worse.
+' Returns True when a restore happened.
+Private Function StdRestoreBestSnapshotIfBetter() As Boolean
+On Error GoTo eh
+
+    StdRestoreBestSnapshotIfBetter = False
+    If stdBakCount <= StdCount Then Exit Function
+
+    Dim lostCount As Long
+    lostCount = StdCount
+
+    ReDim stdName(1 To 80)
+    ReDim StdT(1 To 80)
+    ReDim StdW(1 To 80)
+    ReDim StdL(1 To 80)
+    ReDim StdQty(1 To 80)
+    ReDim StdGrade(1 To 80)
+    ReDim StdQuoteRow(1 To 80)
+    ReDim StdCadIndex(1 To 80)
+
+    Dim i As Long
+    For i = 1 To stdBakCount
+        stdName(i) = stdBakName(i)
+        StdT(i) = stdBakT(i)
+        StdW(i) = stdBakW(i)
+        StdL(i) = stdBakL(i)
+        StdQty(i) = stdBakQty(i)
+        StdGrade(i) = stdBakGrade(i)
+        StdQuoteRow(i) = stdBakQuoteRow(i)
+        StdCadIndex(i) = stdBakCadIndex(i)
+    Next i
+
+    StdCount = stdBakCount
+
+    If PartCount > 0 Then
+        ReDim gStdRoleByPart(1 To PartCount)
+        ReDim gStdLeaderPinSetByPart(1 To PartCount)
+        For i = 1 To PartCount
+            If i <= UBoundSafeString(stdBakRoleByPart) Then gStdRoleByPart(i) = stdBakRoleByPart(i)
+            If i <= UBoundSafeString(stdBakLeaderPinSetByPart) Then gStdLeaderPinSetByPart(i) = stdBakLeaderPinSetByPart(i)
+        Next i
+    End If
+
+    gStdStackAxis = stdBakStackAxis
+    gStdTopIsFirst = stdBakTopIsFirst
+    gStdOrientationConfidence = stdBakOrientationConfidence
+    gStdDmeStackFamily = stdBakDmeStackFamily
+    gStdPartingLineAxis = stdBakPartingLineAxis
+    gStdPartingLinePos = stdBakPartingLinePos
+    gStdCavityCadIndex = stdBakCavityCadIndex
+    gStdCoreCadIndex = stdBakCoreCadIndex
+    gStdLeaderPinFromTop = stdBakLeaderPinFromTop
+    gStdLeaderPinFromKnown = stdBakLeaderPinFromKnown
+    gStdLeaderPinReversed = stdBakLeaderPinReversed
+    gStdSequencedLatchLock = stdBakSequencedLatchLock
+    gStdStackRules = stdBakStackRules
+    gStdPartingLineText = stdBakPartingLineText
+
+    LogLine "STANDARD classification RESTORED: later fallbacks produced " & lostCount & _
+            " plate(s), so the best earlier result (" & stdBakCount & _
+            " plate(s) from " & stdBakSource & ") was put back. " & _
+            "A fallback is never allowed to make the steel list shorter."
+
+    StdRestoreBestSnapshotIfBetter = True
+    Exit Function
+eh:
+    LogLine "StdRestoreBestSnapshotIfBetter error: " & Err.Description
+    StdRestoreBestSnapshotIfBetter = False
+End Function
+
+' UBound on a possibly-unallocated string array, without raising.
+Private Function UBoundSafeString(ByRef arr() As String) As Long
+    On Error GoTo nope
+    UBoundSafeString = UBound(arr)
+    Exit Function
+nope:
+    UBoundSafeString = 0
+End Function
+
+Private Function StdLeaderPinSetArrayReady() As Boolean
+    On Error GoTo nope
+    StdLeaderPinSetArrayReady = (UBound(gStdLeaderPinSetByPart) >= 1)
+    Exit Function
+nope:
+    StdLeaderPinSetArrayReady = False
+End Function
 
 Private Sub SetStdCadRole(ByVal idx As Long, ByVal roleName As String)
     On Error Resume Next
@@ -13774,13 +21667,478 @@ Private Function BuildStdFromCadNames() As Boolean
     added = 0
     For i = 1 To PartCount
         nm = StandardPlateNameStd(parts(i).componentName)
+        If nm = "" Then nm = PdfRoleHintForCadIndex(i)
         If nm <> "" Then
-            AddStdPlate nm, parts(i).Thickness, parts(i).Width, parts(i).Length, 1, ""
+            ' Same grade-hint fix as AddStdPlateFromCad: this fallback path also
+            ' had no hint, so a BOM material would have been ignored here too.
+            AddStdPlate nm, parts(i).Thickness, parts(i).Width, parts(i).Length, 1, _
+                        BomGradeForCadIndex(i)
             added = added + 1
         End If
     Next i
     BuildStdFromCadNames = (added >= 3)
 End Function
+
+
+
+' ============================================================
+' ALL-PDF DRAWING/BOM KNOWLEDGE PASS
+' Fast pdftotext extraction of every PDF in the job folder. This is used as
+' evidence for standard mold-base naming when part names/BOM tokens are in
+' odd drawing locations instead of the main BOM.
+' ============================================================
+
+Private Sub PdfKnowledgeReset()
+On Error Resume Next
+    gPdfAllText = ""
+    gPdfAllNormText = ""
+    Set gPdfPartTokenDict = CreateObject("Scripting.Dictionary")
+    Set gPdfRoleByToken = CreateObject("Scripting.Dictionary")
+    Set gPdfSourceByToken = CreateObject("Scripting.Dictionary")
+    Set gPdfDimsByRole = CreateObject("Scripting.Dictionary")
+    Set gPdfEvidenceRows = New Collection
+    gPdfKnowledgeReady = False
+    gPdfKnowledgeStart = Now
+End Sub
+
+Private Function PdfKnowledgeTimedOut() As Boolean
+On Error Resume Next
+    PdfKnowledgeTimedOut = (DateDiff("s", gPdfKnowledgeStart, Now) >= PDF_KNOWLEDGE_MAX_SECONDS)
+End Function
+
+Private Sub CollectAllPdfTextKnowledge(ByVal rootFolder As String)
+On Error GoTo ErrHandler
+
+    If Not PDF_KNOWLEDGE_ENABLED Then Exit Sub
+    If rootFolder = "" Then Exit Sub
+
+    If gPdfPartTokenDict Is Nothing Then PdfKnowledgeReset
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(rootFolder) Then Exit Sub
+
+    Dim pdfs As New Collection
+    CollectPdfFilesRecursive fso.GetFolder(rootFolder), pdfs
+
+    LogLine "PDF knowledge pass: root=" & rootFolder & " pdfCount=" & pdfs.Count
+
+    If pdfs.Count = 0 Then Exit Sub
+
+    Dim exe As String
+    exe = ResolvePdfToTextExe()
+
+    EnsureFolderDeep PDF_TEXT_CACHE_DIR
+
+    Dim i As Long
+    Dim pdfPath As String
+    Dim txt As String
+
+    For i = 1 To pdfs.Count
+
+        If PdfKnowledgeTimedOut() Then
+            LogLine "PDF knowledge pass: stopped at " & PDF_KNOWLEDGE_MAX_SECONDS & " second limit."
+            Exit For
+        End If
+
+        pdfPath = CStr(pdfs(i))
+        txt = ExtractPdfTextCached(pdfPath, exe, PDF_TEXT_CACHE_DIR)
+
+        If Len(Trim$(txt)) > 0 Then
+            gPdfAllText = gPdfAllText & vbCrLf & "===== PDF: " & pdfPath & " =====" & vbCrLf & txt
+            ParsePdfKnowledgeText txt, pdfPath
+        Else
+            LogLine "PDF knowledge pass: no extractable text from " & pdfPath
+        End If
+    Next i
+
+    gPdfAllNormText = NormalizeKey(gPdfAllText)
+    gPdfKnowledgeReady = True
+
+    LogLine "PDF knowledge pass done: chars=" & Len(gPdfAllText) & _
+            " tokens=" & IIf(gPdfPartTokenDict Is Nothing, 0, gPdfPartTokenDict.Count)
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "CollectAllPdfTextKnowledge error: " & Err.Description
+End Sub
+
+Private Sub CollectPdfFilesRecursive(ByVal folder As Object, ByVal pdfs As Collection)
+On Error Resume Next
+
+    If folder Is Nothing Then Exit Sub
+
+    Dim folderName As String
+    folderName = UCase$(folder.Name)
+
+    If folderName = UCase$(EXTRACT_FOLDER_NAME) Then Exit Sub
+    If folderName = "BASE" Then Exit Sub
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    Dim file As Object
+    For Each file In folder.Files
+        If Left$(file.Name, 2) <> "~$" Then
+            If LCase$(fso.GetExtensionName(file.path)) = "pdf" Then
+                pdfs.Add file.path
+            End If
+        End If
+    Next file
+
+    Dim subFolder As Object
+    For Each subFolder In folder.SubFolders
+        CollectPdfFilesRecursive subFolder, pdfs
+    Next subFolder
+End Sub
+
+Private Function ExtractPdfTextCached(ByVal pdfPath As String, _
+                                      ByVal pdfToTextExe As String, _
+                                      ByVal cacheDir As String) As String
+On Error GoTo ErrHandler
+
+    ExtractPdfTextCached = ""
+
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    If Not fso.FileExists(pdfPath) Then Exit Function
+
+    Dim cacheName As String
+    cacheName = CleanFileName(pdfPath) & "_" & _
+                CStr(fso.GetFile(pdfPath).Size) & "_" & _
+                Format(fso.GetFile(pdfPath).DateLastModified, "yyyymmddhhnnss") & ".txt"
+
+    Dim txtPath As String
+    txtPath = cacheDir & "\" & cacheName
+
+    If fso.FileExists(txtPath) Then
+        ExtractPdfTextCached = ReadAllTextFile(txtPath)
+        Exit Function
+    End If
+
+    Dim sh As Object
+    Set sh = CreateObject("WScript.Shell")
+
+    Dim cmd As String
+    cmd = Chr(34) & pdfToTextExe & Chr(34) & _
+          " -layout -enc UTF-8 " & _
+          Chr(34) & pdfPath & Chr(34) & " " & _
+          Chr(34) & txtPath & Chr(34)
+
+    Dim startT As Date
+    startT = Now
+
+    Dim rc As Long
+    rc = sh.run("cmd /c " & Chr(34) & cmd & Chr(34), 0, True)
+
+    If fso.FileExists(txtPath) Then
+        ExtractPdfTextCached = ReadAllTextFile(txtPath)
+        LogLine "PDF text extracted rc=" & rc & _
+                " seconds=" & DateDiff("s", startT, Now) & _
+                " file=" & pdfPath
+    Else
+        LogLine "PDF text extraction produced no txt rc=" & rc & " file=" & pdfPath
+    End If
+
+    Exit Function
+
+ErrHandler:
+    LogLine "ExtractPdfTextCached error: " & Err.Description & " | " & pdfPath
+End Function
+
+Private Sub ParsePdfKnowledgeText(ByVal txt As String, ByVal sourcePdf As String)
+On Error GoTo ErrHandler
+
+    txt = Replace(txt, vbCrLf, vbLf)
+    txt = Replace(txt, vbCr, vbLf)
+
+    Dim lines() As String
+    lines = Split(txt, vbLf)
+
+    Dim i As Long
+    Dim lineText As String
+
+    For i = LBound(lines) To UBound(lines)
+        lineText = Trim$(lines(i))
+        If lineText <> "" Then ParsePdfKnowledgeLine lineText, sourcePdf
+    Next i
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ParsePdfKnowledgeText error: " & Err.Description
+End Sub
+
+Private Sub ParsePdfKnowledgeLine(ByVal lineText As String, ByVal sourcePdf As String)
+On Error GoTo ErrHandler
+
+    Dim u As String
+    u = UCase$(lineText)
+
+    ' Skip plain screw rows unless they contain useful mold-base evidence.
+    If InStr(u, "SHCS") > 0 Or InStr(u, "FHCS") > 0 Then
+        If InStr(u, "PLATE") = 0 And InStr(u, "PIN") = 0 And InStr(u, "BUSH") = 0 And InStr(u, "RAIL") = 0 Then Exit Sub
+    End If
+
+    AddPdfRoleIfLineHasToken lineText, "A-PLATE", "A Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "A_PLATE", "A Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, " A PLATE", "A Plate", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "B-PLATE", "B Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "B_PLATE", "B Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, " B PLATE", "B Plate", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "CLAMP-PLATE", "Bottom Clamp Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "CLAMP_PLATE", "Bottom Clamp Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "BOTTOM CLAMP PLATE", "Bottom Clamp Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "TOP CLAMP PLATE", "Top Clamp Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "TCP PLATE", "Top Clamp Plate", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "EJ-RET-PLATE", "Ejector Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJ_RET_PLATE", "Ejector Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJECTOR RETAINER PLATE", "Ejector Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJECTOR RETAIN PLATE", "Ejector Plate", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "EJ-BACKUP-PLATE", "Bottom Ejector Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJ_BACKUP_PLATE", "Bottom Ejector Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJECTOR BACK-UP PLATE", "Bottom Ejector Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJECTOR BACKUP PLATE", "Bottom Ejector Plate", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "SUPPORT PLATE", "Support Plate", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "SUP PLATE", "Support Plate", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "RAIL-TOP", "Rails", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "RAIL_TOP", "Rails", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "RAIL-BOTTOM", "Rails", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "RAIL_BOTTOM", "Rails", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "TOP RAIL", "Rails", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "BOTTOM RAIL", "Rails", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "LDRPIN", "Leader Pin", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "LDR-PIN", "Leader Pin", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "LDR_PIN", "Leader Pin", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "LEADER PIN", "Leader Pin", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "EJ_LDR_PIN", "Secondary Leader Pin", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "EJ-LDR-PIN", "Secondary Leader Pin", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "LBB_", "Leader Pin Bushing", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "LBB-", "Leader Pin Bushing", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, " LBB ", "Leader Pin Bushing", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "GEB_", "Guided Ejector Bushing", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "GEB-", "Guided Ejector Bushing", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "GUIDED EJECTOR", "Guided Ejector Bushing", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "RETURN-PIN", "Return Pin", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "RETURN_PIN", "Return Pin", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "RETURN PIN", "Return Pin", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "PILLAR_D", "Support Pillar", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "SUPPORT PILLAR", "Support Pillar", sourcePdf
+
+    AddPdfRoleIfLineHasToken lineText, "TOP LOCK", "Top Lock", sourcePdf
+    AddPdfRoleIfLineHasToken lineText, "ALIGNMENT KEY", "Alignment Key", sourcePdf
+
+    ParsePdfStackDimensionLine lineText, sourcePdf
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "ParsePdfKnowledgeLine error: " & Err.Description
+End Sub
+
+Private Sub AddPdfRoleIfLineHasToken(ByVal lineText As String, _
+                                     ByVal token As String, _
+                                     ByVal roleName As String, _
+                                     ByVal sourcePdf As String)
+On Error Resume Next
+
+    If InStr(1, UCase$(lineText), UCase$(token), vbTextCompare) = 0 Then Exit Sub
+
+    Dim rawToken As String
+    rawToken = ExtractBestPdfPartToken(lineText, token)
+
+    Dim key As String
+    key = NormalizeKey(rawToken)
+
+    If key = "" Then key = NormalizeKey(token)
+
+    If Not gPdfPartTokenDict.Exists(key) Then gPdfPartTokenDict.Add key, lineText
+    If Not gPdfRoleByToken.Exists(key) Then gPdfRoleByToken.Add key, roleName
+    If Not gPdfSourceByToken.Exists(key) Then gPdfSourceByToken.Add key, sourcePdf
+
+    If Not gPdfEvidenceRows Is Nothing Then
+        gPdfEvidenceRows.Add csvText(roleName) & "," & csvText(rawToken) & "," & csvText(lineText) & "," & csvText(sourcePdf)
+    End If
+End Sub
+
+Private Function ExtractBestPdfPartToken(ByVal lineText As String, ByVal matchedToken As String) As String
+On Error GoTo ErrHandler
+
+    Dim re As Object
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = True
+    re.IgnoreCase = True
+    re.Pattern = "[A-Z0-9][A-Z0-9_\\-/\\.]*(" & Replace(Replace(matchedToken, "-", "[-_]"), "_", "[-_]") & ")[A-Z0-9_\\-/\\.]*"
+
+    Dim ms As Object
+    Set ms = re.Execute(UCase$(lineText))
+
+    If ms.Count > 0 Then
+        ExtractBestPdfPartToken = Trim$(ms(0).value)
+        Exit Function
+    End If
+
+    ExtractBestPdfPartToken = matchedToken
+    Exit Function
+
+ErrHandler:
+    ExtractBestPdfPartToken = matchedToken
+End Function
+
+Private Sub ParsePdfStackDimensionLine(ByVal lineText As String, ByVal sourcePdf As String)
+On Error Resume Next
+
+    Dim u As String
+    u = UCase$(lineText)
+
+    If InStr(u, "PLATE") = 0 And InStr(u, "STEEL FRAME") = 0 Then Exit Sub
+
+    Dim roleName As String
+    roleName = ""
+
+    If InStr(u, "TCP PLATE") > 0 Then roleName = "Top Clamp Plate"
+    If InStr(u, "A PLATE") > 0 Then roleName = "A Plate"
+    If InStr(u, "B PLATE") > 0 Then roleName = "B Plate"
+    If InStr(u, "SUP PLATE") > 0 Or InStr(u, "SUPPORT PLATE") > 0 Then roleName = "Support Plate"
+    If InStr(u, "EJ STEEL FRAME") > 0 Or InStr(u, "EJECTOR STEEL FRAME") > 0 Then roleName = "Ejector Steel Frame"
+
+    If roleName = "" Then Exit Sub
+
+    Dim nums() As Double
+    Dim n As Long
+    n = ExtractDecimalNumbers(lineText, nums)
+
+    If n >= 1 Then
+        If Not gPdfDimsByRole.Exists(NormalizeKey(roleName)) Then
+            gPdfDimsByRole.Add NormalizeKey(roleName), CDbl(nums(1))
+            If Not gPdfEvidenceRows Is Nothing Then
+                gPdfEvidenceRows.Add csvText(roleName & " thickness") & "," & _
+                                     csvText(CStr(nums(1))) & "," & _
+                                     csvText(lineText) & "," & csvText(sourcePdf)
+            End If
+            LogLine "PDF stack note dim: " & roleName & " thickness=" & nums(1) & _
+                    " from " & sourcePdf
+        End If
+    End If
+End Sub
+
+Private Function PdfRoleHintForCadIndex(ByVal idx As Long) As String
+On Error GoTo ErrHandler
+
+    PdfRoleHintForCadIndex = ""
+
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If gPdfRoleByToken Is Nothing Then Exit Function
+    If gPdfRoleByToken.Count = 0 Then Exit Function
+
+    Dim compToken As String
+    compToken = NormalizeKey(PdfComparableComponentToken(parts(idx).componentName))
+
+    If compToken = "" Then Exit Function
+
+    Dim k As Variant
+    Dim key As String
+
+    For Each k In gPdfRoleByToken.keys
+        key = CStr(k)
+
+        If key <> "" Then
+            If InStr(compToken, key) > 0 Or InStr(key, compToken) > 0 Then
+                PdfRoleHintForCadIndex = CStr(gPdfRoleByToken(key))
+                LogLine "PDF role hint: CAD idx=" & idx & _
+                        " comp='" & parts(idx).componentName & "'" & _
+                        " -> " & PdfRoleHintForCadIndex & _
+                        " via token=" & key
+                Exit Function
+            End If
+        End If
+    Next k
+
+    Exit Function
+
+ErrHandler:
+    PdfRoleHintForCadIndex = ""
+End Function
+
+Private Function PdfComparableComponentToken(ByVal compName As String) As String
+On Error Resume Next
+
+    Dim s As String
+    s = Trim$(compName)
+
+    Dim p As Long
+    p = InStrRev(s, "/")
+    If p > 0 Then s = Mid$(s, p + 1)
+
+    p = InStrRev(s, "\")
+    If p > 0 Then s = Mid$(s, p + 1)
+
+    p = InStr(1, UCase$(s), ".SLDPRT", vbTextCompare)
+    If p > 1 Then s = Left$(s, p - 1)
+
+    p = InStr(1, UCase$(s), ".STEP", vbTextCompare)
+    If p > 1 Then s = Left$(s, p - 1)
+
+    p = InStr(1, UCase$(s), ".X_T", vbTextCompare)
+    If p > 1 Then s = Left$(s, p - 1)
+
+    ' SolidWorks component instances often end with -1, -2, etc.
+    If Len(s) > 2 Then
+        Dim dashPos As Long
+        dashPos = InStrRev(s, "-")
+        If dashPos > 1 Then
+            Dim tail As String
+            tail = Mid$(s, dashPos + 1)
+            If IsNumeric(tail) Then s = Left$(s, dashPos - 1)
+        End If
+    End If
+
+    PdfComparableComponentToken = s
+End Function
+
+Private Sub WritePdfKnowledgeEvidenceCsv(ByVal csvPath As String)
+On Error GoTo ErrHandler
+
+    If gPdfEvidenceRows Is Nothing Then Exit Sub
+
+    Dim p As String
+    p = GetWritableCsvPath(csvPath)
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open p For Output As #f
+    Print #f, "RoleOrFact,TokenOrValue,EvidenceLine,SourcePdf"
+
+    Dim i As Long
+    For i = 1 To gPdfEvidenceRows.Count
+        Print #f, CStr(gPdfEvidenceRows(i))
+    Next i
+
+    Close #f
+
+    LogLine "Wrote PDF knowledge evidence CSV: " & p
+    Exit Sub
+
+ErrHandler:
+    LogLine "WritePdfKnowledgeEvidenceCsv error: " & Err.Description
+    On Error Resume Next
+    Close #f
+End Sub
 
 ' ============================================================
 ' AI BRIDGE implementation
@@ -13824,13 +22182,13 @@ Private Function AiBridgeHttpClassify(ByVal csvPath As String) As String
     On Error GoTo done
     Dim http As Object
     Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-    http.setTimeouts 3000, 3000, AI_BRIDGE_TIMEOUT_MS, AI_BRIDGE_TIMEOUT_MS
+    http.SetTimeouts 3000, 3000, AI_BRIDGE_TIMEOUT_MS, AI_BRIDGE_TIMEOUT_MS
     http.Open "POST", AI_BRIDGE_URL & "/api/vba/classify", False
-    http.setRequestHeader "Content-Type", "application/json"
+    http.SetRequestHeader "Content-Type", "application/json"
     http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
               """,""csv_path"":""" & AiJsonEscape(csvPath) & _
               """,""base_type"":""standard""}"
-    If http.Status = 200 Then AiBridgeHttpClassify = http.responseText
+    If http.status = 200 Then AiBridgeHttpClassify = http.ResponseText
 done:
 End Function
 
@@ -13875,7 +22233,7 @@ Private Sub AiBridgeParseCsv(ByVal csvText As String)
         If Trim(lines(i)) <> "" Then
             f = Split(lines(i), ",")
             If UBound(f) >= roleCol Then
-                idx = Val(f(0))
+                idx = val(f(0))
                 If idx >= 1 And idx <= PartCount Then
                     gAiRoleByPart(idx) = LCase(Trim(f(roleCol)))
                     If confCol >= 0 And UBound(f) >= confCol Then
@@ -13895,6 +22253,12 @@ End Sub
 Private Function AiPlateNameForRole(ByVal roleKey As String) As String
     Select Case LCase(Trim(roleKey))
         Case "top_clamp_plate": AiPlateNameForRole = "Top Clamp Plate"
+        ' Hot-runner bases: the full-footprint plate above the A plate that carries
+        ' the manifold. Missing from this Select until now, so the classifier had
+        ' nowhere to put it -- "manifold_plate" fell to Case Else, returned "", and
+        ' the plate dropped out of the steel rows into hardware. StandardPlateNameStd,
+        ' StdQuoteRowFor and IsStandardStructuralRoleKey all already handle it.
+        Case "manifold_plate": AiPlateNameForRole = "Manifold Plate"
         Case "a_plate": AiPlateNameForRole = "A Plate"
         Case "b_plate": AiPlateNameForRole = "B Plate"
         Case "stripper_plate": AiPlateNameForRole = "Stripper Plate"
@@ -13963,27 +22327,63 @@ Private Sub AiBridgeNotifyBms(ByVal csvPath As String)
     On Error Resume Next
     Dim http As Object
     Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-    http.setTimeouts 2000, 2000, 5000, 5000
+    http.SetTimeouts 2000, 2000, 5000, 5000
     http.Open "POST", AI_BRIDGE_URL & "/api/vba/classify", False
-    http.setRequestHeader "Content-Type", "application/json"
+    http.SetRequestHeader "Content-Type", "application/json"
     http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
               """,""csv_path"":""" & AiJsonEscape(csvPath) & _
               """,""base_type"":""bms""}"
 End Sub
 
 ' Tell the local webapp the job finished so it can import quote/steel/CSV outputs.
+' === CMS CALL PYTHON PURCHASED FIXER V8C START ===
+Private Function CmsV8CQuote(ByVal s As String) As String
+    CmsV8CQuote = Chr(34) & Replace(s, Chr(34), Chr(34) & Chr(34)) & Chr(34)
+End Function
+
+Private Sub RunPurchasedFixerV8C()
+On Error Resume Next
+
+    If CurrentJobFolder = "" Then Exit Sub
+
+    Dim scriptPath As String
+    scriptPath = LOCAL_WORKSPACE_ROOT & "\fix_purchased_components_v8c.py"
+
+    If Dir(scriptPath) = "" Then
+        LogLine "V8C purchased fixer not found: " & scriptPath
+        Exit Sub
+    End If
+
+    Dim sh As Object
+    Set sh = CreateObject("WScript.Shell")
+
+    Dim cmd As String
+    cmd = "cmd /c " & PYTHON_EXE & " " & CmsV8CQuote(scriptPath) & _
+          " --job-folder " & CmsV8CQuote(CurrentJobFolder) & _
+          " --job-number " & CmsV8CQuote(CurrentJobNumber)
+
+    LogLine "Running V8C purchased-components Python fixer: " & cmd
+
+    Dim rc As Long
+    rc = sh.run(cmd, 0, True)
+
+    LogLine "V8C purchased-components Python fixer exit code: " & CStr(rc)
+End Sub
+' === CMS CALL PYTHON PURCHASED FIXER V8C END ===
+
 Private Sub AiBridgeNotifyJobComplete(ByVal baseType As String)
     On Error Resume Next
+    RunPurchasedFixerV8C
     Dim http As Object
     Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-    http.setTimeouts 2000, 2000, 15000, 15000
+    http.SetTimeouts 2000, 2000, 15000, 15000
     http.Open "POST", AI_BRIDGE_URL & "/api/vba/job-complete", False
-    http.setRequestHeader "Content-Type", "application/json"
+    http.SetRequestHeader "Content-Type", "application/json"
     http.Send "{""job_id"":""" & AiJsonEscape(AiBridgeJobToken()) & _
               """,""folder_path"":""" & AiJsonEscape(CurrentJobFolder) & _
               """,""base_type"":""" & AiJsonEscape(baseType) & _
               """,""status"":""completed""}"
-    If http.Status = 200 Then
+    If http.status = 200 Then
         LogLine "AI bridge: job-complete synced to webapp."
     End If
 End Sub
@@ -13991,17 +22391,628 @@ End Sub
 ' Build the standard plate list from AI roles. Returns True when the AI gave
 ' enough plate roles to define the stack; otherwise the caller falls back to
 ' the macro's own geometry pass.
+Private Function HardStandardRoleFromCadName(ByVal rawName As String) As String
+On Error GoTo eh
+
+    HardStandardRoleFromCadName = ""
+
+    Dim u As String
+    Dim s As String
+
+    u = UCase$(rawName)
+    s = StdCleanName(rawName)
+
+    ' === CMS PATCH FINAL HARD STANDARD ROLE TOKENS ===
+    If InStr(u, "RAIL-TOP") > 0 Or InStr(u, "RAIL_TOP") > 0 Or _
+       InStr(u, "RAIL-BOTTOM") > 0 Or InStr(u, "RAIL_BOTTOM") > 0 Then
+        HardStandardRoleFromCadName = "Rails"
+        Exit Function
+    End If
+
+    If InStr(u, "EJ-BACKUP-PLATE") > 0 Or InStr(u, "EJ_BACKUP_PLATE") > 0 Or _
+       InStr(u, "EJ-BACKUP") > 0 Or InStr(u, "EJ_BACKUP") > 0 Then
+        HardStandardRoleFromCadName = "Bottom Ejector Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "EJ-RET-PLATE") > 0 Or InStr(u, "EJ_RET_PLATE") > 0 Or _
+       InStr(u, "EJ-RET") > 0 Or InStr(u, "EJ_RET") > 0 Then
+        HardStandardRoleFromCadName = "Ejector Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "TOP CLAMP") > 0 Or InStr(u, "TCP") > 0 Or _
+       InStr(u, "PLATE-TCP") > 0 Or InStr(u, "PLATE_TCP") > 0 Then
+        HardStandardRoleFromCadName = "Top Clamp Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "BOTTOM CLAMP") > 0 Or InStr(u, "BOT CLAMP") > 0 Or _
+       InStr(u, "BCP") > 0 Or InStr(u, "PLATE-BCP") > 0 Or _
+       InStr(u, "PLATE_BCP") > 0 Then
+        HardStandardRoleFromCadName = "Bottom Clamp Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-TCP") > 0 Or InStr(u, "PLATE_TCP") > 0 Or InStr(s, " PLATE TCP ") > 0 Then
+        HardStandardRoleFromCadName = "Top Clamp Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-BCP") > 0 Or InStr(u, "PLATE_BCP") > 0 Or InStr(s, " PLATE BCP ") > 0 Then
+        HardStandardRoleFromCadName = "Bottom Clamp Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-SUPPORT") > 0 Or InStr(u, "PLATE_SUPPORT") > 0 Or InStr(s, " PLATE SUPPORT ") > 0 Then
+        HardStandardRoleFromCadName = "Support Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-RAIL") > 0 Or InStr(u, "PLATE_RAIL") > 0 Or InStr(s, " PLATE RAIL ") > 0 Then
+        HardStandardRoleFromCadName = "Rails"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-EJ RETAINER") > 0 Or _
+       InStr(u, "PLATE_EJ RETAINER") > 0 Or _
+       InStr(u, "PLATE-EJ-RETAINER") > 0 Or _
+       InStr(u, "EJ RETAINER") > 0 Then
+        HardStandardRoleFromCadName = "Ejector Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-EJECTOR") > 0 Or InStr(u, "PLATE_EJECTOR") > 0 Then
+        HardStandardRoleFromCadName = "Bottom Ejector Plate"
+        Exit Function
+    End If
+
+    ' === ROLE-FIRST WORD ORDER: "<ROLE>-PLATE" ===================
+    ' The tests below this point only covered "PLATE-<ROLE>" (Majestic's
+    ' "5452-Plate-A" convention). The far more common shop convention puts the
+    ' role FIRST -- "2242859_A-PLATE", "2223588_B-PLATE",
+    ' "2223588_EJ-RET-PLATE" -- and none of those matched, so on C18346 the
+    ' A-PLATE fell through to geometry and was named "Top Clamp Plate" while
+    ' the B-PLATE became "A Plate". Both of those jobs had the answer written
+    ' on the part.
+    '
+    ' Order matters: AX/BX before A/B (so "AX-PLATE" is not read as an A
+    ' plate), and both after the EJ-* tests above (an "EJ-BACKUP-PLATE"
+    ' must not be mistaken for a B plate).
+    '
+    ' Match on the LEAF name only. componentName carries the parent assembly
+    ' path ("2242859_MOLDBASE_ASM-1/2242859_A-PLATE-1"), so a bare InStr would
+    ' let a parent assembly's name leak onto every child, and a part called
+    ' "SUB-PLATE" would read as a B plate off its own "B-PLATE" substring.
+    Dim uLeaf As String
+    uLeaf = u
+    If InStrRev(uLeaf, "/") > 0 Then uLeaf = Mid$(uLeaf, InStrRev(uLeaf, "/") + 1)
+    If InStrRev(uLeaf, "\") > 0 Then uLeaf = Mid$(uLeaf, InStrRev(uLeaf, "\") + 1)
+    ' Pad so a leading role token still reads as delimited.
+    uLeaf = "-" & uLeaf
+
+    ' SPACE IS A SEPARATOR TOO, AND "PLT" IS HOW THE SHOP WRITES "PLATE".
+    '
+    ' uDash used to fold only "_" into "-", so every test below was blind to a
+    ' SPACE-separated name. C18597 is what that costs. Its seven plates arrive
+    ' named exactly what they are:
+    '
+    '     TCP                     CAVITY PLT        CORE PLT
+    '     STRIPPER PLT            DIE PLATE         DIE BACK UP PLTPLT
+    '     BOTTOM CLAMP PLT
+    '
+    ' Only TCP and BOTTOM CLAMP matched, because those two are tested with plain
+    ' InStr on the raw name. "CAVITY PLT" never reached "CAVITY-PLATE" -- wrong on
+    ' the separator AND on the abbreviation -- so five of the seven plates fell
+    ' through to geometry and were guessed. The cavity became a Stripper Plate, the
+    ' stripper became a B Plate, the core became a Support Plate, the die plate
+    ' became a second Bottom Clamp Plate, and the die backup plate was dropped from
+    ' the quote altogether. Against the estimator's hand quote that is 5 of 7 plates
+    ' misnamed, one missing, and $322 of price gone.
+    '
+    ' Folding space -> "-" here fixes the separator for every test that uses uDash;
+    ' the PLT spellings are added to the individual tests below.
+    Dim uDash As String
+    uDash = Replace(Replace(uLeaf, "_", "-"), " ", "-")
+    Do While InStr(uDash, "--") > 0
+        uDash = Replace(uDash, "--", "-")
+    Loop
+
+    If InStr(uLeaf, "SUB-PLATE") > 0 Or InStr(uLeaf, "SUB_PLATE") > 0 Then
+        ' Explicitly not an A/B plate. Let geometry name it.
+        HardStandardRoleFromCadName = ""
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "AX-PLATE") > 0 Or InStr(uLeaf, "AX_PLATE") > 0 Then
+        HardStandardRoleFromCadName = """X"" Plate"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "BX-PLATE") > 0 Or InStr(uLeaf, "BX_PLATE") > 0 Then
+        HardStandardRoleFromCadName = """Y"" Plate"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "-A-PLATE") > 0 Or InStr(uLeaf, "_A-PLATE") > 0 Or _
+       InStr(uLeaf, "-A_PLATE") > 0 Or InStr(uLeaf, "_A_PLATE") > 0 Then
+        HardStandardRoleFromCadName = "A Plate"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "-B-PLATE") > 0 Or InStr(uLeaf, "_B-PLATE") > 0 Or _
+       InStr(uLeaf, "-B_PLATE") > 0 Or InStr(uLeaf, "_B_PLATE") > 0 Then
+        HardStandardRoleFromCadName = "B Plate"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "SUPPORT-PLATE") > 0 Or InStr(uLeaf, "SUPPORT_PLATE") > 0 Then
+        HardStandardRoleFromCadName = "Support Plate"
+        Exit Function
+    End If
+
+    ' RUNNER STRIPPER before plain STRIPPER. On a PCS T-series (three-plate)
+    ' base BOTH exist, and "RUNNER-STRIPPER-PLATE" contains "STRIPPER-PLATE" --
+    ' so testing the general one first collapses two different plates into one.
+    If InStr(uLeaf, "RUNNER-STRIPPER") > 0 Or InStr(uLeaf, "RUNNER_STRIPPER") > 0 Or _
+       InStr(uLeaf, "RUNNER-PLATE") > 0 Or InStr(uLeaf, "RUNNER_PLATE") > 0 Then
+        HardStandardRoleFromCadName = "Runner Stripper Plate"
+        Exit Function
+    End If
+
+    If InStr(uDash, "STRIPPER-PLATE") > 0 Or InStr(uDash, "STRIPPER-PLT") > 0 Then
+        HardStandardRoleFromCadName = "Stripper Plate"
+        Exit Function
+    End If
+
+    ' --- die stack ---------------------------------------------------------
+    ' BACK UP before the bare DIE token, or "DIE BACK UP PLT" is read as a die
+    ' plate. Both spellings of backup, and the doubled "PLTPLT" suffix the shop's
+    ' exporter sometimes produces, are covered by matching on the DIE-BACK-UP /
+    ' DIE-BACKUP prefix rather than on the whole name.
+    If InStr(uDash, "DIE-BACK-UP") > 0 Or InStr(uDash, "DIE-BACKUP") > 0 Then
+        HardStandardRoleFromCadName = "Die Backup Plate"
+        Exit Function
+    End If
+
+    If InStr(uDash, "DIE-PLATE") > 0 Or InStr(uDash, "DIE-PLT") > 0 Then
+        HardStandardRoleFromCadName = "Die Plate"
+        Exit Function
+    End If
+
+    ' --- PCS T-series floating plates -------------------------------------
+    ' X-1 is the runner stripper, X-2 the cavity plate. Both stay with the
+    ' stationary half and give the mold its first parting line.
+    ' uDash (built above) folds "_" and SPACE to "-" so each token below is written
+    ' once instead of many. The shop's STEP exports use all three separators
+    ' interchangeably and the earlier hand-listed variants had gaps: X-1_PLATE and
+    ' PLATE_X1 matched nothing at all.
+    If InStr(uDash, "X1-PLATE") > 0 Or InStr(uDash, "X-1-PLATE") > 0 Or _
+       InStr(uDash, "PLATE-X1") > 0 Or InStr(uDash, "PLATE-X-1") > 0 Then
+        HardStandardRoleFromCadName = "X1 Plate"
+        Exit Function
+    End If
+
+    If InStr(uDash, "X2-PLATE") > 0 Or InStr(uDash, "X-2-PLATE") > 0 Or _
+       InStr(uDash, "PLATE-X2") > 0 Or InStr(uDash, "PLATE-X-2") > 0 Then
+        HardStandardRoleFromCadName = "X2 Plate"
+        Exit Function
+    End If
+
+    ' --- hot runner --------------------------------------------------------
+    ' The manifold BACKING plate is a backing plate, not the manifold plate.
+    ' Tested first, or the bare MANIFOLD token below swallows it.
+    If InStr(uDash, "MANIFOLD-BACKING") > 0 Or InStr(uDash, "MANIFOLD-BACKUP") > 0 Then
+        HardStandardRoleFromCadName = "Backing Plate"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "MANIFOLD") > 0 Then
+        HardStandardRoleFromCadName = "Manifold Plate"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "BACKING-PLATE") > 0 Or InStr(uLeaf, "BACKING_PLATE") > 0 Then
+        HardStandardRoleFromCadName = "Backing Plate"
+        Exit Function
+    End If
+
+    ' --- rails by their other names ---------------------------------------
+    ' A riser, a spacer block and a parallel are the same part as a rail.
+    If InStr(uLeaf, "SPACER-BLOCK") > 0 Or InStr(uLeaf, "SPACER_BLOCK") > 0 Or _
+       InStr(uLeaf, "PARALLEL") > 0 Then
+        HardStandardRoleFromCadName = "Rails"
+        Exit Function
+    End If
+
+    If InStr(uLeaf, "RISER") > 0 Then
+        HardStandardRoleFromCadName = "Riser"
+        Exit Function
+    End If
+
+    ' --- cavity / core are the customer's words for A and B ---------------
+    ' Via uDash so the underscore spellings CAVITY_RETAINER / CORE_RETAINER work
+    ' too; before, only the hyphen forms did while both -PLATE forms were listed.
+    If InStr(uDash, "CAVITY-PLATE") > 0 Or InStr(uDash, "CAVITY-RETAINER") > 0 Or _
+       InStr(uDash, "CAVITY-PLT") > 0 Then
+        HardStandardRoleFromCadName = "A Plate"
+        Exit Function
+    End If
+
+    If InStr(uDash, "CORE-PLATE") > 0 Or InStr(uDash, "CORE-RETAINER") > 0 Or _
+       InStr(uDash, "CORE-PLT") > 0 Then
+        HardStandardRoleFromCadName = "B Plate"
+        Exit Function
+    End If
+
+    ' BARE "CLAMP-PLATE" IS THE BOTTOM CLAMP PLATE.
+    '
+    ' This was deliberately left unnamed, on the reasoning that one customer's BOM
+    ' habit is not a rule and geometry would name the outermost plate from stack
+    ' position. Two things broke that: geometry never runs when the AI bridge is in
+    ' charge of the stack, and the evidence is no longer one customer.
+    '
+    '   C18595  hand quote lists a Bottom Clamp Plate; CAD has only CLAMP-PLATE.
+    '   C18619  hand quote lists BCP 1.375; CAD has only 122761_CLAMP-PLATE_2-1,
+    '           a live plate measuring 26.6 lb that received NO role at all and was
+    '           absent from the quote -- 6 plates on the estimator's sheet, 5 on the
+    '           macro's.
+    '   C18616  BOM DESCRIPTION column, transcribed in webapp roles.py:
+    '           2223605_CLAMP-PLATE -> "BOTTOM CLAMP PLATE".
+    '   C18503  BOM says the same.
+    '
+    ' The web app's CAD_TOKEN_LABELS has mapped CLAMP-PLATE to Bottom Clamp Plate
+    ' all along, so this also stops the macro and the app disagreeing about the
+    ' same part.
+    '
+    ' Tested AFTER the TOP/BOTTOM-qualified tests above, so an explicit
+    ' "TOP CLAMP PLATE" still wins and only the unqualified spelling lands here.
+    If InStr(uDash, "CLAMP-PLATE") > 0 Or InStr(uDash, "CLAMP-PLT") > 0 Then
+        HardStandardRoleFromCadName = "Bottom Clamp Plate"
+        Exit Function
+    End If
+
+    ' Still deliberately NOT handled here:
+    ' Also not handled: TIE-STRAP and RETURN-PIN. They are hardware, and
+    ' returning a non-plate name here would let BuildStdFromAiBridge count
+    ' them toward AI_BRIDGE_MIN_PLATES and quote them as steel.
+
+    If InStr(u, "PLATE-A-") > 0 Or InStr(u, "PLATE_A_") > 0 Or InStr(s, " PLATE A ") > 0 Then
+        HardStandardRoleFromCadName = "A Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-B-") > 0 Or InStr(u, "PLATE_B_") > 0 Or InStr(s, " PLATE B ") > 0 Then
+        HardStandardRoleFromCadName = "B Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-AX") > 0 Or InStr(u, "PLATE_AX") > 0 Or InStr(s, " PLATE AX ") > 0 Then
+        HardStandardRoleFromCadName = """X"" Plate"
+        Exit Function
+    End If
+
+    If InStr(u, "PLATE-BX") > 0 Or InStr(u, "PLATE_BX") > 0 Or InStr(s, " PLATE BX ") > 0 Then
+        HardStandardRoleFromCadName = """Y"" Plate"
+        Exit Function
+    End If
+
+    Exit Function
+
+eh:
+    HardStandardRoleFromCadName = ""
+End Function
+
+Private Function HardStandardRoleForCadIndex(ByVal idx As Long) As String
+    If idx < 1 Or idx > PartCount Then Exit Function
+    HardStandardRoleForCadIndex = HardStandardRoleFromCadName(parts(idx).componentName)
+End Function
+
+Private Function StrongCadOrAiPlateName(ByVal idx As Long) As String
+On Error GoTo eh
+
+    StrongCadOrAiPlateName = ""
+
+    Dim hardRole As String
+    hardRole = HardStandardRoleForCadIndex(idx)
+
+    If hardRole <> "" Then
+        StrongCadOrAiPlateName = hardRole
+        Exit Function
+    End If
+
+    StrongCadOrAiPlateName = AiPlateNameForRole(gAiRoleByPart(idx))
+    Exit Function
+
+eh:
+    StrongCadOrAiPlateName = ""
+End Function
+
+' ============================================================
+' FAILED-IMPORT PLATE RECOVERY
+'
+' See the long note inside BuildStdFromAiBridge. A component whose solid did not
+' survive the STEP translation cannot be measured, so it must not be quoted off
+' its bounding box while a good copy of the same role exists. When NO good copy
+' exists, the plate is real and the shop still has to buy it, so it is recovered
+' from the bounding box and flagged loudly.
+'
+' (gDeadIdx / gDeadRole / gDeadCount are declared with the other module-level
+' arrays at the top of the module -- VBA requires every module-level declaration
+' to sit above the first procedure, and putting them here is what produced the
+' "Variable not defined" compile errors before.)
+' ============================================================
+
+' Does this component have no solid body at all?
+'
+' Asked of the body list directly rather than inferred from SolidFillPct. Fill is
+' 0 for any part the hole-signature pass did not reach -- the cap, an error, a
+' non-plate shape -- so reading 0 as "empty" condemns parts that are perfectly
+' fine. A mass/volume of 0 alongside a real bounding box is the actual signature
+' of a surface-only import.
+Private Function PartHasNoSolid(ByVal idx As Long) As Boolean
+    PartHasNoSolid = False
+    If idx < 1 Or idx > PartCount Then Exit Function
+    If parts(idx).BBoxVolume <= 0# Then Exit Function
+    ' massValue carries mass when a density is assigned and volume otherwise; a
+    ' genuine solid cannot report zero for both.
+    If parts(idx).massValue > 0# Then Exit Function
+    PartHasNoSolid = True
+End Function
+
+Private Sub ResetDeadPlateCandidates()
+    gDeadCount = 0
+    ReDim gDeadIdx(1 To 64)
+    ReDim gDeadRole(1 To 64)
+End Sub
+
+Private Sub RememberDeadPlateCandidate(ByVal idx As Long, ByVal roleName As String)
+On Error Resume Next
+    If gDeadCount >= 64 Then Exit Sub
+    gDeadCount = gDeadCount + 1
+    gDeadIdx(gDeadCount) = idx
+    gDeadRole(gDeadCount) = roleName
+End Sub
+
+' Largest plate footprint among the plates that DID survive. This is the yardstick
+' a recovered bounding box has to match.
+Private Function SurvivingBaseFootprint() As Double
+    Dim i As Long, fp As Double
+    For i = 1 To StdCount
+        If NormalizeKey(stdName(i)) <> "RAILS" Then
+            fp = StdW(i) * StdL(i)
+            If fp > SurvivingBaseFootprint Then SurvivingBaseFootprint = fp
+        End If
+    Next i
+End Function
+
+' The plate FAMILY a CAD name belongs to, with the instance and revision suffixes
+' stripped.
+'
+'   "MOLDBASE_ASM-1/2223488_CLAMP-PLATE_2-1" -> "2223488 CLAMP PLATE"
+'   "2223488_CLAMP-PLATE-1"                  -> "2223488 CLAMP PLATE"
+'
+' Both spellings of one plate collapse to one key, which is what makes a failed
+' import's surviving twin findable. See FindLiveTwinForDeadRole.
+Private Function PlateFamilyKey(ByVal rawName As String) As String
+On Error GoTo eh
+    Dim s As String
+    s = rawName
+
+    ' Leaf only: the parent assembly path would make every child of one assembly
+    ' look like the same family.
+    If InStrRev(s, "/") > 0 Then s = Mid$(s, InStrRev(s, "/") + 1)
+    If InStrRev(s, "\") > 0 Then s = Mid$(s, InStrRev(s, "\") + 1)
+
+    ' Trailing SolidWorks instance number: "-1", "-12".
+    Dim p As Long
+    p = InStrRev(s, "-")
+    If p > 1 Then
+        If IsNumeric(Mid$(s, p + 1)) Then s = Left$(s, p - 1)
+    End If
+
+    ' Trailing configuration / revision token: "_2". This is the suffix that tells
+    ' two copies of one plate apart in the exports that arrive twice.
+    p = InStrRev(s, "_")
+    If p > 1 Then
+        If IsNumeric(Mid$(s, p + 1)) Then s = Left$(s, p - 1)
+    End If
+
+    PlateFamilyKey = Trim$(StdCleanName(s))
+    Exit Function
+eh:
+    PlateFamilyKey = Trim$(StdCleanName(rawName))
+End Function
+
+' A MEASURED PLATE BEATS A RECOVERED BOUNDING BOX, AND BOTH BEAT NOTHING.
+'
+' When a STEP translates badly the same plate often arrives TWICE -- once stitched
+' into a solid, once as loose surfaces. BuildStdFromAiBridge rejects the surface
+' copy (correctly: it measures nothing), and if the AI happened to put the role on
+' that copy the role goes to RecoverRolesWithNoSurvivingPlate, which only ever
+' looks at other DEAD candidates. If none of them match the base footprint the
+' role is logged MISSING and falls out of the quote.
+'
+' C18595 is exactly that. Its Bottom Clamp Plate went to idx 12,
+' "2223488_CLAMP-PLATE_2-1", 0.482 x 10.250 x 29.000 -- a fragment of a failed
+' import, 66% off the base footprint, correctly refused. Its live twin, idx 5
+' "2223488_CLAMP-PLATE-1", was sitting right there: 1.375 x 25.000 x 35.000, 41.8
+' lb of measured mass, 96.2% solid fill, 8 through holes, exactly the 25 x 35 base
+' footprint. Nothing looked at it, because it carried no role -- a bare
+' "CLAMP-PLATE" is deliberately left unnamed by HardStandardRoleFromCadName so
+' that geometry can name the outermost plate from stack position, and geometry
+' never runs when the AI bridge is in charge. So a real, fully measured, 41 lb P20
+' plate was silently absent from the quote.
+'
+' This looks for that twin. Three guards, all required:
+'   * same plate family (PlateFamilyKey)
+'   * has a solid, so its size is measured rather than assumed
+'   * carries no role yet, so it cannot be stolen from another row
+' plus the caller's footprint test, which is what rejects an unrelated fragment.
+Private Function FindLiveTwinForDeadRole(ByVal roleKey As String, _
+                                          ByVal baseFp As Double, _
+                                          ByRef outErr As Double) As Long
+On Error GoTo eh
+    FindLiveTwinForDeadRole = 0
+    outErr = 1E+30
+    If baseFp <= 0# Then Exit Function
+
+    ' Family keys of every dead candidate for this role.
+    Dim wantFam As Object
+    Set wantFam = CreateObject("Scripting.Dictionary")
+    wantFam.CompareMode = 1                     ' TextCompare
+    Dim d As Long, fam As String
+    For d = 1 To gDeadCount
+        If NormalizeKey(gDeadRole(d)) = roleKey Then
+            fam = PlateFamilyKey(parts(gDeadIdx(d)).componentName)
+            If fam <> "" Then
+                If Not wantFam.Exists(fam) Then wantFam.Add fam, True
+            End If
+        End If
+    Next d
+    If wantFam.Count < 1 Then Exit Function
+
+    Dim i As Long, fp As Double, thisErr As Double
+    For i = 1 To PartCount
+        If Not PartHasNoSolid(i) Then
+            If StdCadRole(i) = "" Then
+                fam = PlateFamilyKey(parts(i).componentName)
+                If fam <> "" Then
+                    If wantFam.Exists(fam) Then
+                        fp = parts(i).Width * parts(i).Length
+                        If fp > 0# Then
+                            thisErr = Abs(fp - baseFp) / baseFp
+                            If thisErr < outErr Then
+                                outErr = thisErr
+                                FindLiveTwinForDeadRole = i
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    Exit Function
+eh:
+    FindLiveTwinForDeadRole = 0
+    outErr = 1E+30
+End Function
+
+Private Sub RecoverRolesWithNoSurvivingPlate()
+On Error GoTo eh
+    If gDeadCount < 1 Then Exit Sub
+
+    Dim baseFp As Double
+    baseFp = SurvivingBaseFootprint()
+    If baseFp <= 0# Then
+        LogLine "  recovery skipped: no surviving plate to take a reference footprint from."
+        Exit Sub
+    End If
+
+    Dim d As Long, s As Long, i As Long
+    Dim roleKey As String, alreadyHave As Boolean
+    Dim bestIdx As Long, bestErr As Double, thisErr As Double, fp As Double
+
+    ' Walk the dead list once per distinct role.
+    For d = 1 To gDeadCount
+        roleKey = NormalizeKey(gDeadRole(d))
+        If roleKey = "" Or roleKey = "RAILS" Then GoTo nextDead
+
+        ' Skip roles already handled, either by a survivor or by an earlier recovery.
+        alreadyHave = False
+        For s = 1 To StdCount
+            If NormalizeKey(stdName(s)) = roleKey Then alreadyHave = True: Exit For
+        Next s
+        If alreadyHave Then GoTo nextDead
+
+        ' A MEASURED TWIN FIRST. If the same plate also arrived as a solid, that
+        ' copy is real geometry and outranks any bounding box -- including one that
+        ' would have passed the footprint gate below.
+        Dim twinIdx As Long, twinErr As Double
+        twinIdx = FindLiveTwinForDeadRole(roleKey, baseFp, twinErr)
+        If twinIdx > 0 Then
+            If twinErr <= 0.06 Then
+                SetStdCadRole twinIdx, gDeadRole(d)
+                Select Case roleKey
+                    Case "APLATE": gStdCavityCadIndex = twinIdx
+                    Case "BPLATE": gStdCoreCadIndex = twinIdx
+                End Select
+                AddStdPlateFromCad twinIdx, gDeadRole(d)
+                LogLine "*** RECOVERED " & gDeadRole(d) & " from its SURVIVING TWIN: idx " & _
+                        twinIdx & " '" & parts(twinIdx).cleanName & "' T=" & _
+                        parts(twinIdx).Thickness & " W=" & parts(twinIdx).Width & _
+                        " L=" & parts(twinIdx).Length & ". The copy the CAD named for this " & _
+                        "role imported as surfaces only, but this copy of the same plate has " & _
+                        "a solid body, so the size is MEASURED and the footprint matches the " & _
+                        "base to " & Format(twinErr * 100#, "0.0") & "% ***"
+                GoTo nextDead
+            Else
+                LogLine "  twin found for " & gDeadRole(d) & " (idx " & twinIdx & " '" & _
+                        parts(twinIdx).cleanName & "') but its footprint is " & _
+                        Format(twinErr * 100#, "0") & "% off the base -- not used."
+            End If
+        End If
+
+        ' Best candidate for this role = footprint closest to the base footprint.
+        ' C18595 has two dead A plates, 25.000 x 35.000 and 25.000 x 34.610; the
+        ' first matches the surviving plates exactly and is the real one.
+        bestIdx = 0
+        bestErr = 1E+30
+        For i = d To gDeadCount
+            If NormalizeKey(gDeadRole(i)) = roleKey Then
+                fp = parts(gDeadIdx(i)).Width * parts(gDeadIdx(i)).Length
+                If fp > 0# Then
+                    thisErr = Abs(fp - baseFp) / baseFp
+                    If thisErr < bestErr Then bestErr = thisErr: bestIdx = gDeadIdx(i)
+                End If
+            End If
+        Next i
+
+        If bestIdx = 0 Then GoTo nextDead
+
+        ' A plate of this stack is the size of the stack. Anything materially
+        ' smaller is a fragment of a failed import, not a plate to quote.
+        If bestErr > 0.06 Then
+            LogLine "  NOT recovered (" & gDeadRole(d) & "): best bounding box " & _
+                    Format(parts(bestIdx).Width, "0.000") & " x " & _
+                    Format(parts(bestIdx).Length, "0.000") & " is " & _
+                    Format(bestErr * 100#, "0") & "% off the base footprint -- " & _
+                    "too far out to trust. This plate is MISSING from the quote."
+            GoTo nextDead
+        End If
+
+        SetStdCadRole bestIdx, gDeadRole(d)
+        Select Case roleKey
+            Case "APLATE": gStdCavityCadIndex = bestIdx
+            Case "BPLATE": gStdCoreCadIndex = bestIdx
+        End Select
+        AddStdPlateFromCad bestIdx, gDeadRole(d)
+        LogLine "*** RECOVERED " & gDeadRole(d) & " from bounding box: idx " & bestIdx & _
+                " '" & parts(bestIdx).cleanName & "' T=" & parts(bestIdx).Thickness & _
+                " W=" & parts(bestIdx).Width & " L=" & parts(bestIdx).Length & _
+                ". No solid survived the CAD import for this role, and the footprint " & _
+                "matches the base to " & Format(bestErr * 100#, "0.0") & "%. " & _
+                "SIZE IS UNVERIFIED -- check the thickness against the drawing ***"
+
+nextDead:
+    Next d
+    Exit Sub
+eh:
+    LogLine "RecoverRolesWithNoSurvivingPlate error: " & Err.Description
+End Sub
+
 Private Function BuildStdFromAiBridge() As Boolean
     BuildStdFromAiBridge = False
     If gAiRoleCount < 1 Then Exit Function
 
     Dim i As Long, nm As String, hw As String, plateCount As Long
-    Dim railT As Double, railW As Double, railL As Double, nRail As Long
+    Dim nRail As Long
+    Dim aiRailIdx(1 To 120) As Long, nAiRail As Long
 
     ' First pass: count distinct AI plate roles so we only take over when the
     ' AI actually resolved a stack (>= AI_BRIDGE_MIN_PLATES full plates).
     For i = 1 To PartCount
-        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        nm = StrongCadOrAiPlateName(i)
         If nm <> "" And nm <> "Rails" Then plateCount = plateCount + 1
     Next i
     If plateCount < AI_BRIDGE_MIN_PLATES Then
@@ -14010,14 +23021,72 @@ Private Function BuildStdFromAiBridge() As Boolean
     End If
 
     nRail = 0
+    Dim nDead As Long
+    ResetDeadPlateCandidates
     For i = 1 To PartCount
-        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        nm = StrongCadOrAiPlateName(i)
+
+        ' A BODY WITH NO SOLID IS NOT A MEASURED PLATE.
+        '
+        ' A STEP file the translator cannot fully read still yields a COMPONENT --
+        ' name, transform, bounding box -- but the solid stitching failed, so what
+        ' arrives is loose surfaces. Such a body still tessellates (C18595 wrote a
+        ' 1.4 MB STL from one), still reports a bounding box, and still answers 0
+        ' to every mass property. Nothing downstream can measure it.
+        '
+        ' C18619: five plate families came in twice, once solid and once as
+        ' surfaces, and the surface copies were quoted as extra A, B, Ejector and
+        ' Bottom Ejector plates at fabricated sizes -- one "plate" 7.837 x 9.411
+        ' where the real one is 17 x 18. Those must not reach the quote.
+        '
+        ' BUT DROPPING THEM OUTRIGHT IS ALSO WRONG.
+        '
+        ' C18595 is the other case: BOTH copies of the A plate came in as surfaces,
+        ' so rejecting them left the job with no A plate at all -- a 25 x 35 x 4.375
+        ' P20 plate silently absent from the quote. A missing major plate is a worse
+        ' failure than a flagged one, because nothing on the sheet shows it is gone.
+        '
+        ' So: reject here, remember the candidate, and after the loop recover any
+        ' ROLE that ended up with no surviving copy -- but only from a bounding box
+        ' that matches the footprint the surviving plates establish. That test is
+        ' what separates C18595's A-PLATE_2 (25.000 x 35.000, exactly the base
+        ' footprint) from C18619's EJ-BACKUP-PLATE_2 (13.223 x 14.011, nothing like
+        ' its 17 x 18 sibling, and its role already had a good copy anyway).
+        If nm <> "" Then
+            If PartHasNoSolid(i) Then
+                nDead = nDead + 1
+                LogLine "AI bridge plate REJECTED (no solid body -- CAD import left " & _
+                        "surfaces only): idx " & i & " '" & parts(i).cleanName & _
+                        "' would have been " & nm & _
+                        " T=" & parts(i).Thickness & " W=" & parts(i).Width & _
+                        " L=" & parts(i).Length & "."
+                RememberDeadPlateCandidate i, nm
+                nm = ""
+                SetStdCadRole i, ""
+            End If
+        End If
+
+        ' Same physical plate, second truncated copy. PartHasNoSolid above only
+        ' catches copies with no mass at all; C18616's copies stitched far enough to
+        ' report mass and still arrived short (B-PLATE 3.879 against a real 5.875),
+        ' which is how that job came out at 11 rows against a hand-written 6.
+        If nm <> "" Then
+            If IsDegradedDuplicatePart(i) Then
+                LogLine "AI bridge plate SKIPPED (duplicate copy of the same plate, " & _
+                        "smaller box): idx " & i & " '" & parts(i).cleanName & "' " & _
+                        "T/W/L=" & FormatNumberForCsv(parts(i).Thickness) & "/" & _
+                        FormatNumberForCsv(parts(i).Width) & "/" & _
+                        FormatNumberForCsv(parts(i).Length) & _
+                        " would have been " & nm & ". The full-size copy is quoted instead."
+                nm = ""
+                SetStdCadRole i, ""
+            End If
+        End If
+
         If nm = "Rails" Then
             SetStdCadRole i, "Rails"
-            If nRail = 0 Then
-                railT = parts(i).Thickness: railW = parts(i).Width: railL = parts(i).Length
-            End If
             nRail = nRail + 1
+            AddUniqueIndex aiRailIdx, nAiRail, i
         ElseIf nm <> "" Then
             SetStdCadRole i, nm
             Select Case NormalizeKey(nm)
@@ -14033,16 +23102,77 @@ Private Function BuildStdFromAiBridge() As Boolean
             If hw <> "" Then SetStdCadRole i, hw
         End If
     Next i
-    If nRail > 0 Then
-        AddStdPlate "Rails", railT, railW, railL, nRail
-        LogLine "AI bridge rails: qty " & nRail
+    ' Recover any role that lost every copy to a failed import, before the rails
+    ' row is added, so the recovered plate sits with the rest of the stack.
+    If nDead > 0 Then RecoverRolesWithNoSurvivingPlate
+
+    If nDead > 0 Then
+        LogLine "*** CAD IMPORT WARNING: " & nDead & " component(s) named as plates had NO " & _
+                "SOLID BODY -- the CAD did not translate cleanly. Check the .err log next " & _
+                "to the source STEP file. Any plate recovered below is sized from its " & _
+                "BOUNDING BOX, not from measured geometry: CHECK ITS THICKNESS before " & _
+                "the quote goes out ***"
     End If
+
+    ' A standard base has a PAIR of rails. The classifier is unreliable in both
+    ' directions here, so reconcile against geometry before quoting:
+    '
+    '   C18599  labelled 1 of the 2 rails ("Rail A" / "Rail B", identical
+    '           1.875 x 10.000 x 35.500 blocks) and the quote went out at qty 1.
+    '   C18616  labelled 4, because two 2.875 x 12.500 side blocks were labelled
+    '           alongside the real 4.500 x 36.500 rails. Hand quote says 2.
+    '   C17267  labelled 0 and lost the Rails row entirely.
+    '
+    ' Top up from the geometry rail test when short, then keep the two largest.
+    If nAiRail < 2 Then TopUpAiRailsFromGeometry aiRailIdx, nAiRail
+
+    If nAiRail > 0 Then
+        SortIndexArrayByPartVolumeDescLocal aiRailIdx, nAiRail
+        If nAiRail > 2 Then
+            LogLine "AI bridge rails: " & nAiRail & " parts labelled Rails; keeping the 2 " & _
+                    "largest as the rail pair and dropping " & (nAiRail - 2) & _
+                    " smaller side block(s) from the rail count."
+            Dim dropR As Long
+            For dropR = 3 To nAiRail
+                SetStdCadRole aiRailIdx(dropR), ""
+            Next dropR
+            nAiRail = 2
+        End If
+
+        AddStdRailsRowFromCad aiRailIdx(1), nAiRail
+        LogLine "AI bridge rails: qty " & nAiRail
+    Else
+        ' The AI bridge found no rails. That is usually wrong -- almost every
+        ' standard base has them -- and because ClassifyStandardBasePlates
+        ' short-circuits to `finishStd` as soon as this function succeeds,
+        ' BuildStdFromGeometry never runs and its perfectly good rail detector
+        ' never gets a look. C17267 lost both its Rails quote row and its Rails
+        ' STL exactly this way: the classifier called two 1.875 x 4 x 35.5 side
+        ' blocks "hardware_other" and nothing downstream reconsidered.
+        '
+        ' So fall back to the geometry test for rails ONLY, leaving the AI's
+        ' plate naming untouched.
+        RecoverRailsFromGeometryAfterAiBridge
+    End If
+
+    ' Rails were not the only thing this short-circuit was losing. The same
+    ' "AI wins, geometry never runs" path drops whole structural plates whenever the
+    ' classifier simply does not label one, and nothing downstream notices:
+    '
+    '   C18599  A Plate 11.910, B Plate 3.387, Support Plate 2.375 -- all at 100% of
+    '           the base footprint, all absent from the quote. 4 rows against a
+    '           hand-written 8.
+    '   C18619  Bottom Clamp Plate 1.375, also 100% footprint. 5 rows against 6.
+    '
+    ' Same treatment as rails: geometry gets to add what it can see and the AI keeps
+    ' every name it did produce.
+    RecoverStructuralPlatesFromGeometryAfterAiBridge
 
     ' Carry latch-lock flag + Qwen-parity leader-pin set / top-bottom direction
     ' into the same globals the offline geometry path fills.
     If gAiSequencedLatchLock Then gStdSequencedLatchLock = True
 
-    Dim ax As Integer, bestRange As Double, a As Integer, mn As Double, mx As Double, v As Double
+    Dim aX As Integer, bestRange As Double, a As Integer, mn As Double, mx As Double, v As Double
     Dim fullIdx(1 To 60) As Long, nFull As Long
     Dim lpIdx(1 To 120) As Long, nLp As Long
     Dim nEj As Long
@@ -14053,7 +23183,7 @@ Private Function BuildStdFromAiBridge() As Boolean
         If fp > baseFoot Then baseFoot = fp
     Next i
     For i = 1 To PartCount
-        nm = AiPlateNameForRole(gAiRoleByPart(i))
+        nm = StrongCadOrAiPlateName(i)
         hw = AiHardwareNameForRole(gAiRoleByPart(i))
         If nm <> "" And nm <> "Rails" And baseFoot > 0# Then
             If parts(i).Width * parts(i).Length >= (1 - STD_FOOTPRINT_TOL) * baseFoot Then
@@ -14066,7 +23196,10 @@ Private Function BuildStdFromAiBridge() As Boolean
         End If
     Next i
 
-    bestRange = -1: ax = 3
+    ' Seeded at 0 (not -1) and with a margin, so a zero-spread or tied axis
+    ' cannot displace the CenterZ seed. Kept identical to the geometry path in
+    ' BuildStdFromGeometry so the two strategies can never disagree on the axis.
+    bestRange = 0#: aX = 3
     If nFull >= 2 Then
         For a = 1 To 3
             mn = 1E+30: mx = -1E+30
@@ -14075,25 +23208,73 @@ Private Function BuildStdFromAiBridge() As Boolean
                 If v < mn Then mn = v
                 If v > mx Then mx = v
             Next i
-            If (mx - mn) > bestRange Then bestRange = (mx - mn): ax = a
+            If (mx - mn) > bestRange + 0.001 Then bestRange = (mx - mn): aX = a
         Next a
     End If
-    gStdStackAxis = ax
-    gStdTopIsFirst = True
-    If gStdCavityCadIndex > 0 And gStdCoreCadIndex > 0 Then StdSetPartingLineFromRoles ax
+    ' ------------------------------------------------------------------
+    ' Orient the stack. This used to be a bare `gStdTopIsFirst = True` --
+    ' no reasoning at all -- in the HIGHEST-PRIORITY strategy. On any model
+    ' built ejector-side-up that silently inverted every name: A Plate
+    ' became B Plate, Top Clamp became Bottom Clamp. The geometry path had
+    ' proper anchor logic; the AI path skipped it.
+    '
+    ' Same physical rule the geometry path uses: rails and the ejector
+    ' stack are always at the BOTTOM of a mold base, so whichever end of
+    ' the plate stack they sit nearer is the bottom.
+    '
+    ' fullIdx is collected in CAD-index order above, so it must be sorted
+    ' along the stack axis before its ends mean anything.
+    StdSortByAxisDesc fullIdx, nFull, aX
+
+    Dim aiTopIsHigh As Boolean
+    Dim aiAnchorMean As Double
+    Dim aiAnchorCount As Long
+    Dim rk As String
+    aiTopIsHigh = True
+    aiAnchorMean = 0#
+    aiAnchorCount = 0
+
+    For i = 1 To PartCount
+        rk = NormalizeKey(StdCadRole(i))
+        If rk = "RAILS" Or rk = "EJECTORPLATE" Or rk = "BOTTOMEJECTORPLATE" Then
+            aiAnchorMean = aiAnchorMean + PartAxisCenter(i, aX)
+            aiAnchorCount = aiAnchorCount + 1
+        End If
+    Next i
+
+    If nFull >= 2 And aiAnchorCount > 0 Then
+        aiAnchorMean = aiAnchorMean / CDbl(aiAnchorCount)
+        If Abs(PartAxisCenter(fullIdx(1), aX) - aiAnchorMean) < _
+           Abs(PartAxisCenter(fullIdx(nFull), aX) - aiAnchorMean) Then
+            aiTopIsHigh = False
+        End If
+        gStdOrientationConfidence = "HIGH"
+        LogLine "AI bridge orientation: rails/ejector anchor set topIsHigh=" & CStr(aiTopIsHigh) & _
+                " anchorMean=" & FormatNumberForCsv(aiAnchorMean) & _
+                " (axis " & CStr(aX) & ", " & CStr(aiAnchorCount) & " anchor part(s))"
+    Else
+        gStdOrientationConfidence = "LOW"
+        LogLine "WARNING: AI bridge orientation UNRESOLVED (nFull=" & CStr(nFull) & _
+                ", anchors=" & CStr(aiAnchorCount) & "). Assuming higher center = TOP. " & _
+                "Plate names may be inverted - REVIEW."
+    End If
+
+    gStdStackAxis = aX
+    gStdTopIsFirst = aiTopIsHigh
+    If gStdCavityCadIndex > 0 And gStdCoreCadIndex > 0 Then StdSetPartingLineFromRoles aX
 
     Dim supportPos As Double
     supportPos = 0#
     For i = 1 To PartCount
         If NormalizeKey(StdCadRole(i)) = "SUPPORTPLATE" Or NormalizeKey(StdCadRole(i)) = "SCBACKUPPLATE" Then
-            supportPos = PartAxisCenter(i, ax)
+            supportPos = PartAxisCenter(i, aX)
             Exit For
         End If
     Next i
-    ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, ax, supportPos
-    MeasureLeaderPinTopBottomDirection ax
-    BuildStdStackAnalysisText ax, nFull, nRail, nEj, nLp
-    gStdDmeStackFamily = "AI bridge stack (" & StdStackAxisName(ax) & ")" & _
+    ClassifyLeaderPinSetsByBushingPlane lpIdx, nLp, aX, supportPos
+    MeasureLeaderPinTopBottomDirection aX
+    BuildStdStackAnalysisText aX, nFull, nRail, nEj, nLp
+    gStdDmeStackFamily = "AI bridge stack (" & StdStackAxisName(aX) & ")" & _
         IIf(gStdSequencedLatchLock, " + latch-lock sequenced", "") & _
         IIf(nLp > 0, " + leader-pin stack", "")
 
@@ -14104,36 +23285,240 @@ End Function
 ' Standard-base plate source priority: AI bridge roles first (shop-token +
 ' latch-lock aware), then geometry/layout, then BOM/names if geometry is
 ' unavailable. Names help label plates, but they do not define the stack.
+' ============================================================
+' ONE-OFF PART QUOTE  (a single part, not a mold base)
+' ------------------------------------------------------------
+' A lot of work arrives as ONE part to quote -- a replacement plate, a single
+' insert, a block. That is a normal job, not a broken one, but every path above
+' this is written for a mold base and every one of them requires a STACK:
+' BuildStdFromGeometry wants full-footprint plates to order, BuildStdFromAiBridge
+' and BuildStdFromBom both bail under AI_BRIDGE_MIN_PLATES/3 rows, and
+' BuildStdFromCadNames only fires on a name carrying a recognised plate token. A
+' single part called "2223488_WIDGET" satisfies none of them, so StdCount stayed 0
+' and the job produced an empty quote -- no steel row, and with it no per-plate
+' STL, no machining estimate and no confidence band, because all three walk
+' StdCount.
+'
+' NAMED FROM THE CAD FILE, as the shop asks. ScanPartBodies names each body
+' "<file> [<body>]", which is right for a multi-body part and wrong for the common
+' single-solid case where the file name IS the part name.
+'
+' THE QUOTE ROW IS A PRICING SLOT, NOT A CLAIM ABOUT WHAT THE PART IS. There is no
+' generic row in any grade block -- every row is a named plate role -- so a one-off
+' is priced on the primary steel row of its grade and keeps its own name for
+' display. That is the same label/role separation the plate-rename feature relies
+' on, and it is why renaming cannot move money between rows.
+' ============================================================
+Private Function BuildStdFromOneOffPart() As Boolean
+On Error GoTo eh
+    BuildStdFromOneOffPart = False
+    If StdCount > 0 Then Exit Function
+    If PartCount < 1 Then Exit Function
+
+    ' Substantial steel only. Same gates the plate classifier uses, so a job that
+    ' is really a bag of hardware does not become a steel row.
+    Dim keep() As Long, nKeep As Long, i As Long
+    ReDim keep(1 To PartCount)
+    nKeep = 0
+    For i = 1 To PartCount
+        If Not IsPyropelPartIndex(i) Then
+            If Not PartHasNoSolid(i) Then
+                If parts(i).Thickness >= PLATE_MIN_THICKNESS Then
+                    If parts(i).Width * parts(i).Length >= PLATE_MIN_FOOTPRINT Then
+                        If Not IsHardwareName(parts(i).componentName) Then
+                            nKeep = nKeep + 1
+                            keep(nKeep) = i
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    If nKeep < 1 Then
+        LogLine "One-off part quote: no substantial steel part found (PartCount=" & PartCount & _
+                "). Nothing to add."
+        Exit Function
+    End If
+
+    ' More than a handful and this is a base the classifiers should have named --
+    ' inventing rows for all of them would hide that failure behind a full-looking
+    ' quote. Cap it, and say so.
+    Const ONE_OFF_MAX_PARTS As Long = 4
+    If nKeep > ONE_OFF_MAX_PARTS Then
+        LogLine "*** ONE-OFF FALLBACK DECLINED: " & nKeep & " substantial steel parts, which is " & _
+                "a mold base the classifiers failed to name, not a one-off. Leaving the quote " & _
+                "empty rather than inventing " & nKeep & " rows -- check the AI bridge and the " & _
+                "CAD import log ***"
+        Exit Function
+    End If
+
+    ' The file name, for the single-solid case the shop actually sends.
+    Dim fileBase As String
+    fileBase = ""
+    If Not swModel Is Nothing Then fileBase = GetFileBaseName(swModel.GetPathName)
+
+    SortIndexArrayByVolumeDesc keep, nKeep
+
+    For i = 1 To nKeep
+        Dim nm As String
+        nm = ""
+        ' One part, one body: the file name IS the part name. Otherwise keep the
+        ' component/body name so several bodies stay distinguishable.
+        If nKeep = 1 And fileBase <> "" Then
+            nm = fileBase
+        Else
+            nm = parts(keep(i)).cleanName
+            If nm = "" Then nm = parts(keep(i)).componentName
+        End If
+        If nm = "" Then nm = "Part " & i
+
+        AddStdPlateFromCad keep(i), nm
+        SetStdCadRole keep(i), nm
+
+        ' Force a pricing row: a one-off name carries no plate token, so
+        ' StdSlotForName returns nothing and the row would never reach the sheet.
+        If StdCount >= 1 Then
+            If StdQuoteRow(StdCount) = 0 Then
+                Dim g As String, qr As Long
+                g = ResolveStdGrade("", "A")
+                qr = StdQuoteRowFor("A", g)
+                If qr = 0 Then
+                    g = "A36"
+                    qr = StdQuoteRowFor("A", "A36")
+                End If
+                StdGrade(StdCount) = g
+                StdQuoteRow(StdCount) = qr
+                LogLine "  one-off '" & nm & "' priced on the primary steel row of the " & g & _
+                        " block (row " & qr & "). The row is a pricing slot; the name above is " & _
+                        "what shows on the quote."
+            End If
+        End If
+
+        LogLine "*** ONE-OFF PART QUOTED: '" & nm & "' idx " & keep(i) & _
+                " T=" & FormatNumberForCsv(parts(keep(i)).Thickness) & _
+                " W=" & FormatNumberForCsv(parts(keep(i)).Width) & _
+                " L=" & FormatNumberForCsv(parts(keep(i)).Length) & _
+                IIf(nKeep = 1 And fileBase <> "", " (named from the CAD file)", "") & " ***"
+    Next i
+
+    BuildStdFromOneOffPart = (StdCount > 0)
+    Exit Function
+eh:
+    LogLine "BuildStdFromOneOffPart error: " & Err.Description
+    BuildStdFromOneOffPart = (StdCount > 0)
+End Function
+
 Private Sub ClassifyStandardBasePlates()
     StdResetArrays
-    If BuildStdFromAiBridge() Then
-        LogLine "Standard base plates: AI bridge classification in charge."
-        GoTo finishStd
+    StdClearBestSnapshot
+
+    ' Resolve the stack axis before any row is built: quoted thickness is measured
+    ' along it, and the duplicate-copy test compares parts along it.
+    gQuoteStackAxis = ResolveQuoteStackAxis()
+    If gQuoteStackAxis > 0 Then
+        LogLine "Quote stack axis resolved from geometry: " & _
+                Choose(gQuoteStackAxis, "CenterX", "CenterY", "CenterZ") & _
+                " (quoted thickness is the extent along this axis)."
+    Else
+        LogLine "WARNING: quote stack axis could not be resolved from geometry. Thickness falls " & _
+                "back to the smallest box dimension, which is wrong for rails and any part " & _
+                "standing up in the stack. Check every Thickness before ordering."
     End If
 
-    StdResetArrays
+    ' === CMS PATCH FINAL AI-FIRST STANDARD CLASSIFICATION ===
+    If gAiRoleCount > 0 Then
+        If BuildStdFromAiBridge() Then
+            LogLine "Standard base plates: AI bridge in charge of naming/role distinctions."
+            GoTo finishStd
+        End If
+        ' Deliberately NOT snapshotted: BuildStdFromAiBridge returning False means
+        ' the roles it produced are not trusted, so whatever partial list it left
+        ' must not be able to come back as a "best" result later.
+        LogLine "AI bridge roles present, but not trusted enough. Falling back to geometry."
+        StdResetArrays
+    End If
+
+    ' Geometry is the source of truth. Hard names/PDF/AI are only role hints.
     BuildStdFromGeometry
-    If StdCount >= 3 Then GoTo finishStd
+    StdKeepBestSnapshot "geometry"
 
-    StdResetArrays
-    If BuildStdFromBom() Then
-        If StdCount >= 3 Then GoTo finishStd
+    ' STD_MIN_GOOD_PLATES is a "try harder" trigger, NOT a rejection. Every stage
+    ' below snapshots its result first, so a shorter answer from a later stage is
+    ' discarded in favour of the best one instead of overwriting it.
+    If StdCount < STD_MIN_GOOD_PLATES Then
+        LogLine "Standard geometry-first classification found only " & StdCount & " plate(s); trying AI bridge fallback."
+        StdResetArrays
+        If BuildStdFromAiBridge() Then
+            StdKeepBestSnapshot "AI bridge fallback"
+            If StdCount >= STD_MIN_GOOD_PLATES Then
+                LogLine "Standard base plates: AI bridge fallback in charge."
+                GoTo finishStd
+            End If
+        End If
     End If
 
-    StdResetArrays
-    If BuildStdFromCadNames() Then GoTo finishStd
+    If StdCount < STD_MIN_GOOD_PLATES Then
+        LogLine "Standard geometry/AI found only " & StdCount & " plate(s); trying BOM fallback."
+        StdResetArrays
+        If BuildStdFromBom() Then
+            StdKeepBestSnapshot "BOM"
+            If StdCount >= STD_MIN_GOOD_PLATES Then GoTo finishStd
+        End If
+    End If
+
+    If StdCount < STD_MIN_GOOD_PLATES Then
+        LogLine "Standard BOM found only " & StdCount & " plate(s); trying CAD-name fallback."
+        StdResetArrays
+        BuildStdFromCadNames
+        StdKeepBestSnapshot "CAD names"
+    End If
+
+    ' Every stage has now had its turn. Put back whichever produced the most
+    ' plates -- without this, a declining fallback leaves the run holding an empty
+    ' list and the one-off path below fires on a base that WAS classified.
+    StdRestoreBestSnapshotIfBetter
+
+    ' Nothing above could name a stack. That is either a one-off part -- a normal
+    ' job -- or a base whose CAD did not translate. BuildStdFromOneOffPart tells
+    ' those apart by count and refuses the second case loudly rather than filling
+    ' the quote with invented rows.
+    If StdCount = 0 Then
+        LogLine "Standard classification found no plates at all; trying one-off part fallback."
+        If BuildStdFromOneOffPart() Then
+            LogLine "Standard base plates: quoted as a ONE-OFF PART, named from the CAD."
+        End If
+    End If
 
 finishStd:
+    ' A short stack is quotable, but it is also the signature of a partial CAD
+    ' load (one side of the mold, a suppressed subassembly, a failed translation).
+    ' Say so next to the plate list rather than leaving the estimator to notice
+    ' that a mold base came back with two plates.
+    If StdCount > 0 And StdCount < STD_MIN_GOOD_PLATES Then
+        If gActiveCadIsPartialSide Then
+            LogLine "WARNING: only " & StdCount & " plate(s) classified, and the active CAD is named as " & _
+                    "one SIDE of the mold. That is almost certainly why the list is short -- the rest of " & _
+                    "the stack is in the other half. Open the whole-base CAD and re-run before quoting."
+        Else
+            LogLine "WARNING: only " & StdCount & " plate(s) classified for a STANDARD mold base. " & _
+                    "A complete base is normally 5-10 plates. Check that the CAD that was open is the " & _
+                    "WHOLE mold base and not one side / a subassembly, and that no components failed to import."
+        End If
+    End If
+
     Dim i As Long
     LogLine "Standard base plates identified: " & StdCount
     For i = 1 To StdCount
         LogLine "  STD " & Replace(stdName(i), Chr(34), "") & " qty " & StdQty(i) & _
                 " T=" & StdT(i) & " W=" & StdW(i) & " L=" & StdL(i) & " -> " & StdGrade(i) & " row " & StdQuoteRow(i)
     Next i
+
     If WRITE_STACK_LEADERPIN_ANALYSIS And CurrentJobFolder <> "" Then
         WriteStackLeaderPinAnalysis CurrentJobFolder & "\Stack_LeaderPin_Analysis.csv", True
     End If
 End Sub
+
 
 ' ---- Pullcore / key straight quote: total volume x rate ----
 ' ---- Pull-core / key name matching (ported from the shop's pullcore logic) ----
@@ -14297,9 +23682,8 @@ On Error GoTo ErrHandler
     Dim s As String
     Dim p As Long
 
-    s = Trim(componentName)
+    s = Trim$(componentName)
 
-    ' Use the leaf component name, not the parent assembly path.
     p = InStrRev(s, "/")
     If p > 0 Then s = Mid$(s, p + 1)
 
@@ -14315,12 +23699,41 @@ On Error GoTo ErrHandler
     p = InStr(1, UCase$(s), ".X_T", vbTextCompare)
     If p > 1 Then s = Left$(s, p - 1)
 
-    CadPurchasePartToken = Trim(s)
+    Dim token As String
+    token = s
+
+    ' Prefer catalog token after final underscore.
+    p = InStrRev(token, "_")
+    If p > 0 Then token = Mid$(token, p + 1)
+
+    ' Strip instance suffix if numeric.
+    Dim dashPos As Long
+    dashPos = InStrRev(token, "-")
+    If dashPos > 1 Then
+        Dim tail As String
+        tail = Mid$(token, dashPos + 1)
+        If IsNumeric(tail) Then token = Left$(token, dashPos - 1)
+    End If
+
+    ' If still ugly, extract recognizable catalog token.
+    If NormalizeKey(token) = NormalizeKey(s) Or InStr(UCase$(token), "PART") > 0 Then
+        Dim re As Object
+        Set re = CreateObject("VBScript.RegExp")
+        re.Global = False
+        re.IgnoreCase = True
+        re.Pattern = "(GEB-[0-9A-Z]+|[0-9]{4}-GL|[0-9]{4}|[0-9]{3,4}[A-Z]{1,3}|[A-Z]{1,4}-[0-9A-Z]+)"
+        Dim ms As Object
+        Set ms = re.Execute(UCase$(s))
+        If ms.Count > 0 Then token = ms(0).value
+    End If
+
+    CadPurchasePartToken = Trim$(token)
     Exit Function
 
 ErrHandler:
-    CadPurchasePartToken = Trim(componentName)
+    CadPurchasePartToken = Trim$(componentName)
 End Function
+
 
 Private Function LooksLikeFullBasePlateCad(ByVal idx As Long) As Boolean
     LooksLikeFullBasePlateCad = False
@@ -14444,74 +23857,107 @@ Private Function TryClassifyStandardCadPurchased(ByVal idx As Long, _
 End Function
 
 Private Sub CaptureStandardPurchasedFromCadIfNeeded()
-On Error GoTo ErrHandler
+On Error Resume Next
+
+    If gJobIsStandardBase And Not STD_ENABLE_PURCHASED_COMPONENTS Then
+        LogLine "STANDARD job: skipping CAD purchased-component capture/pricing " & _
+                "(STD_ENABLE_PURCHASED_COMPONENTS is False)."
+        Exit Sub
+    End If
 
     If PartCount < 1 Then Exit Sub
     If PpCount > 0 Then Exit Sub
 
-    Dim key(1 To 300) As String
-    Dim desc(1 To 300) As String
-    Dim vendor(1 To 300) As String
-    Dim partNo(1 To 300) As String
-    Dim qty(1 To 300) As Long
-    Dim wid(1 To 300) As Double
-    Dim lng(1 To 300) As Double
-    Dim thk(1 To 300) As Double
-    Dim n As Long
+    Dim dict As Object
+    Set dict = CreateObject("Scripting.Dictionary")
 
     Dim i As Long
     Dim d As String
     Dim v As String
     Dim pn As String
     Dim k As String
-    Dim j As Long
-    Dim hit As Long
-
-    n = 0
 
     For i = 1 To PartCount
+
+        Err.Clear
+        d = ""
+        v = ""
+        pn = ""
+
         If TryClassifyStandardCadPurchased(i, d, v, pn) Then
-            ' Group by description + part number + SIZE so different-size parts
-            ' with the same generic name (e.g. 1" ejector leader pins vs 1-1/2"
-            ' main leader pins, both with no part number) stay separate quote
-            ' lines instead of collapsing into one mispriced line.
+
             k = NormalizeKey(d & "|" & pn & "|" & _
                              Format(parts(i).Thickness, "0.000") & "x" & _
                              Format(parts(i).Width, "0.000") & "x" & _
                              Format(parts(i).Length, "0.000"))
-            hit = 0
-            For j = 1 To n
-                If key(j) = k Then hit = j: Exit For
-            Next j
 
-            If hit = 0 Then
-                n = n + 1
-                If n > 300 Then Exit For
-                key(n) = k
-                desc(n) = d
-                vendor(n) = v
-                partNo(n) = pn
-                qty(n) = parts(i).Quantity
-                wid(n) = parts(i).Width
-                lng(n) = parts(i).Length
-                thk(n) = parts(i).Thickness
-            Else
-                qty(hit) = qty(hit) + parts(i).Quantity
+            If k <> "" Then
+                If dict.Exists(k) Then
+                    dict(k)("qty") = CLng(dict(k)("qty")) + parts(i).Quantity
+                Else
+                    Dim row As Object
+                    Set row = CreateObject("Scripting.Dictionary")
+                    row("desc") = d
+                    row("vendor") = v
+                    row("partno") = pn
+                    row("qty") = parts(i).Quantity
+                    row("t") = parts(i).Thickness
+                    row("w") = parts(i).Width
+                    row("l") = parts(i).Length
+                    dict.Add k, row
+                End If
             End If
+
         End If
+
+        If Err.Number <> 0 Then
+            LogLine "CAD purchased classify skipped idx=" & i & _
+                    " err=" & Err.Description & _
+                    " comp='" & parts(i).componentName & "'"
+            Err.Clear
+        End If
+
     Next i
 
-    For i = 1 To n
-        CapturePurchased desc(i), qty(i), "", thk(i), wid(i), lng(i), partNo(i), vendor(i), "", "Purchase-CAD"
-        LogLine "CAD standard purchased component: " & desc(i) & " " & partNo(i) & " qty " & qty(i)
-    Next i
+    Dim key As Variant
+    Dim r As Object
+    Dim n As Long
+
+    n = 0
+
+    For Each key In dict.keys
+
+        Err.Clear
+        Set r = dict(key)
+
+        CapturePurchased CStr(r("desc")), _
+                         CLng(r("qty")), _
+                         "", _
+                         CDbl(r("t")), _
+                         CDbl(r("w")), _
+                         CDbl(r("l")), _
+                         CStr(r("partno")), _
+                         CStr(r("vendor")), _
+                         "", _
+                         "Purchase-CAD"
+
+        If Err.Number <> 0 Then
+            LogLine "CAD purchased capture skipped key=" & CStr(key) & _
+                    " err=" & Err.Description
+            Err.Clear
+        Else
+            n = n + 1
+            LogLine "CAD standard purchased component: " & CStr(r("desc")) & _
+                    " " & CStr(r("partno")) & _
+                    " qty " & CStr(r("qty"))
+        End If
+
+    Next key
 
     If n > 0 Then LogLine "CAD standard purchased components captured: " & n
-    Exit Sub
-
-ErrHandler:
-    LogLine "CaptureStandardPurchasedFromCadIfNeeded error: " & Err.Description
 End Sub
+
+
 Private Sub BuildPullcoreList()
     PcCount = 0
     ReDim PcName(1 To 80): ReDim PcQty(1 To 80): ReDim PcT(1 To 80)
@@ -14632,8 +24078,8 @@ On Error GoTo eh
     For i = 1 To PcCount
         price = PcVol(i) * PULLCORE_RATE
         totVol = totVol + PcVol(i): totPrice = totPrice + price
-        csv = csv & CsvText(PcName(i)) & "," & PcQty(i) & "," & FormatNumberForCsv(PcT(i)) & "," & _
-              FormatNumberForCsv(PcW(i)) & "," & FormatNumberForCsv(PcL(i)) & "," & CsvText(PcMat(i)) & "," & _
+        csv = csv & csvText(PcName(i)) & "," & PcQty(i) & "," & FormatNumberForCsv(PcT(i)) & "," & _
+              FormatNumberForCsv(PcW(i)) & "," & FormatNumberForCsv(PcL(i)) & "," & csvText(PcMat(i)) & "," & _
               FormatNumberForCsv(PcVol(i)) & "," & FormatNumberForCsv(price) & vbCrLf
     Next i
     csv = csv & "TOTAL,,,,,," & FormatNumberForCsv(totVol) & "," & FormatNumberForCsv(totPrice) & vbCrLf
@@ -14906,10 +24352,27 @@ Private Sub CopyMatchingArtifacts(ByVal srcFolder As String, ByVal dstFolder As 
         If ext = "JPG" Or ext = "JPEG" Or ext = "PNG" Then take = True
         If ext = "CSV" Then take = True
         If ext = "TXT" Then take = True
+        If ext = "STL" Then take = True
         If (ext = "XLS" Or ext = "XLSX" Or ext = "XLSM") And _
            (InStr(up, "QUOTE") > 0 Or InStr(up, "STEEL") > 0 Or InStr(up, "J000") > 0) Then take = True
         If take Then fso.CopyFile f.path, dstFolder & "\" & nm, True
     Next f
+
+    ' Per-component plate STLs (TCP/BCP/ID HOLDER/OD HOLDER/ID POT/OD POT) are
+    ' written to their own "\stl" subfolder by ExportPlateStlsForComparison,
+    ' so the loop above (top-level files only) never sees them. Pull them in
+    ' explicitly so Match Studio and the quoting app's 3D/Matching/Comparison
+    ' tabs actually get these files.
+    Dim stlSrc As String
+    stlSrc = srcFolder & "\stl"
+    If fso.FolderExists(stlSrc) Then
+        Dim sf As Object
+        For Each sf In fso.GetFolder(stlSrc).Files
+            If UCase$(GetFileExtension(sf.Name)) = "STL" Then
+                fso.CopyFile sf.path, dstFolder & "\" & sf.Name, True
+            End If
+        Next sf
+    End If
 End Sub
 
 ' Write the 6-component pot/holder signature CSV in the header format Elgin reads.
@@ -14943,8 +24406,8 @@ Private Function SigRow(ByVal role As String, ByVal idx As Long) As String
     If idx < 1 Or idx > PartCount Then Exit Function
     Dim hc As String
     hc = IIf(parts(idx).hasAsmCenter, "TRUE", "FALSE")
-    SigRow = CsvText(CurrentJobNumber) & "," & CsvText(role) & "," & CsvText(role) & "," & _
-             CsvText(parts(idx).componentName) & "," & CsvText(parts(idx).cleanName) & "," & _
+    SigRow = csvText(CurrentJobNumber) & "," & csvText(role) & "," & csvText(role) & "," & _
+             csvText(parts(idx).componentName) & "," & csvText(parts(idx).cleanName) & "," & _
              FormatNumberForCsv(parts(idx).Length) & "," & FormatNumberForCsv(parts(idx).Width) & "," & _
              FormatNumberForCsv(parts(idx).Thickness) & "," & FormatNumberForCsv(parts(idx).massValue) & "," & _
              FormatNumberForCsv(parts(idx).AsmCenterX) & "," & FormatNumberForCsv(parts(idx).AsmCenterY) & "," & _
@@ -15078,11 +24541,11 @@ On Error GoTo eh
     For i = 1 To PartCount
         role = GeometryRoleForCadIndex(i, isStandardBase)
         suggested = SuggestedPcsNameForCadIndex(i, role, confidence, reason)
-        Print #f, i & "," & CsvText(parts(i).componentName) & "," & CsvText(role) & "," & _
-                  CsvText(suggested) & "," & CsvText(confidence) & "," & CsvText(reason) & "," & _
-                  CsvText(gStdDmeStackFamily) & "," & CsvText(StdPartingSideForCadIndex(i)) & "," & _
+        Print #f, i & "," & csvText(parts(i).componentName) & "," & csvText(role) & "," & _
+                  csvText(suggested) & "," & csvText(confidence) & "," & csvText(reason) & "," & _
+                  csvText(gStdDmeStackFamily) & "," & csvText(StdPartingSideForCadIndex(i)) & "," & _
                   CStr(gStdPartingLineAxis) & "," & FormatNumberForCsv(gStdPartingLinePos) & "," & _
-                  CsvText(LeaderPinStackKeyForCadIndex(i)) & "," & FormatNumberForCsv(StandardStackAxisPos(i)) & "," & _
+                  csvText(LeaderPinStackKeyForCadIndex(i)) & "," & FormatNumberForCsv(StandardStackAxisPos(i)) & "," & _
                   FormatNumberForCsv(parts(i).Thickness) & "," & FormatNumberForCsv(parts(i).Width) & "," & _
                   FormatNumberForCsv(parts(i).Length) & "," & FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
                   FormatNumberForCsv(parts(i).AsmCenterY) & "," & FormatNumberForCsv(parts(i).AsmCenterZ)
@@ -15117,10 +24580,10 @@ On Error GoTo eh
 
     ' --- job_analysis header block (one row of metadata, then blank, then parts) ---
     Print #f, "SECTION,KEY,VALUE"
-    Print #f, "job_analysis,stack_axis," & CsvText(StdStackAxisName(gStdStackAxis))
+    Print #f, "job_analysis,stack_axis," & csvText(StdStackAxisName(gStdStackAxis))
     Print #f, "job_analysis,top_is_first," & CStr(gStdTopIsFirst)
-    Print #f, "job_analysis,dme_stack_family," & CsvText(gStdDmeStackFamily)
-    Print #f, "job_analysis,parting_line," & CsvText(gStdPartingLineText)
+    Print #f, "job_analysis,dme_stack_family," & csvText(gStdDmeStackFamily)
+    Print #f, "job_analysis,parting_line," & csvText(gStdPartingLineText)
     Print #f, "job_analysis,parting_line_axis," & CStr(gStdPartingLineAxis)
     Print #f, "job_analysis,parting_line_pos," & FormatNumberForCsv(gStdPartingLinePos)
     Print #f, "job_analysis,a_plate_idx," & CStr(gStdCavityCadIndex)
@@ -15132,15 +24595,24 @@ On Error GoTo eh
     Else
         pinDir = "UNKNOWN"
     End If
-    Print #f, "job_analysis,leader_pin_direction," & CsvText(pinDir)
+    Print #f, "job_analysis,leader_pin_direction," & csvText(pinDir)
     Print #f, "job_analysis,leader_pin_reversed," & CStr(gStdLeaderPinReversed)
     Print #f, "job_analysis,ai_bridge_used," & CStr(gAiBridgeUsed)
+
+    ' HIGH  = rails/ejector anchored the stack
+    ' MEDIUM= leader-pin set anchored it
+    ' LOW   = nothing anchored it; plate names may be inverted, review this job
+    If gStdOrientationConfidence = "" Then
+        Print #f, "job_analysis,orientation_confidence,UNKNOWN"
+    Else
+        Print #f, "job_analysis,orientation_confidence," & csvText(gStdOrientationConfidence)
+    End If
 
     If gStdStackRules <> "" Then
         rules = Split(gStdStackRules, "|")
         For r = LBound(rules) To UBound(rules)
             If Trim(rules(r)) <> "" Then
-                Print #f, "job_analysis,rule_" & (r - LBound(rules) + 1) & "," & CsvText(Trim(rules(r)))
+                Print #f, "job_analysis,rule_" & (r - LBound(rules) + 1) & "," & csvText(Trim(rules(r)))
             End If
         Next r
     End If
@@ -15161,13 +24633,13 @@ On Error GoTo eh
         End If
         If NormalizeKey(role) = "IGNORE" Then GoTo nextPart
 
-        Print #f, i & "," & CsvText(parts(i).componentName) & "," & CsvText(role) & "," & _
-                  CsvText(pinSet) & "," & CsvText(StdPartingSideForCadIndex(i)) & "," & _
-                  CsvText(LeaderPinStackKeyForCadIndex(i)) & "," & FormatNumberForCsv(StandardStackAxisPos(i)) & "," & _
+        Print #f, i & "," & csvText(parts(i).componentName) & "," & csvText(role) & "," & _
+                  csvText(pinSet) & "," & csvText(StdPartingSideForCadIndex(i)) & "," & _
+                  csvText(LeaderPinStackKeyForCadIndex(i)) & "," & FormatNumberForCsv(StandardStackAxisPos(i)) & "," & _
                   FormatNumberForCsv(parts(i).Thickness) & "," & FormatNumberForCsv(parts(i).Width) & "," & _
                   FormatNumberForCsv(parts(i).Length) & "," & FormatNumberForCsv(parts(i).AsmCenterX) & "," & _
                   FormatNumberForCsv(parts(i).AsmCenterY) & "," & FormatNumberForCsv(parts(i).AsmCenterZ) & "," & _
-                  CsvText(IIf(pinSet = "PRIMARY", "HIGH primary pin-bushing plane", _
+                  csvText(IIf(pinSet = "PRIMARY", "HIGH primary pin-bushing plane", _
                          IIf(pinSet = "SECONDARY", "MEDIUM secondary guided-ejector plane", "")))
 nextPart:
     Next i
@@ -15219,11 +24691,41 @@ Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase
     If idx < 1 Or idx > PartCount Then Exit Function
 
     If isStandardBase Then
+
         Dim stdRole As String
         stdRole = StdCadRole(idx)
-        If stdRole <> "" Then GeometryRoleForCadIndex = stdRole: Exit Function
+
+        If stdRole <> "" Then
+            GeometryRoleForCadIndex = stdRole
+            Exit Function
+        End If
+
+        stdRole = HardStandardRoleForCadIndex(idx)
+        If stdRole <> "" Then
+            GeometryRoleForCadIndex = stdRole
+            Exit Function
+        End If
+
+        If IsRoundBarLike(idx) Then
+            GeometryRoleForCadIndex = StandardRoundComponentRole(idx)
+            If GeometryRoleForCadIndex <> "" Then Exit Function
+        End If
+
+        If IsLatchLockName(parts(idx).componentName) Then
+            GeometryRoleForCadIndex = "Latch Lock / Safety Strap"
+            Exit Function
+        End If
+
+        If LooksLikePlate(idx) Then
+            GeometryRoleForCadIndex = "STANDARD PLATE / RAIL"
+            Exit Function
+        End If
+
+        GeometryRoleForCadIndex = "HARDWARE / OTHER"
+        Exit Function
     End If
 
+    ' BMS fallback only for non-standard jobs.
     If idx = gIdxTCP Then GeometryRoleForCadIndex = "TCP": Exit Function
     If idx = gIdxBCP Then GeometryRoleForCadIndex = "BCP": Exit Function
     If idx = gIdxIDH Then GeometryRoleForCadIndex = "ID HOLDER": Exit Function
@@ -15242,16 +24744,13 @@ Private Function GeometryRoleForCadIndex(ByVal idx As Long, ByVal isStandardBase
     End If
 
     If LooksLikePlate(idx) Then
-        If isStandardBase Then
-            GeometryRoleForCadIndex = "STANDARD PLATE / RAIL"
-        Else
-            GeometryRoleForCadIndex = "PLATE-LIKE COMPONENT"
-        End If
+        GeometryRoleForCadIndex = "PLATE-LIKE COMPONENT"
         Exit Function
     End If
 
     GeometryRoleForCadIndex = "HARDWARE / OTHER"
 End Function
+
 
 Private Function IsScrewFastenerName(ByVal raw As String) As Boolean
     Dim u As String
@@ -15360,13 +24859,11 @@ On Error GoTo ErrHandler
     u = UCase$(raw)
     pn = UCase$(CadPurchasePartToken(raw))
 
-    If IsScrewFastenerName(raw) Then
-        StandardRoundComponentRole = ""
-        Exit Function
-    End If
+    If IsScrewFastenerName(raw) Then Exit Function
+    If IsDowelOrMinorRoundHardwareName(raw) Then Exit Function
 
-    If IsDowelOrMinorRoundHardwareName(raw) Then
-        StandardRoundComponentRole = ""
+    If InStr(u, "TOP LOCK") > 0 Then
+        StandardRoundComponentRole = "Top Lock"
         Exit Function
     End If
 
@@ -15380,27 +24877,42 @@ On Error GoTo ErrHandler
 
     ratio = axisLen / dia
 
-    If InStr(u, "LDR-PIN") > 0 Or InStr(u, "LDR_PIN") > 0 Then
-        StandardRoundComponentRole = "Leader Pin"
-        Exit Function
-    End If
-
-    If InStr(u, "/LBB_") > 0 Or InStr(u, "LBB_") > 0 Or InStr(u, "-LBB") > 0 Or InStr(u, "_LBB") > 0 Then
-        StandardRoundComponentRole = "Leader Pin Bushing"
-        Exit Function
-    End If
-
-    If InStr(u, "GEB_") > 0 Or InStr(u, "GUIDED EJECTOR") > 0 Then
+    ' Specific bushing/guide names before generic support-pillar geometry.
+    If InStr(u, "GE BUSH") > 0 Or InStr(u, "GEB") > 0 Or InStr(pn, "GEB") > 0 Or InStr(u, "GUIDED EJECTOR") > 0 Then
         StandardRoundComponentRole = "Guided Ejector Bushing"
         Exit Function
     End If
 
-    If InStr(u, "RETURN-PIN") > 0 Or InStr(u, "RETURN PIN") > 0 Then
+    If InStr(u, "LEADER BUSH") > 0 Or InStr(u, "LBB") > 0 Or InStr(pn, "LBB") > 0 Then
+        StandardRoundComponentRole = "Leader Pin Bushing"
+        Exit Function
+    End If
+
+    If InStr(u, "BUSHING") > 0 Or _
+       InStr(pn, "5770") > 0 Or _
+       InStr(pn, "5772") > 0 Or _
+       InStr(pn, "5776") > 0 Then
+        StandardRoundComponentRole = "Leader Pin Bushing"
+        Exit Function
+    End If
+
+    If InStr(u, "LDR-PIN") > 0 Or _
+       InStr(u, "LDR_PIN") > 0 Or _
+       InStr(u, "LEADER PIN") > 0 Or _
+       InStr(pn, "-GL") > 0 Then
+        StandardRoundComponentRole = "Leader Pin"
+        Exit Function
+    End If
+
+    If InStr(u, "RETURN-PIN") > 0 Or InStr(u, "RETURN PIN") > 0 Or InStr(u, "RETURN SPRING") > 0 Then
         StandardRoundComponentRole = "Return Pin"
         Exit Function
     End If
 
-    If InStr(u, "PILLAR_D") > 0 Or InStr(u, "SUPPORT PILLAR") > 0 Or InStr(u, "PILLAR") > 0 Then
+    If InStr(u, "PILLAR_D") > 0 Or _
+       InStr(u, "SUPPORT PILLAR") > 0 Or _
+       InStr(u, "SUPPORT POST") > 0 Or _
+       InStr(u, "PILLAR") > 0 Then
         StandardRoundComponentRole = "Support Pillar"
         Exit Function
     End If
@@ -15410,6 +24922,7 @@ On Error GoTo ErrHandler
         Exit Function
     End If
 
+    ' Geometry fallback.
     If dia >= 2# And axisLen >= 3# Then
         StandardRoundComponentRole = "Support Pillar"
         Exit Function
@@ -15439,6 +24952,10 @@ On Error GoTo ErrHandler
 ErrHandler:
     StandardRoundComponentRole = ""
 End Function
+
+
+
+
 
 
 Private Function IsLatchLockName(ByVal raw As String) As Boolean
@@ -15478,7 +24995,7 @@ End Function
 ' from the ejectors (main LDR-PIN / B-plate set); SECONDARY = the set nearer
 ' the ejectors (EJ_LDR_PIN / guided-ejector set). Secondary never decides A/B.
 Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp As Long, _
-                                               ByVal ax As Integer, ByVal supportPos As Double)
+                                               ByVal aX As Integer, ByVal supportPos As Double)
     Dim i As Long, j As Long
     Dim roleKey As String
     Dim pinIdx(1 To 120) As Long, nPin As Long
@@ -15514,7 +25031,7 @@ Private Sub ClassifyLeaderPinSetsByBushingPlane(ByRef lpIdx() As Long, ByVal nLp
         If roleKey = "EJECTORPLATE" Or roleKey = "BOTTOMEJECTORPLATE" Or roleKey = "RAILS" Or _
            InStr(uName, "EJ-RET") > 0 Or InStr(uName, "EJ-BACKUP") > 0 Or _
            InStr(uName, "EJ_RET") > 0 Or InStr(uName, "EJ_BACKUP") > 0 Then
-            ejMean = ejMean + PartAxisCenter(i, ax)
+            ejMean = ejMean + PartAxisCenter(i, aX)
             ejCount = ejCount + 1
         End If
     Next i
@@ -15595,7 +25112,7 @@ nextRound:
 
     nSets = 0
     For i = 1 To nPin
-        pPos = PartAxisCenter(pinIdx(i), ax)
+        pPos = PartAxisCenter(pinIdx(i), aX)
         bestSet = 0
         bestDist = 1E+30
         For j = 1 To nSets
@@ -15693,7 +25210,21 @@ nextBushEv:
         Next j
         For j = 1 To nSets
             If j <> primarySet And (setEjectorHits(j) > 0 Or setCount(j) > 0) Then
-                If secondarySet = 0 Or setEjectorHits(j) > setEjectorHits(secondarySet) Then secondarySet = j
+                ' NOT "If secondarySet = 0 Or setEjectorHits(j) > setEjectorHits(secondarySet)".
+                '
+                ' secondarySet starts at 0 and VBA evaluates EVERY operand of Or, so
+                ' that one-liner read setEjectorHits(0) on an array Dim'd (1 To 40)
+                ' the first time round the loop -- "Subscript out of range", and the
+                ' whole quote died. This is the branch a base takes when it has
+                ' fewer than two pin clusters or no ejector reference, which is most
+                ' small bases: C18597 hit it every run.
+                '
+                ' Split so the index is only read once secondarySet is known good.
+                If secondarySet = 0 Then
+                    secondarySet = j
+                ElseIf setEjectorHits(j) > setEjectorHits(secondarySet) Then
+                    secondarySet = j
+                End If
             End If
         Next j
         LogLine "Leader-pin sets: " & nSets & " cluster(s); PRIMARY=set" & primarySet & _
@@ -15713,7 +25244,34 @@ nextBushEv:
             pinRole = "Leader Pin"
         End If
 
-        If sid = primarySet Then
+        ' A PIN THAT JOINED NO CLUSTER HAS sid = 0, AND VBA DOES NOT SHORT-CIRCUIT.
+        '
+        ' setEjectorHits/setShoulderHits are Dim'd (1 To 40), so setEjectorHits(0)
+        ' is "Subscript out of range". The ElseIf below reads both of them, and VBA
+        ' evaluates EVERY operand of Or / And regardless of whether an earlier one
+        ' already settled the result -- so writing "sid > 0 And setEjectorHits(sid)"
+        ' would not have helped either. The guard has to be its own branch.
+        '
+        ' C18597 hit this and lost the whole job with "Err 9: Subscript out of
+        ' range" in Classify STANDARD mold base. Its clustering took the Else path
+        ' (fewer than 2 sets, or no ejector reference), which sets primarySet = 1
+        ' and leaves secondarySet = 0. An unclustered pin then failed
+        ' "sid = primarySet" (0 <> 1) and fell into the ElseIf, where
+        ' setEjectorHits(0) killed the run -- after orientation, before any export.
+        ' Nothing downstream ran: no STLs, no ISO JPGs, no steel sheet, no quote.
+        '
+        ' The loop ABOVE that fills these same arrays already guards this exact
+        ' case with "If sid < 1 Then GoTo nextBushEv". This loop was simply missing
+        ' it.
+        '
+        ' An unclustered pin still gets its ROLE, so it is named "Leader Pin" /
+        ' "Return Pin" on the quote like any other. Only the PRIMARY/SECONDARY set
+        ' tag is left blank, which is honest: it belongs to no set. Skipping the
+        ' pin entirely would have dropped it out of the quote instead.
+        If sid < 1 Then
+            SetStdCadRole pinIdx(i), pinRole
+
+        ElseIf sid = primarySet Then
             gStdLeaderPinSetByPart(pinIdx(i)) = "PRIMARY"
             SetStdCadRole pinIdx(i), pinRole
 
@@ -15744,7 +25302,7 @@ End Sub
 ' Measure whether primary leader pins enter from the top (A) or bottom (B) of
 ' the already-oriented stack. Reversed pins (seated in B, running toward A)
 ' are flagged but NEVER used to flip a confirmed A/B assignment.
-Private Sub MeasureLeaderPinTopBottomDirection(ByVal ax As Integer)
+Private Sub MeasureLeaderPinTopBottomDirection(ByVal aX As Integer)
     Dim i As Long
     Dim pinMean As Double, pinCount As Long
     Dim bushMean As Double, bushCount As Long
@@ -15757,8 +25315,8 @@ Private Sub MeasureLeaderPinTopBottomDirection(ByVal ax As Integer)
     If gStdCavityCadIndex < 1 Or gStdCoreCadIndex < 1 Then Exit Sub
     If PartCount < 1 Then Exit Sub
 
-    aPos = PartAxisCenter(gStdCavityCadIndex, ax)
-    bPos = PartAxisCenter(gStdCoreCadIndex, ax)
+    aPos = PartAxisCenter(gStdCavityCadIndex, aX)
+    bPos = PartAxisCenter(gStdCoreCadIndex, aX)
 
     For i = 1 To PartCount
         roleKey = NormalizeKey(StdCadRole(i))
@@ -15766,10 +25324,10 @@ Private Sub MeasureLeaderPinTopBottomDirection(ByVal ax As Integer)
         If roleKey = "LEADERPIN" Then
             ' Only PRIMARY set decides guide direction (Qwen rule).
             If gStdLeaderPinSetByPart(i) = "SECONDARY" Then GoTo nextPin
-            pinMean = pinMean + PartAxisCenter(i, ax)
+            pinMean = pinMean + PartAxisCenter(i, aX)
             pinCount = pinCount + 1
         ElseIf roleKey = "LEADERPINBUSHING" Then
-            bushMean = bushMean + PartAxisCenter(i, ax)
+            bushMean = bushMean + PartAxisCenter(i, aX)
             bushCount = bushCount + 1
         End If
 nextPin:
@@ -15796,18 +25354,18 @@ nextPin:
             " | pinMean=" & FormatNumberForCsv(pinMean) & " A=" & FormatNumberForCsv(aPos) & " B=" & FormatNumberForCsv(bPos)
 End Sub
 
-Private Function StdStackAxisName(ByVal ax As Integer) As String
-    Select Case ax
+Private Function StdStackAxisName(ByVal aX As Integer) As String
+    Select Case aX
         Case 1: StdStackAxisName = "CenterX"
         Case 2: StdStackAxisName = "CenterY"
         Case Else: StdStackAxisName = "CenterZ"
     End Select
 End Function
 
-Private Sub BuildStdStackAnalysisText(ByVal ax As Integer, ByVal nFull As Long, _
+Private Sub BuildStdStackAnalysisText(ByVal aX As Integer, ByVal nFull As Long, _
                                       ByVal nRail As Long, ByVal nEj As Long, ByVal nLp As Long)
     Dim axisName As String
-    axisName = StdStackAxisName(ax)
+    axisName = StdStackAxisName(aX)
     gStdPartingLineText = "Between a_plate and b_plate from the full-footprint stack order."
     gStdStackRules = "Full-footprint plates were sorted by " & axisName & " from top to bottom."
     gStdStackRules = gStdStackRules & "|Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation."
@@ -16037,6 +25595,158 @@ End Function
 ' Purchased Components Prices.csv (editable unit price + part #).
 ' ============================================================
 
+' === CMS PATCH SIMPLE PURCHASED PRICE CSV START ===
+' Supports simple Purchased Components Prices.csv:
+'   Component,Unit Price
+'   Leader Pin,25.46
+'   Guide Bushing,6.75
+'   Ejector Bushing,6.75
+'   Retaining Ring,5.00
+'   Safety Strap,20.00
+Private Sub EnsurePurchasedPriceArrays(ByVal minSize As Long)
+On Error GoTo NeedInit
+
+    Dim ub As Long
+    ub = UBound(PlComp)
+
+    If ub < minSize Then
+        ReDim Preserve PlComp(1 To minSize)
+        ReDim Preserve PlVendor(1 To minSize)
+        ReDim Preserve PlPartNo(1 To minSize)
+        ReDim Preserve PlDescr(1 To minSize)
+        ReDim Preserve PlUnit(1 To minSize)
+        ReDim Preserve PlPrice(1 To minSize)
+    End If
+
+    Exit Sub
+
+NeedInit:
+    ReDim PlComp(1 To minSize)
+    ReDim PlVendor(1 To minSize)
+    ReDim PlPartNo(1 To minSize)
+    ReDim PlDescr(1 To minSize)
+    ReDim PlUnit(1 To minSize)
+    ReDim PlPrice(1 To minSize)
+End Sub
+
+Private Sub AddLoadedPurchasedPriceRow(ByVal comp As String, _
+                                       ByVal vendor As String, _
+                                       ByVal partNo As String, _
+                                       ByVal descr As String, _
+                                       ByVal unitText As String, _
+                                       ByVal unitPrice As Double)
+On Error Resume Next
+
+    comp = Trim$(comp)
+    If comp = "" Then Exit Sub
+    If unitPrice < 0 Then unitPrice = 0
+
+    PlCount = PlCount + 1
+    EnsurePurchasedPriceArrays PlCount + 50
+
+    PlComp(PlCount) = comp
+    PlVendor(PlCount) = vendor
+    PlPartNo(PlCount) = partNo
+    PlDescr(PlCount) = descr
+    PlUnit(PlCount) = unitText
+    PlPrice(PlCount) = unitPrice
+End Sub
+
+Private Sub LoadSimplePurchasedPriceList(ByVal path As String)
+On Error GoTo ErrHandler
+
+    If path = "" Then Exit Sub
+    If Dir(path) = "" Then Exit Sub
+
+    Dim whole As String
+    whole = ReadAllTextFile(path)
+
+    If Trim$(whole) = "" Then Exit Sub
+
+    whole = Replace(whole, vbCrLf, vbLf)
+    whole = Replace(whole, vbCr, vbLf)
+
+    Dim lines() As String
+    lines = Split(whole, vbLf)
+
+    Dim i As Long
+    Dim line As String
+    Dim cols() As String
+    Dim comp As String
+    Dim priceText As String
+    Dim priceVal As Double
+
+    Dim re As Object
+    Dim ms As Object
+
+    Set re = CreateObject("VBScript.RegExp")
+    re.Global = False
+    re.IgnoreCase = True
+
+    ' Handles:
+    '   Leader Pin,$25.46
+    '   Leader Pin,25.46
+    '   Leader Pin    $25.46
+    re.Pattern = "^\s*(.+?)\s*,?\s+\$?\s*([0-9][0-9,]*\.[0-9]{2})\s*$"
+
+    For i = LBound(lines) To UBound(lines)
+
+        line = Trim$(lines(i))
+
+        If line = "" Then GoTo NextLine
+        If Left$(line, 1) = "#" Then GoTo NextLine
+
+        If InStr(1, line, "Component", vbTextCompare) > 0 And _
+           InStr(1, line, "Price", vbTextCompare) > 0 Then GoTo NextLine
+
+        comp = ""
+        priceText = ""
+
+        If InStr(line, vbTab) > 0 Then
+
+            cols = Split(line, vbTab)
+            If UBound(cols) >= 1 Then
+                comp = Trim$(cols(0))
+                priceText = Trim$(cols(1))
+            End If
+
+        ElseIf InStr(line, ",") > 0 Then
+
+            cols = Split(line, ",")
+            If UBound(cols) >= 1 Then
+                comp = Trim$(cols(0))
+                priceText = Trim$(cols(1))
+            End If
+
+        Else
+
+            Set ms = re.Execute(line)
+            If ms.Count > 0 Then
+                comp = Trim$(ms(0).SubMatches(0))
+                priceText = Trim$(ms(0).SubMatches(1))
+            End If
+
+        End If
+
+        If comp <> "" Then
+            priceVal = ParsePriceToken(priceText)
+            AddLoadedPurchasedPriceRow comp, "", "", comp, "EA", priceVal
+        End If
+
+NextLine:
+    Next i
+
+    If PlCount > 0 Then
+        LogLine "Loaded SIMPLE purchased price list: " & PlCount & " row(s) from " & path
+    End If
+
+    Exit Sub
+
+ErrHandler:
+    LogLine "LoadSimplePurchasedPriceList error: " & Err.Description
+End Sub
+' === CMS PATCH SIMPLE PURCHASED PRICE CSV END ===
+
 Private Function FindPurchasedPriceFile() As String
     On Error Resume Next
     FindPurchasedPriceFile = ""
@@ -16163,6 +25873,11 @@ Private Sub LoadPurchasedPriceList()
             End If
         End If
     Next li
+    If PlCount = 0 Then
+        LogLine "6-column price list parsed 0 rows from " & path & ". Trying SIMPLE 2-column Component/Unit Price format."
+        LoadSimplePurchasedPriceList path
+    End If
+
     If PlCount = 0 Then
         LogLine "Price list parsed 0 rows from " & path & " - using built-in default list."
         SeedDefaultPriceList
@@ -16304,11 +26019,62 @@ Private Function LooksLikePurchasedPartNo(ByVal partNo As String) As Boolean
     If p Like "*[A-Z]*" And p Like "*[0-9]*" Then LooksLikePurchasedPartNo = True
 End Function
 
+' Insulation is never quoted as a purchased component.
+'
+' On C18609 the same insulation came through THREE times: "External
+' Insulation" (Pyropel), a JACO HT200 line, and a mangled pdftotext row
+' ("Purchase 2 Manufacturing Ht200 .250 11.500 13.875 ..."). All three
+' picked up JACO's $174.67 via part-number and phrase matching -- $349.34
+' of double-counted insulation on a $613.70 purchased total -- even though
+' the price list carries Pyropel at $0.00. Matching on the material and the
+' HT200 part number catches every spelling of it.
+Private Function IsExcludedInsulationPurchase(ByVal desc As String, _
+                                              ByVal partNo As String, _
+                                              ByVal manuf As String) As Boolean
+On Error GoTo eh
+    IsExcludedInsulationPurchase = False
+
+    Dim d As String, p As String, v As String
+    d = NormalizeText(desc)
+    p = UCase$(Trim$(partNo))
+    v = NormalizeText(manuf)
+
+    If InStr(d, "INSULATION") > 0 Then IsExcludedInsulationPurchase = True: Exit Function
+    If InStr(d, "INSULATOR") > 0 Then IsExcludedInsulationPurchase = True: Exit Function
+    If InStr(d, "PYROPEL") > 0 Then IsExcludedInsulationPurchase = True: Exit Function
+    If InStr(v, "PYROPEL") > 0 Then IsExcludedInsulationPurchase = True: Exit Function
+    If InStr(p, "HT200") > 0 Then IsExcludedInsulationPurchase = True: Exit Function
+    If InStr(d, "HT200") > 0 Then IsExcludedInsulationPurchase = True
+
+    Exit Function
+eh:
+    IsExcludedInsulationPurchase = False
+End Function
+
 Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat As String, _
                              Optional ByVal tThk As Double = 0, Optional ByVal wWid As Double = 0, _
                              Optional ByVal lLen As Double = 0, Optional ByVal partNo As String = "", _
                              Optional ByVal manuf As String = "", Optional ByVal detNo As String = "", _
                              Optional ByVal purchType As String = "")
+    If IsPurchasedHeaderJunkV2(desc) Then Exit Sub
+    If Trim$(desc) = "" And Trim$(partNo) = "" Then Exit Sub
+
+    If IsPurchasedJunkOrBlankV4(desc, partNo) Then Exit Sub
+
+    ' Insulation is not quoted. Every capture path funnels through here, so
+    ' this one gate keeps it out of the CSV, the Purchased Components
+    ' workbook, and the Quote sheet's components block.
+    If IsExcludedInsulationPurchase(desc, partNo, manuf) Then
+        LogLine "Purchased EXCLUDED (insulation not quoted): desc='" & desc & _
+                "' part='" & partNo & "' vendor='" & manuf & "'"
+        Exit Sub
+    End If
+
+    If PurchasedDuplicateExistsV4(desc, manuf, partNo, detNo) Then
+        LogLine "Purchased duplicate skipped V4: det=" & detNo & " desc='" & desc & "' part='" & partNo & "'"
+        Exit Sub
+    End If
+
     Dim isPurchase As Boolean
     isPurchase = (InStr(UCase(purchType), "PURCHASE") > 0)
     If isPurchase = False Then
@@ -16345,37 +26111,47 @@ Private Sub CapturePurchased(ByVal desc As String, ByVal qty As Long, ByVal mat 
     PpT(PpCount) = tThk
     PpDet(PpCount) = Trim(detNo)
 
-    ' Price: web lookup (off by default) -> direct part# match in the list ->
-    ' the matched row -> 0. Logged so a $0 is easy to diagnose.
-    ' KEYWORD matches with no part number are too weak to price: they are what
-    ' put $25.46 (Leader Pin) on grouped assemblies in J8420. Those now stay
-    ' $0 with a NEEDS PRICE warning instead of silently taking a wrong price.
-    Dim p As Double
+
+' Price priority V3:
+'   1. Exact part number from Purchased Components Prices.csv
+'   2. Matched component row from Purchased Components Prices.csv
+'   3. DME Playwright lookup through cms_price_lookup.py when CSV price is 0/missing
+'   4. Generic web lookup last
+'
+' This prevents random Bing/DME HTML prices from overriding the shop CSV.
+Dim p As Double
+p = 0#
+
+p = LookupListPriceByPartNo(PpPartNo(PpCount))
+
+If p <= 0 And k > 0 Then
+    Dim isCadCapture As Boolean
+    isCadCapture = (InStr(UCase$(purchType), "CAD") > 0)
+
+    If isCadCapture And (matchKind = "KEYWORD" Or (matchKind <> "PARTNO" And matchKind <> "DESCNO")) Then
+
+        LogLine "PRICE WARNING (" & desc & "): weak CAD/keyword price match suppressed. " & _
+                "partNo='" & partNo & "' matched list row '" & PlPartNo(k) & _
+                "' by " & matchKind & ". NEEDS PRICE."
+
+        p = 0#
+
+    Else
+        p = PlPrice(k)
+    End If
+End If
+
+If p <= 0 And ENABLE_PYTHON_PRICE_LOOKUP Then
+    p = LookupDmePriceWithPython(PpPartNo(PpCount))
+    If p > 0 Then SavePriceToList PpVendor(PpCount), PpPartNo(PpCount), p
+End If
+
+If p <= 0 And ENABLE_ONLINE_PRICE_LOOKUP Then
     p = GetOnlineUnitPrice(PpVendor(PpCount), PpPartNo(PpCount))
-    If p <= 0 Then p = LookupListPriceByPartNo(PpPartNo(PpCount))
-    If p <= 0 And k > 0 Then
-
-        Dim isCadCapture As Boolean
-        isCadCapture = (InStr(UCase$(purchType), "CAD") > 0)
-
-        If matchKind = "KEYWORD" Or (isCadCapture And matchKind <> "PARTNO" And matchKind <> "DESCNO") Then
-
-            LogLine "PRICE WARNING (" & desc & "): weak CAD/keyword price match suppressed. " & _
-                    "partNo='" & partNo & "' matched list row '" & PlPartNo(k) & _
-                    "' by " & matchKind & ". NEEDS PRICE."
-
-            p = 0#
-
-        Else
-            p = PlPrice(k)
-        End If
-
-    End If
-    If p <= 0 And ENABLE_PYTHON_PRICE_LOOKUP And InStr(UCase(PpVendor(PpCount)), "DME") > 0 Then
-        p = LookupDmePriceWithPython(PpPartNo(PpCount))
-        If p > 0 Then SavePriceToList PpVendor(PpCount), PpPartNo(PpCount), p
-    End If
+End If
     PpPrice(PpCount) = p
+    CmsV8BRepricePurchasedLine PpCount
+    ApplyPurchasedPackPricingV4 PpCount
     LogLine "PRICE " & PpPartNo(PpCount) & " (" & desc & "): listRow#=" & k & " match=" & matchKind & _
             " -> $" & FormatNumberForCsv(p) & "   [price list has " & PlCount & " row(s)]"
 End Sub
@@ -16383,13 +26159,26 @@ End Sub
 ' Direct price lookup by part number against the loaded price list.
 Private Function LookupListPriceByPartNo(ByVal partNo As String) As Double
     LookupListPriceByPartNo = 0
-    Dim pu As String, k As Long, plp As String
-    pu = UCase(Trim(partNo))
+
+    Dim pu As String
+    Dim k As Long
+    Dim plp As String
+
+    pu = NormalizeKey(partNo)
+
     If pu = "" Then Exit Function
+    If Len(pu) < 3 Then Exit Function
+
+    ' Reject bad partial captures like "5".
+    If IsNumeric(pu) Then
+        If Len(pu) < 4 Then Exit Function
+    End If
+
+    ' Exact normalized match only.
     For k = 1 To PlCount
-        plp = UCase(Trim(PlPartNo(k)))
+        plp = NormalizeKey(PlPartNo(k))
         If plp <> "" Then
-            If plp = pu Or InStr(pu, plp) > 0 Or InStr(plp, pu) > 0 Then
+            If plp = pu Then
                 LookupListPriceByPartNo = PlPrice(k)
                 Exit Function
             End If
@@ -16461,10 +26250,10 @@ On Error GoTo ErrHandler
 
     Dim deadline As Date
     deadline = DateAdd("s", 60, Now)
-    Do While ex.Status = 0 And Now < deadline
+    Do While ex.status = 0 And Now < deadline
         WaitMilliseconds 250
     Loop
-    If ex.Status = 0 Then
+    If ex.status = 0 Then
         On Error Resume Next
         ex.Terminate
         On Error GoTo ErrHandler
@@ -16566,7 +26355,7 @@ On Error GoTo eh
     http.SetRequestHeader "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
     http.SetRequestHeader "Accept", "text/html"
     http.Send
-    If http.Status = 200 Then HttpGetText = http.ResponseText
+    If http.status = 200 Then HttpGetText = http.ResponseText
     Exit Function
 eh:
     HttpGetText = ""
@@ -16779,8 +26568,8 @@ On Error GoTo eh
     Dim s As String, i As Long, tot As Double
     s = "Component,Vendor,PartNumber,Description,QTY,UnitPrice,Extended" & vbCrLf
     For i = 1 To PpCount
-        s = s & CsvText(PpComp(i)) & "," & CsvText(PpVendor(i)) & "," & CsvText(PpPartNo(i)) & "," & _
-            CsvText(PpDesc(i)) & "," & PpQty(i) & "," & FormatNumberForCsv(PpPrice(i)) & "," & _
+        s = s & csvText(PpComp(i)) & "," & csvText(PpVendor(i)) & "," & csvText(PpPartNo(i)) & "," & _
+            csvText(PpDesc(i)) & "," & PpQty(i) & "," & FormatNumberForCsv(PpPrice(i)) & "," & _
             FormatNumberForCsv(PpQty(i) * PpPrice(i)) & vbCrLf
         tot = tot + PpQty(i) * PpPrice(i)
     Next i
@@ -16800,10 +26589,28 @@ eh:
 End Sub
 
 Private Sub ComputePurchasedQuote()
+
+    If gJobIsStandardBase And Not STD_ENABLE_PURCHASED_COMPONENTS Then
+        PpCount = 0
+        ReDim PpDesc(1 To 1)
+        ReDim PpQty(1 To 1)
+        ReDim PpComp(1 To 1)
+        ReDim PpVendor(1 To 1)
+        ReDim PpPartNo(1 To 1)
+        ReDim PpPrice(1 To 1)
+        ReDim PpW(1 To 1)
+        ReDim PpL(1 To 1)
+        ReDim PpT(1 To 1)
+        ReDim PpDet(1 To 1)
+        gEmailStatus = "NOT sent - standard/non-BMS job; purchased component pricing disabled"
+        LogLine "STANDARD job: purchased component pricing disabled (STD_ENABLE_PURCHASED_COMPONENTS is False)."
+        Exit Sub
+    End If
     If PpCount < 1 Then
         If PlCount > 0 Then LogLine "Purchased components: none matched in this BOM."
         Exit Sub
     End If
+    NormalizePurchasedComponentsV8B
     Dim i As Long, tot As Double, zero As Long
     For i = 1 To PpCount: tot = tot + PpQty(i) * PpPrice(i): Next i
     For i = 1 To PpCount
@@ -17043,7 +26850,7 @@ Private Function SendViaCdo(ByVal toAddr As String, ByVal subj As String, ByVal 
         msg.To = toAddr
         msg.From = GMAIL_ADDRESS
         msg.Subject = subj
-        msg.HTMLBody = htmlBody
+        msg.htmlBody = htmlBody
         Err.Clear
         msg.Send
         If Err.Number = 0 Then
@@ -17421,7 +27228,7 @@ On Error GoTo ErrHandler
 
     BuildFrontOrientIndexCollections holderIndexes, potIndexes
 
-    If holderIndexes Is Nothing Or holderIndexes.count = 0 Then
+    If holderIndexes Is Nothing Or holderIndexes.Count = 0 Then
         LogLine "Front definition skipped: no holder CAD indexes found."
         Exit Function
     End If
@@ -17630,7 +27437,7 @@ On Error GoTo ErrHandler
     PickLargestCadIndexFromCollection = 0
 
     If col Is Nothing Then Exit Function
-    If col.count = 0 Then Exit Function
+    If col.Count = 0 Then Exit Function
 
     Dim i As Long
     Dim cadIdx As Long
@@ -17640,7 +27447,7 @@ On Error GoTo ErrHandler
     bestIdx = 0
     bestVol = -1#
 
-    For i = 1 To col.count
+    For i = 1 To col.Count
 
         cadIdx = CLng(col(i))
 
@@ -17910,8 +27717,8 @@ On Error GoTo ErrHandler
     If model Is Nothing Then Exit Function
     If holderIndexes Is Nothing Then Exit Function
     If potIndexes Is Nothing Then Exit Function
-    If holderIndexes.count = 0 Then Exit Function
-    If potIndexes.count = 0 Then
+    If holderIndexes.Count = 0 Then Exit Function
+    If potIndexes.Count = 0 Then
         LogLine "Pot/front check skipped: no pot CAD indexes found."
         Exit Function
     End If
@@ -18023,8 +27830,8 @@ On Error GoTo ErrHandler
     If model Is Nothing Then Exit Function
     If holderIndexes Is Nothing Then Exit Function
     If potIndexes Is Nothing Then Exit Function
-    If holderIndexes.count = 0 Then Exit Function
-    If potIndexes.count = 0 Then Exit Function
+    If holderIndexes.Count = 0 Then Exit Function
+    If potIndexes.Count = 0 Then Exit Function
 
     model.ShowNamedView2 "*Front", 1
     StabilizeActiveView model, 100
@@ -18197,7 +28004,7 @@ On Error GoTo ErrHandler
 
     If model Is Nothing Then Exit Function
     If cadIndexes Is Nothing Then Exit Function
-    If cadIndexes.count = 0 Then Exit Function
+    If cadIndexes.Count = 0 Then Exit Function
 
     Dim total As Double
     Dim countVal As Long
@@ -18210,7 +28017,7 @@ On Error GoTo ErrHandler
     Dim i As Long
     Dim cadIdx As Long
 
-    For i = 1 To cadIndexes.count
+    For i = 1 To cadIndexes.Count
 
         cadIdx = CLng(cadIndexes(i))
 
@@ -18453,7 +28260,7 @@ On Error Resume Next
 
     Dim i As Long
 
-    For i = 1 To col.count
+    For i = 1 To col.Count
         If CLng(col(i)) = cadIdx Then Exit Sub
     Next i
 
@@ -18542,12 +28349,58 @@ On Error GoTo ErrHandler
     Dim selectedCount As Long
     Dim keepFoundCount As Long
 
+    ' HIDING A SUB-ASSEMBLY HIDES EVERYTHING INSIDE IT.
+    '
+    ' GetComponents(False) walks ALL levels, so vComps holds the sub-assemblies as
+    ' well as the leaf parts. The keep list holds full paths to leaf plates --
+    ' "25-424--bm-quote-1/25-424--1580-a00-1" -- and the parent
+    ' "25-424--bm-quote-1" is not in it. Hiding that parent hid the plate too,
+    ' whatever Visible was set to on the child.
+    '
+    ' C18626 is what this looked like: a two-level base (bm-quote / bs-quote
+    ' sub-assemblies, inserts three deep). 118 components hidden, 1 kept, and the
+    ' kept plate was inside a hidden parent -- so nothing was visible, SolidWorks
+    ' tessellated an empty view, and every STL SaveAs returned "Errors=0
+    ' Warnings=0" while writing no file at all. The whole stl\ folder came out
+    ' empty, and with it the 3D tab, the Datum machining estimate and the
+    ' confidence band, all of which read those files.
+    '
+    ' Nothing in the old code could report this: SaveAs said it succeeded, so the
+    ' only symptom was a missing file.
+    '
+    ' Every job whose plates sit at the TOP level was unaffected, which is why this
+    ' survived so long -- C18595's plates are all "2223488_B-PLATE_2-1" with no
+    ' parent path at all.
+    Dim ancestors As Object
+    Set ancestors = CreateObject("Scripting.Dictionary")
+    Dim vKeepKeys As Variant, kn As Long, keepPath As String, cut As Long
+    vKeepKeys = keepDict.Keys
+    For kn = 0 To UBound(vKeepKeys)
+        keepPath = CStr(vKeepKeys(kn))
+        ' Every path prefix of a keep component is an ancestor that must stay shown.
+        cut = InStr(keepPath, "/")
+        Do While cut > 0
+            If Not ancestors.Exists(Left$(keepPath, cut - 1)) Then
+                ancestors.Add Left$(keepPath, cut - 1), True
+            End If
+            cut = InStr(cut + 1, keepPath, "/")
+        Loop
+    Next kn
+    If ancestors.Count > 0 Then
+        LogLine "STL/DXF isolation: " & ancestors.Count & " parent sub-assembly(ies) kept " & _
+                "visible so their quoted children are not hidden with them."
+    End If
+
     For i = 0 To UBound(vComps)
         Set swComp = vComps(i)
         If Not swComp Is Nothing Then
             If swComp.IsSuppressed = False Then
                 If keepDict.Exists(LCase(swComp.Name2)) Then
                     keepFoundCount = keepFoundCount + 1
+                    swComp.Visible = swComponentVisible
+                ElseIf ancestors.Exists(LCase(swComp.Name2)) Then
+                    ' A container on the path to something we are keeping. Leave it
+                    ' shown; its other children are hidden individually below.
                     swComp.Visible = swComponentVisible
                 Else
                     If swComp.Select4(True, Nothing, False) Then
@@ -18581,6 +28434,296 @@ ErrHandler:
     assyModel.ClearSelection2 True
     HideAllExceptComponentNamesOnce = False
 End Function
+
+' Hide exactly the named components, leaving everything else visible. The inverse
+' of HideAllExceptComponentNamesOnce, and used for the components-only export:
+' hide the quoted steel and what remains is the hardware.
+'
+' Only leaf components are hidden, never a parent sub-assembly, so nothing is lost
+' by association the way HideAllExceptComponentNamesOnce had to guard against.
+Private Function HideNamedComponentsOnce(ByVal assyModel As Object, _
+                                        ByVal hideNames As Collection, _
+                                        ByRef hiddenNames As Collection) As Boolean
+On Error GoTo ErrHandler
+    HideNamedComponentsOnce = False
+    If assyModel Is Nothing Then Exit Function
+    If assyModel.GetType <> swDocASSEMBLY Then Exit Function
+    If hideNames Is Nothing Then Exit Function
+    If hideNames.Count = 0 Then Exit Function
+    If hiddenNames Is Nothing Then Set hiddenNames = New Collection
+
+    Dim hideDict As Object
+    Set hideDict = CreateObject("Scripting.Dictionary")
+
+    Dim i As Long
+    For i = 1 To hideNames.Count
+        hideDict(LCase(CStr(hideNames(i)))) = True
+    Next i
+
+    Dim swAssembly As Object
+    Set swAssembly = assyModel
+
+    Dim vComps As Variant
+    vComps = swAssembly.GetComponents(False)
+    If IsEmpty(vComps) Then Exit Function
+
+    assyModel.ClearSelection2 True
+
+    Dim swComp As Object
+    Dim selectedCount As Long
+
+    For i = 0 To UBound(vComps)
+        Set swComp = vComps(i)
+        If Not swComp Is Nothing Then
+            If swComp.IsSuppressed = False Then
+                If hideDict.Exists(LCase(swComp.Name2)) Then
+                    If swComp.Select4(True, Nothing, False) Then
+                        hiddenNames.Add swComp.Name2
+                        selectedCount = selectedCount + 1
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    If selectedCount > 0 Then
+        swAssembly.HideComponent2
+        LogLine "COMPONENTS isolation: hid " & selectedCount & " quoted steel component(s); " & _
+                "everything else stays visible."
+    Else
+        LogLine "COMPONENTS isolation: none of the steel components were found to hide."
+    End If
+
+    assyModel.ClearSelection2 True
+    HideNamedComponentsOnce = (selectedCount > 0)
+    Exit Function
+
+ErrHandler:
+    LogLine "HideNamedComponentsOnce error: " & Err.Description
+    On Error Resume Next
+    assyModel.ClearSelection2 True
+    HideNamedComponentsOnce = False
+End Function
+
+' EASM + STL of everything that is NOT quoted steel.
+'
+' The steel sheet covers the plates; what it does not cover is the hardware --
+' leader pins, bushings, return pins, springs, straps, top locks, screws. There was
+' no file showing just that, so checking a hardware list against the model meant
+' opening the whole assembly and hiding plates by hand.
+'
+' Built by inverting the steel keep-list that the steel STL already computes, so
+' the two exports are guaranteed to be complements of each other: whatever is on
+' the steel sheet is out of this file, and whatever is not is in it.
+Private Function ExportComponentsOnlyPackage(ByVal assyModel As Object, _
+                                            ByVal easmPath As String, _
+                                            ByVal stlPath As String) As Boolean
+On Error GoTo ErrHandler
+
+    ExportComponentsOnlyPackage = False
+    If assyModel Is Nothing Then Exit Function
+    If assyModel.GetType <> swDocASSEMBLY Then
+        LogLine "COMPONENTS export skipped: active document is not an assembly."
+        Exit Function
+    End If
+
+    Dim steelNames As Collection
+    Set steelNames = BuildSteelStlKeepComponentNamesForCurrentJob()
+
+    If steelNames Is Nothing Or steelNames.Count = 0 Then
+        LogLine "COMPONENTS export skipped: the steel keep-list is empty, so there is " & _
+                "nothing to hide and this file would just duplicate the full assembly."
+        Exit Function
+    End If
+
+    If PartCount <= steelNames.Count Then
+        LogLine "COMPONENTS export skipped: every component in the assembly (" & PartCount & _
+                ") is quoted steel, so there is no hardware to show."
+        Exit Function
+    End If
+
+    Dim hiddenNames As Collection
+    Set hiddenNames = New Collection
+
+    ' Start from everything shown, or a plate left hidden by an earlier pass ends up
+    ' missing from this file too.
+    On Error Resume Next
+    UnsuppressAllAssemblyComponents assyModel
+    ShowAllAssemblyComponents assyModel
+    On Error GoTo ErrHandler
+
+    PrepareAssemblyVisibilityFast assyModel
+
+    If HideNamedComponentsOnce(assyModel, steelNames, hiddenNames) = False Then
+        LogLine "COMPONENTS export skipped: could not hide the steel components."
+        GoTo CleanExit
+    End If
+
+    ApplyCmsTopView assyModel
+    StabilizeActiveView assyModel, 50
+
+    Dim okEasm As Boolean, okStl As Boolean
+    Dim fsoComp As Object
+    Set fsoComp = CreateObject("Scripting.FileSystemObject")
+
+    If easmPath <> "" Then
+        SaveModelAs assyModel, easmPath
+        okEasm = fsoComp.FileExists(easmPath)
+        If okEasm Then
+            LogLine "COMPONENTS EASM written (steel hidden): " & easmPath
+            LogFileExistsAndSize "COMPONENTS EASM", easmPath
+        Else
+            LogLine "WARNING: COMPONENTS EASM was not created: " & easmPath
+        End If
+    End If
+
+    If stlPath <> "" Then
+        okStl = ExportVisibleModelStlToTempAndMerge(assyModel, stlPath, "COMPONENTS")
+        If okStl Then
+            LogLine "COMPONENTS STL written (steel hidden): " & stlPath
+            LogFileExistsAndSize "COMPONENTS STL", stlPath
+        Else
+            LogLine "WARNING: COMPONENTS STL was not created: " & stlPath
+        End If
+    End If
+
+    ExportComponentsOnlyPackage = (okEasm Or okStl)
+
+CleanExit:
+    On Error Resume Next
+    If Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then
+            ShowNamedComponentsOnce assyModel, hiddenNames
+            LogLine "COMPONENTS export: restored " & hiddenNames.Count & " steel component(s)."
+        End If
+    End If
+    ShowAllAssemblyComponents assyModel
+    PrepareAssemblyVisibilityFast assyModel
+    Exit Function
+
+ErrHandler:
+    LogLine "ExportComponentsOnlyPackage error: " & Err.Description
+    On Error Resume Next
+    If Not hiddenNames Is Nothing Then
+        If hiddenNames.Count > 0 Then ShowNamedComponentsOnce assyModel, hiddenNames
+    End If
+    ShowAllAssemblyComponents assyModel
+    ExportComponentsOnlyPackage = False
+End Function
+
+' ============================================================
+' PER-PLATE STL ISOLATION SESSION
+'
+' Open one isolation state and keep it for the whole plate loop, instead of
+' rebuilding it per plate. See the note on gPlateIsoActive.
+' ============================================================
+Private Function BeginPlateStlIsolation(ByVal assyModel As Object) As Boolean
+On Error GoTo ErrHandler
+    BeginPlateStlIsolation = False
+    gPlateIsoActive = False
+    Set gPlateIsoHidden = Nothing
+    Set gPlateIsoComps = Nothing
+
+    If assyModel Is Nothing Then Exit Function
+    If assyModel.GetType <> swDocASSEMBLY Then Exit Function
+
+    Dim swAssembly As Object
+    Set swAssembly = assyModel
+
+    Dim vComps As Variant
+    vComps = swAssembly.GetComponents(False)
+    If IsEmpty(vComps) Then Exit Function
+
+    Set gPlateIsoHidden = New Collection
+    Set gPlateIsoComps = CreateObject("Scripting.Dictionary")
+
+    assyModel.ClearSelection2 True
+
+    ' One walk: cache every component by name AND select it for hiding.
+    Dim i As Long, swComp As Object, nSel As Long
+    For i = 0 To UBound(vComps)
+        Set swComp = vComps(i)
+        If Not swComp Is Nothing Then
+            If swComp.IsSuppressed = False Then
+                gPlateIsoComps(LCase(swComp.Name2)) = swComp
+                If swComp.Select4(True, Nothing, False) Then
+                    gPlateIsoHidden.Add swComp.Name2
+                    nSel = nSel + 1
+                End If
+            End If
+        End If
+    Next i
+
+    If nSel > 0 Then swAssembly.HideComponent2
+    assyModel.ClearSelection2 True
+
+    gPlateIsoActive = True
+    BeginPlateStlIsolation = True
+    LogLine "  plate STL isolation session OPEN: hid " & nSel & " component(s) once " & _
+            "(was re-hiding these for every plate)."
+    Exit Function
+
+ErrHandler:
+    LogLine "BeginPlateStlIsolation error: " & Err.Description
+    On Error Resume Next
+    assyModel.ClearSelection2 True
+    gPlateIsoActive = False
+    BeginPlateStlIsolation = False
+End Function
+
+' Show or hide exactly one cached component. Two COM calls, no assembly walk.
+Private Function PlateIsoSetOneVisible(ByVal assyModel As Object, _
+                                       ByVal componentName As String, _
+                                       ByVal makeVisible As Boolean) As Boolean
+On Error GoTo ErrHandler
+    PlateIsoSetOneVisible = False
+    If Not gPlateIsoActive Then Exit Function
+    If gPlateIsoComps Is Nothing Then Exit Function
+
+    Dim k As String
+    k = LCase(Trim$(componentName))
+    If Not gPlateIsoComps.Exists(k) Then Exit Function
+
+    Dim swComp As Object
+    Set swComp = gPlateIsoComps(k)
+    If swComp Is Nothing Then Exit Function
+
+    Dim swAssembly As Object
+    Set swAssembly = assyModel
+
+    assyModel.ClearSelection2 True
+    If swComp.Select4(True, Nothing, False) = False Then
+        assyModel.ClearSelection2 True
+        Exit Function
+    End If
+
+    If makeVisible Then
+        swAssembly.ShowComponent2
+    Else
+        swAssembly.HideComponent2
+    End If
+
+    assyModel.ClearSelection2 True
+    PlateIsoSetOneVisible = True
+    Exit Function
+
+ErrHandler:
+    LogLine "PlateIsoSetOneVisible error: " & Err.Description
+    On Error Resume Next
+    assyModel.ClearSelection2 True
+    PlateIsoSetOneVisible = False
+End Function
+
+Private Sub EndPlateStlIsolation(ByVal assyModel As Object)
+On Error Resume Next
+    If Not gPlateIsoActive Then Exit Sub
+    gPlateIsoActive = False
+    Set gPlateIsoComps = Nothing
+    Set gPlateIsoHidden = Nothing
+    If assyModel Is Nothing Then Exit Sub
+    ShowAllAssemblyComponents assyModel
+    LogLine "  plate STL isolation session CLOSED: full assembly visibility restored."
+End Sub
 
 Private Sub ShowNamedComponentsOnce(ByVal assyModel As Object, ByVal componentNames As Collection)
 On Error GoTo ErrHandler
@@ -18714,10 +28857,6 @@ On Error GoTo ErrHandler
 ErrHandler:
     Set FindAssemblyComponentByName = Nothing
 End Function
-
-
-
-
 
 
 

@@ -574,6 +574,9 @@ def extract_quote_info(msg: email.message.Message) -> dict:
         "similar_to": (similar_m.group(1).strip() if similar_m else ""),
         "ship_date": (ship_m.group(1).strip() if ship_m else ""),
         "attachment_names": attachment_names,
+        # Carried for email_ai, which reads the prose this function only regexes.
+        "body": body_text,
+        "from": _decode(msg.get("From")),
     }
 
 
@@ -603,7 +606,8 @@ def _save_attachments(msg: email.message.Message, job_token: str) -> tuple[int, 
     return count, base_resolved
 
 
-def _write_email_handoff(info: dict, attach_dir: Path, attach_count: int) -> None:
+def _write_email_handoff(info: dict, attach_dir: Path, attach_count: int,
+                         extra: dict | None = None) -> None:
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     c_number = info.get("c_number") or extract_c_number(
         info.get("subject", ""),
@@ -622,10 +626,43 @@ def _write_email_handoff(info: dict, attach_dir: Path, attach_count: int) -> Non
         "AttachDir": str(attach_dir),
         "Error": "",
     }
+    # Ai* keys from the local-model brief. ReadHandoffFile in Module6121.bas is a
+    # Select Case with no Case Else, so keys the macro does not know are ignored
+    # -- these can be added before the macro reads them.
+    for k, v in (extra or {}).items():
+        if k not in lines:
+            lines[k] = str(v).replace("\r", " ").replace("\n", " ")
     EMAIL_OUTPUT_FILE.write_text(
         "\n".join(f"{k}={v}" for k, v in lines.items()) + "\n",
         encoding="utf-8",
     )
+
+
+def ai_brief_for_email(info: dict, attach_dir: Path, job_dir: Path | None) -> dict:
+    """Read the RFQ with the local model. Returns {} if anything goes wrong.
+
+    Runs the deterministic half inline (sub-second) and the model in a daemon
+    thread -- see email_ai.analyze_async. Never raises: an RFQ must still reach
+    SolidWorks when Ollama is stopped or a BOM is malformed.
+    """
+    try:
+        from . import email_ai
+    except Exception:
+        return {}
+    try:
+        target = job_dir if job_dir is not None else attach_dir
+        files = sorted(p for p in Path(attach_dir).glob("*") if p.is_file())
+        brief = email_ai.analyze_async(
+            target,
+            info.get("subject", ""),
+            info.get("body", ""),
+            files,
+            from_addr=info.get("from", ""),
+        )
+        return brief or {}
+    except Exception as e:
+        print(f"[email_ai] brief failed, continuing without it: {type(e).__name__}: {e}")
+        return {}
 
 
 def _launch_quote_flow() -> bool:
@@ -665,7 +702,6 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
     if not c_number:
         c_number = extract_c_number(str(attach_dir), job_token)
         info["c_number"] = c_number
-    _write_email_handoff(info, attach_dir, attach_count)
 
     jobs.create_job(job_token, display_name=info["subject"][:80], customer=info["cust_job"])
     job_dir = config.JOBS_ROOT / job_token.replace("..", "").replace("/", "_")
@@ -676,6 +712,25 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
             dest = docs / src.name
             if not dest.exists():
                 shutil.copy2(src, dest)
+
+    # Read the email and its attachments with the local model, then put the
+    # findings in the handoff the macro reads. Ordered after create_job so the
+    # brief lands in the job folder, and before the handoff write so its Ai* keys
+    # are in cms_email.txt when the launcher starts.
+    brief = ai_brief_for_email(info, attach_dir, job_dir)
+    extra: dict = {}
+    if brief:
+        try:
+            from . import email_ai
+
+            extra = email_ai.handoff_lines(brief)
+            # The brief reads delivery wording the old ShipDate regex misses
+            # ("best possible delivery" is not a SHIP DATE: line).
+            if not info.get("ship_date"):
+                info["ship_date"] = brief.get("delivery", {}).get("requested", "")
+        except Exception:
+            extra = {}
+    _write_email_handoff(info, attach_dir, attach_count, extra)
 
     launched = False
     quote_id = c_number or info["cust_job"] or job_token

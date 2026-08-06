@@ -1,0 +1,520 @@
+{
+  "job_analysis": {
+    "stack_axis": "CenterY",
+    "parting_line": "Between a_plate and b_plate from the full-footprint stack order.",
+    "sequenced_latch_lock_base": false,
+    "rules_for_this_job": [
+      "Full-footprint plates were sorted by CenterY from top to bottom.",
+      "Rails and the ejector stack anchored the bottom of the stack first; leader-pin direction was not used to flip stack orientation.",
+      "Ejector-stack plates were detected as centered long narrower plates near the rails; thinner = ejector_plate, thicker/lower = bottom_ejector_plate.",
+      "Round guide hardware was separated by diameter and length.",
+      "Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) were treated as strong anchors and applied before geometry-only rules."
+    ]
+  },
+  "classifications": [
+    {
+      "index": "1",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Inside mold stack but not enough geometry to name confidently.",
+      "quote": false
+    },
+    {
+      "index": "2",
+      "role": "stripper_plate",
+      "confidence": "HIGH",
+      "reason": "Full-footprint plate, assigned by top-to-bottom mold stack order. Top clamp missing.",
+      "quote": true
+    },
+    {
+      "index": "3",
+      "role": "a_plate",
+      "confidence": "HIGH",
+      "reason": "Full-footprint plate, assigned by top-to-bottom mold stack order. Top clamp missing.",
+      "quote": true
+    },
+    {
+      "index": "4",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Inside mold stack but not enough geometry to name confidently.",
+      "quote": false
+    },
+    {
+      "index": "5",
+      "role": "bottom_clamp_plate",
+      "confidence": "HIGH",
+      "reason": "Full-footprint plate, assigned by top-to-bottom mold stack order. Top clamp missing.",
+      "quote": true
+    },
+    {
+      "index": "6",
+      "role": "support_plate",
+      "confidence": "HIGH",
+      "reason": "Full-footprint plate, assigned by top-to-bottom mold stack order. Top clamp missing.",
+      "quote": true
+    },
+    {
+      "index": "7",
+      "role": "b_plate",
+      "confidence": "HIGH",
+      "reason": "Full-footprint plate, assigned by top-to-bottom mold stack order. Top clamp missing.",
+      "quote": true
+    },
+    {
+      "index": "8",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "9",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "10",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "11",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "12",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "13",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "14",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "15",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "16",
+      "role": "leader_pin",
+      "confidence": "MEDIUM",
+      "reason": "Long round guide pin matched to short bushing at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "17",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "18",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "19",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "20",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "21",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "22",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "23",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "24",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "25",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "26",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "27",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "28",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "29",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "30",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "31",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "32",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "33",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "34",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "35",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "36",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "37",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "38",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "39",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "40",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "41",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "42",
+      "role": "leader_pin_bushing",
+      "confidence": "MEDIUM",
+      "reason": "Short bushing matched to a long guide pin at the same center position plane.",
+      "quote": false
+    },
+    {
+      "index": "43",
+      "role": "insert_or_core_detail",
+      "confidence": "LOW",
+      "reason": "Smaller block inside cavity/core area; not a standard full plate.",
+      "quote": false
+    },
+    {
+      "index": "44",
+      "role": "insert_or_core_detail",
+      "confidence": "LOW",
+      "reason": "Smaller block inside cavity/core area; not a standard full plate.",
+      "quote": false
+    },
+    {
+      "index": "45",
+      "role": "insert_or_core_detail",
+      "confidence": "LOW",
+      "reason": "Smaller block inside cavity/core area; not a standard full plate.",
+      "quote": false
+    },
+    {
+      "index": "46",
+      "role": "insert_or_core_detail",
+      "confidence": "LOW",
+      "reason": "Smaller block inside cavity/core area; not a standard full plate.",
+      "quote": false
+    },
+    {
+      "index": "47",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "48",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "49",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "50",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "51",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "52",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "53",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "54",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "55",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "56",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "57",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "58",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "59",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "60",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "61",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "62",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "63",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "64",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "65",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "66",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "67",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "68",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "69",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "70",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "71",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    },
+    {
+      "index": "72",
+      "role": "hardware_other",
+      "confidence": "LOW",
+      "reason": "Round hardware but role is not certain from dimensions alone.",
+      "quote": false
+    }
+  ]
+}

@@ -1,0 +1,926 @@
+{
+  "aggregate": {
+    "programs": 2,
+    "sources": [
+      {
+        "file": "J8410 ID POT 5X.NC",
+        "program": "J8410 ID POT 5X",
+        "role": "ID POT",
+        "material": "",
+        "feed_min": 259.0,
+        "distinct_tools": 28,
+        "tool_changes": 46,
+        "orientations": 4,
+        "index_moves": 500
+      },
+      {
+        "file": "J8441 ID POT 5X1.NC",
+        "program": "J8441 ID POT 5X1",
+        "role": "ID POT",
+        "material": "",
+        "feed_min": 263.5,
+        "distinct_tools": 28,
+        "tool_changes": 48,
+        "orientations": 4,
+        "index_moves": 575
+      }
+    ],
+    "class_share_of_feed": {
+      "bore": {
+        "median_pct": 23.8,
+        "n": 2,
+        "median_min": 62.28
+      },
+      "rough": {
+        "median_pct": 15.7,
+        "n": 2,
+        "median_min": 40.98
+      },
+      "faceMill": {
+        "median_pct": 15.6,
+        "n": 2,
+        "median_min": 40.68
+      },
+      "semiFinish": {
+        "median_pct": 11.8,
+        "n": 2,
+        "median_min": 30.88
+      },
+      "finish": {
+        "median_pct": 11.4,
+        "n": 2,
+        "median_min": 29.67
+      },
+      "drill": {
+        "median_pct": 8.0,
+        "n": 2,
+        "median_min": 20.83
+      },
+      "chamfer": {
+        "median_pct": 7.0,
+        "n": 2,
+        "median_min": 18.39
+      },
+      "deburr": {
+        "median_pct": 4.4,
+        "n": 2,
+        "median_min": 11.46
+      },
+      "tap": {
+        "median_pct": 1.4,
+        "n": 2,
+        "median_min": 3.78
+      },
+      "spot": {
+        "median_pct": 0.7,
+        "n": 2,
+        "median_min": 1.95
+      },
+      "engrave": {
+        "median_pct": 0.3,
+        "n": 1,
+        "median_min": 0.75
+      }
+    },
+    "tool_changes_per_distinct_tool": 1.679,
+    "roughing_cascade_shape": [
+      1.0,
+      1.074,
+      0.172
+    ],
+    "feed_min_by_role": {
+      "ID POT": {
+        "median": 261.3,
+        "n": 2,
+        "min": 259.0,
+        "max": 263.5
+      }
+    },
+    "caveats": [
+      "FEED TIME ONLY. Rapids, dwell, spindle ramp, tool-change swing and probing are not included, so these are floors, not cycle times.",
+      "Medians across programs. With fewer than 4 programs in a role, treat that role's figure as a single observation.",
+      "Operation classes come from the post's own comment text. Anything in the 'other' bucket needs a pattern added to OP_CLASS_RULES -- check it before trusting a class share."
+    ]
+  },
+  "per_program": [
+    {
+      "file": "J8410 ID POT 5X.NC",
+      "program": "J8410 ID POT 5X",
+      "role": "ID POT",
+      "material": "",
+      "feed_min": 258.98,
+      "distinct_tools": 28,
+      "tool_changes": 46,
+      "orientations": 4,
+      "by_class": {
+        "bore": {
+          "min": 61.46,
+          "pct": 23.7,
+          "ops": 9,
+          "holes": 18
+        },
+        "rough": {
+          "min": 41.03,
+          "pct": 15.8,
+          "ops": 4,
+          "holes": 0
+        },
+        "faceMill": {
+          "min": 40.41,
+          "pct": 15.6,
+          "ops": 10,
+          "holes": 0
+        },
+        "semiFinish": {
+          "min": 30.99,
+          "pct": 12.0,
+          "ops": 4,
+          "holes": 0
+        },
+        "finish": {
+          "min": 29.76,
+          "pct": 11.5,
+          "ops": 4,
+          "holes": 0
+        },
+        "drill": {
+          "min": 20.17,
+          "pct": 7.8,
+          "ops": 9,
+          "holes": 25
+        },
+        "chamfer": {
+          "min": 18.19,
+          "pct": 7.0,
+          "ops": 9,
+          "holes": 0
+        },
+        "deburr": {
+          "min": 11.23,
+          "pct": 4.3,
+          "ops": 1,
+          "holes": 0
+        },
+        "tap": {
+          "min": 3.78,
+          "pct": 1.5,
+          "ops": 5,
+          "holes": 19
+        },
+        "spot": {
+          "min": 1.95,
+          "pct": 0.8,
+          "ops": 5,
+          "holes": 10
+        }
+      },
+      "by_tool": {
+        "T42": {
+          "desc": "2 BULL-NOSED ENDMILL",
+          "dia": 1.9978,
+          "min": 45.84,
+          "ops": 1,
+          "feed_in": 1283.5265721027033,
+          "classes": [
+            "bore"
+          ],
+          "avg_ipm": 28.0
+        },
+        "T23": {
+          "desc": "1IN ZENIT HF MILL",
+          "dia": 1.0,
+          "min": 26.12,
+          "ops": 4,
+          "feed_in": 5060.409372010432,
+          "classes": [
+            "bore",
+            "rough"
+          ],
+          "avg_ipm": 193.8
+        },
+        "T47": {
+          "desc": "3IN FACEMILL FIN",
+          "dia": 3.0,
+          "min": 22.48,
+          "ops": 5,
+          "feed_in": 509.9909999999999,
+          "classes": [
+            "faceMill"
+          ],
+          "avg_ipm": 22.7
+        },
+        "T174": {
+          "desc": "0.499 FLAT ENDMILL",
+          "dia": 0.499,
+          "min": 22.3,
+          "ops": 2,
+          "feed_in": 146.632,
+          "classes": [
+            "finish",
+            "semiFinish"
+          ],
+          "avg_ipm": 6.6
+        },
+        "T22": {
+          "desc": "0.75 ZENIT HF MILL",
+          "dia": 0.75,
+          "min": 19.87,
+          "ops": 1,
+          "feed_in": 3874.850036226094,
+          "classes": [
+            "rough"
+          ],
+          "avg_ipm": 195.0
+        },
+        "T24": {
+          "desc": "2IN ZENIT HF MILL",
+          "dia": 2.0,
+          "min": 17.94,
+          "ops": 5,
+          "feed_in": 2235.703999999998,
+          "classes": [
+            "faceMill"
+          ],
+          "avg_ipm": 124.7
+        },
+        "T12": {
+          "desc": "0.375 FLAT ENDMILL",
+          "dia": 0.375,
+          "min": 17.29,
+          "ops": 3,
+          "feed_in": 131.11611578269617,
+          "classes": [
+            "bore",
+            "semiFinish"
+          ],
+          "avg_ipm": 7.6
+        },
+        "T13": {
+          "desc": "0.375 FLAT ENDMILL",
+          "dia": 0.375,
+          "min": 16.32,
+          "ops": 2,
+          "feed_in": 131.64248655774938,
+          "classes": [
+            "bore",
+            "finish"
+          ],
+          "avg_ipm": 8.1
+        },
+        "T5": {
+          "desc": "0.45 CHAMFER MILL",
+          "dia": 0.45,
+          "min": 13.5,
+          "ops": 7,
+          "feed_in": 77.29924632379488,
+          "classes": [
+            "chamfer"
+          ],
+          "avg_ipm": 5.7
+        },
+        "T10": {
+          "desc": "0.25 FLAT ENDMILL",
+          "dia": 0.25,
+          "min": 11.23,
+          "ops": 1,
+          "feed_in": 99.58287089927155,
+          "classes": [
+            "deburr"
+          ],
+          "avg_ipm": 8.9
+        },
+        "T3": {
+          "desc": "0.213 DRILL",
+          "dia": 0.213,
+          "min": 9.53,
+          "ops": 3,
+          "feed_in": 69.36014309877041,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 7.3
+        },
+        "T19": {
+          "desc": "0.1875 FLAT ENDMILL",
+          "dia": 0.1875,
+          "min": 8.99,
+          "ops": 3,
+          "feed_in": 38.019400000000005,
+          "classes": [
+            "finish",
+            "semiFinish"
+          ],
+          "avg_ipm": 4.2
+        },
+        "T25": {
+          "desc": "0.5 BULL-NOSED ENDMILL",
+          "dia": 0.5,
+          "min": 3.7,
+          "ops": 1,
+          "feed_in": 28.219213620463684,
+          "classes": [
+            "chamfer"
+          ],
+          "avg_ipm": 7.6
+        },
+        "T7": {
+          "desc": "0.625 SPOT DRILL",
+          "dia": 0.625,
+          "min": 3.49,
+          "ops": 6,
+          "feed_in": 59.69226885989409,
+          "classes": [
+            "bore",
+            "spot"
+          ],
+          "avg_ipm": 17.1
+        },
+        "T14": {
+          "desc": "0.5 FLAT ENDMILL WIDIN",
+          "dia": 0.5,
+          "min": 3.15,
+          "ops": 1,
+          "feed_in": 322.6986706796325,
+          "classes": [
+            "rough"
+          ],
+          "avg_ipm": 102.6
+        },
+        "T101": {
+          "desc": "0.14 DRILL",
+          "dia": 0.14,
+          "min": 2.64,
+          "ops": 1,
+          "feed_in": 3.1621,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.2
+        },
+        "T35": {
+          "desc": ".625 DRILL",
+          "dia": 0.625,
+          "min": 2.11,
+          "ops": 1,
+          "feed_in": 5.281,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 2.5
+        },
+        "T1": {
+          "desc": "0.422 DRILL",
+          "dia": 0.422,
+          "min": 1.88,
+          "ops": 1,
+          "feed_in": 3.0036,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.6
+        },
+        "T151": {
+          "desc": "0.406 DRILL",
+          "dia": 0.406,
+          "min": 1.7,
+          "ops": 1,
+          "feed_in": 2.892,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.7
+        },
+        "T153": {
+          "desc": "0.1875 DRILL",
+          "dia": 0.1875,
+          "min": 1.67,
+          "ops": 1,
+          "feed_in": 2.6763,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.6
+        },
+        "T38": {
+          "desc": "0.64 INGERSOLL LONGPOTS",
+          "dia": 0.64,
+          "min": 1.61,
+          "ops": 2,
+          "feed_in": 12.6492,
+          "classes": [
+            "bore"
+          ],
+          "avg_ipm": 7.9
+        },
+        "T45": {
+          "desc": "1/8 NPT THREAD MILL",
+          "dia": 0.3125,
+          "min": 1.52,
+          "ops": 1,
+          "feed_in": 5.299154834572347,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 3.5
+        },
+        "T31": {
+          "desc": "0.25 1/4-20 UNC RIGHT-HANDED TAP",
+          "dia": 0.25,
+          "min": 1.37,
+          "ops": 2,
+          "feed_in": 62.949459914885004,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 45.9
+        },
+        "T6": {
+          "desc": "1 CHAMFER MILL",
+          "dia": 1.0,
+          "min": 0.99,
+          "ops": 1,
+          "feed_in": 10.398002374346435,
+          "classes": [
+            "chamfer"
+          ],
+          "avg_ipm": 10.5
+        },
+        "T150": {
+          "desc": "0.343 DRILL",
+          "dia": 0.343,
+          "min": 0.64,
+          "ops": 1,
+          "feed_in": 1.028,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 1.6
+        },
+        "T4": {
+          "desc": "0.375 DRILL",
+          "dia": 0.375,
+          "min": 0.64,
+          "ops": 1,
+          "feed_in": 1.2754000000000003,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 2.0
+        },
+        "T30": {
+          "desc": "0.5 1/2-13 UNC RIGHT-HANDED TAP",
+          "dia": 0.5,
+          "min": 0.24,
+          "ops": 1,
+          "feed_in": 2.1500000000000004,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 8.8
+        },
+        "T152": {
+          "desc": "0.5 DRILL",
+          "dia": 0.5,
+          "min": 0.22,
+          "ops": 1,
+          "feed_in": 3.1452,
+          "classes": [
+            "bore"
+          ],
+          "avg_ipm": 14.1
+        }
+      },
+      "roughing_cascade": [
+        {
+          "dia": 1.0,
+          "min": 18.02,
+          "pct_of_roughing": 43.9
+        },
+        {
+          "dia": 0.75,
+          "min": 19.87,
+          "pct_of_roughing": 48.4
+        },
+        {
+          "dia": 0.5,
+          "min": 3.15,
+          "pct_of_roughing": 7.7
+        }
+      ],
+      "roughing_total_min": 41.03
+    },
+    {
+      "file": "J8441 ID POT 5X1.NC",
+      "program": "J8441 ID POT 5X1",
+      "role": "ID POT",
+      "material": "",
+      "feed_min": 263.54,
+      "distinct_tools": 28,
+      "tool_changes": 48,
+      "orientations": 4,
+      "by_class": {
+        "bore": {
+          "min": 63.09,
+          "pct": 23.9,
+          "ops": 9,
+          "holes": 19
+        },
+        "faceMill": {
+          "min": 40.95,
+          "pct": 15.5,
+          "ops": 10,
+          "holes": 0
+        },
+        "rough": {
+          "min": 40.93,
+          "pct": 15.5,
+          "ops": 4,
+          "holes": 0
+        },
+        "semiFinish": {
+          "min": 30.77,
+          "pct": 11.7,
+          "ops": 4,
+          "holes": 0
+        },
+        "finish": {
+          "min": 29.58,
+          "pct": 11.2,
+          "ops": 4,
+          "holes": 0
+        },
+        "drill": {
+          "min": 21.48,
+          "pct": 8.2,
+          "ops": 9,
+          "holes": 25
+        },
+        "chamfer": {
+          "min": 18.59,
+          "pct": 7.1,
+          "ops": 9,
+          "holes": 0
+        },
+        "deburr": {
+          "min": 11.69,
+          "pct": 4.4,
+          "ops": 1,
+          "holes": 0
+        },
+        "tap": {
+          "min": 3.78,
+          "pct": 1.4,
+          "ops": 5,
+          "holes": 19
+        },
+        "spot": {
+          "min": 1.95,
+          "pct": 0.7,
+          "ops": 5,
+          "holes": 10
+        },
+        "engrave": {
+          "min": 0.75,
+          "pct": 0.3,
+          "ops": 2,
+          "holes": 0
+        }
+      },
+      "by_tool": {
+        "T42": {
+          "desc": "2 BULL-NOSED ENDMILL",
+          "dia": 1.9978,
+          "min": 47.25,
+          "ops": 1,
+          "feed_in": 1322.9017335187239,
+          "classes": [
+            "bore"
+          ],
+          "avg_ipm": 28.0
+        },
+        "T23": {
+          "desc": "1IN ZENIT HF MILL",
+          "dia": 1.0,
+          "min": 26.59,
+          "ops": 4,
+          "feed_in": 5151.58957014806,
+          "classes": [
+            "bore",
+            "rough"
+          ],
+          "avg_ipm": 193.8
+        },
+        "T47": {
+          "desc": "3IN FACEMILL FIN",
+          "dia": 3.0,
+          "min": 22.76,
+          "ops": 5,
+          "feed_in": 516.7409999999999,
+          "classes": [
+            "faceMill"
+          ],
+          "avg_ipm": 22.7
+        },
+        "T174": {
+          "desc": "0.499 FLAT ENDMILL",
+          "dia": 0.499,
+          "min": 21.89,
+          "ops": 2,
+          "feed_in": 144.37262366517012,
+          "classes": [
+            "finish",
+            "semiFinish"
+          ],
+          "avg_ipm": 6.6
+        },
+        "T22": {
+          "desc": "0.75 ZENIT HF MILL",
+          "dia": 0.75,
+          "min": 19.3,
+          "ops": 1,
+          "feed_in": 3763.092988080198,
+          "classes": [
+            "rough"
+          ],
+          "avg_ipm": 195.0
+        },
+        "T24": {
+          "desc": "2IN ZENIT HF MILL",
+          "dia": 2.0,
+          "min": 18.19,
+          "ops": 5,
+          "feed_in": 2268.203999999998,
+          "classes": [
+            "faceMill"
+          ],
+          "avg_ipm": 124.7
+        },
+        "T12": {
+          "desc": "0.375 FLAT ENDMILL",
+          "dia": 0.375,
+          "min": 17.29,
+          "ops": 3,
+          "feed_in": 131.11642994196154,
+          "classes": [
+            "bore",
+            "semiFinish"
+          ],
+          "avg_ipm": 7.6
+        },
+        "T13": {
+          "desc": "0.375 FLAT ENDMILL",
+          "dia": 0.375,
+          "min": 16.32,
+          "ops": 2,
+          "feed_in": 131.64248655774938,
+          "classes": [
+            "bore",
+            "finish"
+          ],
+          "avg_ipm": 8.1
+        },
+        "T5": {
+          "desc": "0.45 CHAMFER MILL",
+          "dia": 0.45,
+          "min": 13.74,
+          "ops": 7,
+          "feed_in": 78.96967827118553,
+          "classes": [
+            "chamfer"
+          ],
+          "avg_ipm": 5.7
+        },
+        "T10": {
+          "desc": "0.25 FLAT ENDMILL",
+          "dia": 0.25,
+          "min": 12.43,
+          "ops": 3,
+          "feed_in": 120.70174563468495,
+          "classes": [
+            "deburr",
+            "engrave"
+          ],
+          "avg_ipm": 9.7
+        },
+        "T3": {
+          "desc": "0.213 DRILL",
+          "dia": 0.213,
+          "min": 10.85,
+          "ops": 3,
+          "feed_in": 67.22618319008863,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 6.2
+        },
+        "T19": {
+          "desc": "0.1875 FLAT ENDMILL",
+          "dia": 0.1875,
+          "min": 8.99,
+          "ops": 3,
+          "feed_in": 38.019400000000005,
+          "classes": [
+            "finish",
+            "semiFinish"
+          ],
+          "avg_ipm": 4.2
+        },
+        "T25": {
+          "desc": "0.5 BULL-NOSED ENDMILL",
+          "dia": 0.5,
+          "min": 3.86,
+          "ops": 1,
+          "feed_in": 29.321794550260268,
+          "classes": [
+            "chamfer"
+          ],
+          "avg_ipm": 7.6
+        },
+        "T7": {
+          "desc": "0.625 SPOT DRILL",
+          "dia": 0.625,
+          "min": 3.48,
+          "ops": 6,
+          "feed_in": 58.03724248065931,
+          "classes": [
+            "bore",
+            "spot"
+          ],
+          "avg_ipm": 16.7
+        },
+        "T14": {
+          "desc": "0.5 FLAT ENDMILL WIDIN",
+          "dia": 0.5,
+          "min": 3.15,
+          "ops": 1,
+          "feed_in": 322.6986706796325,
+          "classes": [
+            "rough"
+          ],
+          "avg_ipm": 102.6
+        },
+        "T101": {
+          "desc": "0.14 DRILL",
+          "dia": 0.14,
+          "min": 2.64,
+          "ops": 1,
+          "feed_in": 3.1621,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.2
+        },
+        "T35": {
+          "desc": ".625 DRILL",
+          "dia": 0.625,
+          "min": 2.11,
+          "ops": 1,
+          "feed_in": 5.281,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 2.5
+        },
+        "T1": {
+          "desc": "0.422 DRILL",
+          "dia": 0.422,
+          "min": 1.88,
+          "ops": 1,
+          "feed_in": 3.0035999999999996,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.6
+        },
+        "T151": {
+          "desc": "0.406 DRILL",
+          "dia": 0.406,
+          "min": 1.7,
+          "ops": 1,
+          "feed_in": 2.892,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.7
+        },
+        "T153": {
+          "desc": "0.1875 DRILL",
+          "dia": 0.1875,
+          "min": 1.67,
+          "ops": 1,
+          "feed_in": 2.6763,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 1.6
+        },
+        "T38": {
+          "desc": "0.64 INGERSOLL LONGPOTS",
+          "dia": 0.64,
+          "min": 1.61,
+          "ops": 2,
+          "feed_in": 12.6492,
+          "classes": [
+            "bore"
+          ],
+          "avg_ipm": 7.9
+        },
+        "T45": {
+          "desc": "1/8 NPT THREAD MILL",
+          "dia": 0.3125,
+          "min": 1.52,
+          "ops": 1,
+          "feed_in": 5.299154834572347,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 3.5
+        },
+        "T31": {
+          "desc": "0.25 1/4-20 UNC RIGHT-HANDED TAP",
+          "dia": 0.25,
+          "min": 1.37,
+          "ops": 2,
+          "feed_in": 61.20911904790196,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 44.8
+        },
+        "T6": {
+          "desc": "1 CHAMFER MILL",
+          "dia": 1.0,
+          "min": 0.99,
+          "ops": 1,
+          "feed_in": 10.398372587631002,
+          "classes": [
+            "chamfer"
+          ],
+          "avg_ipm": 10.5
+        },
+        "T150": {
+          "desc": "0.343 DRILL",
+          "dia": 0.343,
+          "min": 0.64,
+          "ops": 1,
+          "feed_in": 1.028,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 1.6
+        },
+        "T4": {
+          "desc": "0.375 DRILL",
+          "dia": 0.375,
+          "min": 0.64,
+          "ops": 1,
+          "feed_in": 1.2754000000000003,
+          "classes": [
+            "drill"
+          ],
+          "avg_ipm": 2.0
+        },
+        "T152": {
+          "desc": "0.5 DRILL",
+          "dia": 0.5,
+          "min": 0.45,
+          "ops": 1,
+          "feed_in": 6.2904,
+          "classes": [
+            "bore"
+          ],
+          "avg_ipm": 14.1
+        },
+        "T30": {
+          "desc": "0.5 1/2-13 UNC RIGHT-HANDED TAP",
+          "dia": 0.5,
+          "min": 0.24,
+          "ops": 1,
+          "feed_in": 2.1500000000000004,
+          "classes": [
+            "tap"
+          ],
+          "avg_ipm": 8.8
+        }
+      },
+      "roughing_cascade": [
+        {
+          "dia": 1.0,
+          "min": 18.48,
+          "pct_of_roughing": 45.2
+        },
+        {
+          "dia": 0.75,
+          "min": 19.3,
+          "pct_of_roughing": 47.2
+        },
+        {
+          "dia": 0.5,
+          "min": 3.15,
+          "pct_of_roughing": 7.7
+        }
+      ],
+      "roughing_total_min": 40.93
+    }
+  ]
+}

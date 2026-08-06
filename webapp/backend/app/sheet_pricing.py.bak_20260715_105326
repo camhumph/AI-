@@ -1,0 +1,1195 @@
+﻿"""Read quote/steel sheet dimensions and CSV prices for a job.
+
+Prices come only from CSV files (never guessed):
+  - Shop: Purchased Components Prices.csv
+  - Per-job: Purchased Components Quote.csv (written by Module6121)
+  - Per-job: Pullcore Prices.csv
+
+Steel/quote Excel workbooks supply stock/finished sizing for plates.
+"""
+from __future__ import annotations
+
+
+# CMS FINAL SAFE PATCH: wait for macro done
+# This block is intentionally inserted near the top of the module, outside
+# all try/except blocks.
+
+_CMS_FINAL_BMS_ORDER = [
+    "TCP",
+    "BCP",
+    "ID HOLDER",
+    "OD HOLDER",
+    "ID POT BLOCK",
+    "OD POT BLOCK",
+]
+
+_CMS_FINAL_BMS_ALIASES = {
+    "TCP": "TCP",
+    "TOP CLAMP": "TCP",
+    "TOP CLAMP PLATE": "TCP",
+    "TOP CLAMPING": "TCP",
+    "TOP CLAMPING PLATE": "TCP",
+    "TOP SMED": "TCP",
+    "ID SMED": "TCP",
+
+    "BCP": "BCP",
+    "BOTTOM CLAMP": "BCP",
+    "BOT CLAMP": "BCP",
+    "BOTTOM CLAMP PLATE": "BCP",
+    "BOT CLAMP PLATE": "BCP",
+    "BOTTOM CLAMPING": "BCP",
+    "BOTTOM CLAMPING PLATE": "BCP",
+    "BOTTOM SMED": "BCP",
+    "BOT SMED": "BCP",
+    "OD SMED": "BCP",
+
+    "ID HOLDER": "ID HOLDER",
+    "ID HOLDER BLOCK": "ID HOLDER",
+    "TOP HOLDER": "ID HOLDER",
+    "TOP HOLDER BLOCK": "ID HOLDER",
+    "ID MOLD BASE": "ID HOLDER",
+    "ID MOLDBASE": "ID HOLDER",
+    "TOP MOLD BASE": "ID HOLDER",
+    "TOP MOLDBASE": "ID HOLDER",
+
+    "OD HOLDER": "OD HOLDER",
+    "OD HOLDER BLOCK": "OD HOLDER",
+    "BOTTOM HOLDER": "OD HOLDER",
+    "BOT HOLDER": "OD HOLDER",
+    "BOTTOM HOLDER BLOCK": "OD HOLDER",
+    "BOT HOLDER BLOCK": "OD HOLDER",
+    "OD MOLD BASE": "OD HOLDER",
+    "OD MOLDBASE": "OD HOLDER",
+    "BOTTOM MOLD BASE": "OD HOLDER",
+    "BOT MOLD BASE": "OD HOLDER",
+
+    "ID POT": "ID POT BLOCK",
+    "ID POT BLOCK": "ID POT BLOCK",
+    "TOP POT": "ID POT BLOCK",
+    "TOP POT BLOCK": "ID POT BLOCK",
+    "TCP POT": "ID POT BLOCK",
+    "TCP POT BLOCK": "ID POT BLOCK",
+
+    "OD POT": "OD POT BLOCK",
+    "OD POT BLOCK": "OD POT BLOCK",
+    "BOTTOM POT": "OD POT BLOCK",
+    "BOT POT": "OD POT BLOCK",
+    "BOTTOM POT BLOCK": "OD POT BLOCK",
+    "BOT POT BLOCK": "OD POT BLOCK",
+    "BCP POT": "OD POT BLOCK",
+    "BCP POT BLOCK": "OD POT BLOCK",
+}
+
+
+def _cms_final_norm(value):
+    return " ".join(
+        str(value or "")
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace(".", " ")
+        .upper()
+        .split()
+    )
+
+
+def _cms_final_key(value):
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("-", "")
+        .replace(".", "")
+        .replace("#", "")
+    )
+
+
+def _cms_final_float(value, default=0.0):
+    try:
+        s = str(value or "").strip().replace("$", "").replace(",", "")
+        if not s:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
+
+def _cms_final_qty(value, default=1):
+    try:
+        s = str(value or "").strip()
+        if not s:
+            return default
+        n = int(float(s))
+        return n if n > 0 else default
+    except Exception:
+        return default
+
+
+def _cms_final_bms_role(value):
+    n = _cms_final_norm(value)
+
+    if n in _CMS_FINAL_BMS_ALIASES:
+        return _CMS_FINAL_BMS_ALIASES[n]
+
+    for key, role in _CMS_FINAL_BMS_ALIASES.items():
+        if key in n:
+            return role
+
+    return None
+
+
+def _cms_final_kv_file(path):
+    data = {}
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                data[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return data
+
+
+def _cms_final_job_dir_from_args(args, kwargs):
+    from pathlib import Path
+
+    for key in ("job_dir", "job_folder", "folder", "path", "job_path"):
+        if key in kwargs:
+            try:
+                return Path(kwargs[key])
+            except Exception:
+                pass
+
+    for arg in args:
+        try:
+            p = Path(arg)
+            if str(p):
+                return p
+        except Exception:
+            pass
+
+    return None
+
+
+def _cms_final_macro_done(job_dir):
+    from pathlib import Path
+
+    if job_dir is None:
+        return False
+
+    job_dir = Path(job_dir)
+
+    log_path = job_dir / "CMS_Base_Export_Log.txt"
+    try:
+        if log_path.exists():
+            txt = log_path.read_text(encoding="utf-8-sig", errors="replace").upper()
+            if "DONE JOB" in txt or "DONE ACTIVE CAD QUOTE" in txt or "RUNACTIVEASSEMBLY COMPLETED" in txt:
+                return True
+    except Exception:
+        pass
+
+    workspace = Path(r"C:\CMS_Local_Workspace")
+
+    status = _cms_final_kv_file(workspace / "cms_macro_status.txt")
+    st = str(status.get("Status", "")).upper()
+    folder = str(status.get("CurrentJobFolder", "")).strip().lower()
+
+    if st in ("DONE", "COMPLETED"):
+        if folder and folder == str(job_dir).strip().lower():
+            return True
+
+    done_path = workspace / "cms_macro_done.txt"
+    try:
+        if done_path.exists():
+            csv_path = job_dir / "XT_Export_BOM_Match_Report.csv"
+            if not csv_path.exists():
+                return True
+            if done_path.stat().st_mtime >= csv_path.stat().st_mtime:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _cms_final_find_quote_steel_workbooks(job_dir):
+    from pathlib import Path
+
+    if job_dir is None:
+        return []
+
+    job_dir = Path(job_dir)
+
+    matches = []
+    try:
+        for p in job_dir.rglob("*"):
+            if not p.is_file():
+                continue
+
+            name = p.name
+            low = name.lower()
+
+            if name.startswith("~$"):
+                continue
+
+            if not (low.endswith(".xlsx") or low.endswith(".xlsm")):
+                continue
+
+            if "quote" in low and "steel" in low and "grind" in low:
+                matches.append(p)
+    except Exception:
+        pass
+
+    matches.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
+    return matches
+
+
+def _cms_final_make_steel_row(role, qty, thickness, width, length, source):
+    return {
+        "description": role,
+        "name": role,
+        "role": role,
+        "resolved_name": role,
+        "role_group_name": "Steel Plates / Mold Base",
+        "group": "Steel Plates / Mold Base",
+        "category": "Steel Plates / Mold Base",
+        "qty": qty,
+        "quantity": qty,
+        "thickness": thickness,
+        "width": width,
+        "length": length,
+        "Thickness": thickness,
+        "Width": width,
+        "Length": length,
+        "hours": None,
+        "price": 0.0,
+        "total": 0.0,
+        "quoted": True,
+        "quote": True,
+        "pricing_note": "sheet",
+        "source": source,
+        "price_source": source,
+    }
+
+
+def _cms_final_read_bms_from_quote_workbook(job_dir):
+    try:
+        import openpyxl
+    except Exception:
+        return []
+
+    workbooks = _cms_final_find_quote_steel_workbooks(job_dir)
+
+    for wb_path in workbooks:
+        try:
+            wb = openpyxl.load_workbook(wb_path, data_only=True, read_only=True)
+
+            if "QuoteWorksheet" in wb.sheetnames:
+                ws = wb["QuoteWorksheet"]
+            elif "Quote" in wb.sheetnames:
+                ws = wb["Quote"]
+            else:
+                ws = wb[wb.sheetnames[0]]
+
+            rows_by_role = {}
+
+            max_row = min(ws.max_row, 140)
+            for r in range(1, max_row + 1):
+                label = ws.cell(r, 1).value
+                role = _cms_final_bms_role(label)
+
+                if not role:
+                    continue
+
+                qty = _cms_final_qty(ws.cell(r, 3).value, 0)
+                thickness = _cms_final_float(ws.cell(r, 4).value)
+                width = _cms_final_float(ws.cell(r, 5).value)
+                length = _cms_final_float(ws.cell(r, 6).value)
+
+                if qty <= 0 or thickness <= 0 or width <= 0 or length <= 0:
+                    continue
+
+                rows_by_role[role] = _cms_final_make_steel_row(
+                    role,
+                    qty,
+                    thickness,
+                    width,
+                    length,
+                    "workbook:" + str(wb_path),
+                )
+
+            ordered = []
+            for role in _CMS_FINAL_BMS_ORDER:
+                if role in rows_by_role:
+                    ordered.append(rows_by_role[role])
+
+            if len(ordered) >= 4:
+                return ordered
+
+        except Exception:
+            continue
+
+    return []
+
+
+def _cms_final_read_bms_from_bom_match_csv(job_dir):
+    from pathlib import Path
+    import csv
+
+    if job_dir is None:
+        return []
+
+    job_dir = Path(job_dir)
+
+    candidates = [
+        job_dir / "XT_Export_BOM_Match_Report.csv",
+        job_dir / "documents" / "XT_Export_BOM_Match_Report.csv",
+    ]
+
+    csv_path = None
+    for p in candidates:
+        if p.exists():
+            csv_path = p
+            break
+
+    if csv_path is None:
+        return []
+
+    rows_by_role = {}
+
+    with csv_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        reader = csv.DictReader(f)
+
+        for row in reader:
+            role = _cms_final_bms_role(row.get("QuoteName", ""))
+            if not role:
+                continue
+
+            thickness = _cms_final_float(row.get("CAD_Thickness"))
+            width = _cms_final_float(row.get("CAD_Width"))
+            length = _cms_final_float(row.get("CAD_Length"))
+
+            if thickness <= 0:
+                thickness = _cms_final_float(row.get("BOM_Thickness"))
+            if width <= 0:
+                width = _cms_final_float(row.get("BOM_Width"))
+            if length <= 0:
+                length = _cms_final_float(row.get("BOM_Length"))
+
+            if thickness <= 0 or width <= 0 or length <= 0:
+                continue
+
+            qty = _cms_final_qty(row.get("Qty"), 1)
+
+            rows_by_role[role] = _cms_final_make_steel_row(
+                role,
+                qty,
+                thickness,
+                width,
+                length,
+                "job_csv:" + str(csv_path),
+            )
+
+    ordered = []
+    for role in _CMS_FINAL_BMS_ORDER:
+        if role in rows_by_role:
+            ordered.append(rows_by_role[role])
+
+    return ordered
+
+
+def _cms_final_pc_get(row, *names, default=""):
+    lookup = {}
+    for k, v in (row or {}).items():
+        lookup[_cms_final_key(k)] = v
+
+    for name in names:
+        k = _cms_final_key(name)
+        if k in lookup:
+            return lookup[k]
+
+    return default
+
+
+def _cms_final_find_purchased_csv(job_dir):
+    from pathlib import Path
+
+    if job_dir is None:
+        return None
+
+    job_dir = Path(job_dir)
+
+    candidates = [
+        job_dir / "Purchased Components Quote.csv",
+        job_dir / "documents" / "Purchased Components Quote.csv",
+        job_dir / "Purchased Components.csv",
+        job_dir / "documents" / "Purchased Components.csv",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    try:
+        for p in job_dir.rglob("Purchased Components Quote.csv"):
+            if p.is_file():
+                return p
+    except Exception:
+        pass
+
+    return None
+
+
+def _cms_final_read_purchased_csv(job_dir):
+    import csv
+
+    csv_path = _cms_final_find_purchased_csv(job_dir)
+    if csv_path is None:
+        return []
+
+    rows = []
+
+    with csv_path.open("r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        reader = csv.DictReader(f)
+
+        for raw in reader:
+            component = " ".join(str(_cms_final_pc_get(raw, "Component", "Comp", "Name", "Item") or "").split())
+            vendor = " ".join(str(_cms_final_pc_get(raw, "Vendor", "Manufacturer", "MFG") or "").split())
+            part_number = " ".join(str(_cms_final_pc_get(raw, "PartNumber", "Part Number", "PartNo", "Part No", "Part #") or "").split())
+            description = " ".join(str(_cms_final_pc_get(raw, "Description", "Desc") or "").split())
+
+            qty = _cms_final_qty(_cms_final_pc_get(raw, "QTY", "Qty", "Quantity"), 1)
+            unit_price = _cms_final_float(_cms_final_pc_get(raw, "UnitPrice", "Unit Price", "Price Each"), 0.0)
+            extended = _cms_final_float(_cms_final_pc_get(raw, "Extended", "Ext", "Total", "Extended Price"), 0.0)
+
+            if extended <= 0 and unit_price > 0:
+                extended = unit_price * qty
+
+            label = component or description or part_number
+            if not label:
+                continue
+
+            if _cms_final_key(label) == "total":
+                continue
+
+            rows.append({
+                "description": label,
+                "name": label,
+                "role": "purchased_component",
+                "resolved_name": label,
+                "role_group_name": "Purchased Components",
+                "group": "Purchased Components",
+                "category": "Purchased Components",
+                "vendor": vendor,
+                "part_number": part_number,
+                "partNo": part_number,
+                "part_no": part_number,
+                "component": component,
+                "component_description": description,
+                "qty": qty,
+                "quantity": qty,
+                "unit_price": unit_price,
+                "UnitPrice": unit_price,
+                "price": extended,
+                "total": extended,
+                "extended": extended,
+                "quoted": True,
+                "quote": True,
+                "pricing_note": "purchased",
+                "source": "Purchased Components Quote.csv",
+                "price_source": "job_csv:Purchased Components Quote.csv",
+                "csv_path": str(csv_path),
+            })
+
+    return rows
+
+import csv
+import re
+from pathlib import Path
+
+from . import config
+
+# Role -> keywords to match Component column in price CSVs
+ROLE_CSV_KEYWORDS: dict[str, list[str]] = {
+    "top_clamp_plate": ["top clamp", "top plate", "top clamping"],
+    "a_plate": ["a plate", "a-plate"],
+    "b_plate": ["b plate", "b-plate"],
+    "stripper_plate": ["stripper"],
+    "sc_retainer_plate": ["sc retainer", "retainer plate"],
+    "sc_backup_plate": ["sc backup", "backup plate"],
+    "support_plate": ["support plate"],
+    "bottom_clamp_plate": ["bottom clamp", "bottom plate", "bot clamp"],
+    "rail": ["rail"],
+    "pin_plate": ["pin plate"],
+    "ejector_plate": ["ejector plate", "ej-ret", "ej ret"],
+    "bottom_ejector_plate": ["bottom ejector", "ej-backup", "ej backup", "ejector backup"],
+    "latch_lock": ["safety strap", "latch lock", "latch-lock", "lss"],
+    "leader_pin": ["leader pin", "ldr-pin", "ldr pin"],
+    "leader_pin_bushing": ["bushing", "leader bushing", "guide bushing", "lbb"],
+    "guided_ejector_bushing": ["ejector bushing"],
+    "return_pin": ["return pin"],
+    "ejector_pin": ["ejector pin"],
+    "support_pillar": ["support pillar", "pillar"],
+    "pullcore": ["pullcore", "pull core"],
+}
+
+PLATE_SHEET_NAMES: dict[str, list[str]] = {
+    "top_clamp_plate": ["top clamp plate", "top clamping plate"],
+    "a_plate": ["a plate"],
+    "b_plate": ["b plate"],
+    "stripper_plate": ["stripper plate"],
+    "sc_retainer_plate": ["sc retainer plate", "sc retainer"],
+    "sc_backup_plate": ["sc backup plate", "sc backup"],
+    "support_plate": ["support plate"],
+    "bottom_clamp_plate": ["bottom clamp plate", "bottom clamping plate"],
+    "rail": ["rail"],
+    "pin_plate": ["pin plate"],
+    "ejector_plate": ["ejector plate"],
+    "bottom_ejector_plate": ["bottom ejector plate", "ejector backup plate"],
+}
+
+
+def _safe_float(v, default=0.0) -> float:
+    try:
+        s = str(v).strip().replace("$", "").replace(",", "")
+        return float(s) if s else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").lower().strip())
+
+
+def _read_csv_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = []
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                if line.lstrip().startswith("#"):
+                    continue
+                rows.append(line)
+        if not rows:
+            return []
+        reader = csv.DictReader(rows)
+        return list(reader)
+    except Exception:
+        return []
+
+
+def load_shop_prices() -> list[dict]:
+    return _read_csv_rows(config.PURCHASED_PRICES_CSV)
+
+
+def load_job_purchased_quote(job_dir: Path) -> list[dict]:
+    for name in (
+        "Purchased Components Quote.csv",
+        "documents/Purchased Components Quote.csv",
+    ):
+        p = job_dir / name
+        rows = _read_csv_rows(p)
+        if rows:
+            return rows
+    return []
+
+
+def load_job_pullcore(job_dir: Path) -> list[dict]:
+    for name in ("Pullcore Prices.csv", "documents/Pullcore Prices.csv"):
+        p = job_dir / name
+        rows = _read_csv_rows(p)
+        if rows:
+            return rows
+    return []
+
+
+# BMS QuoteWorksheet #2 4140 block (Module6121 FillQuoteWorkbookFromBoundingBox).
+# Col A = name, C = qty, D = thickness, E = width, F = length.
+# Template formulas often put hours in G and price in H.
+_BMS_QUOTE_STEEL_ROWS = {
+    22: ("TCP", "tcp"),
+    23: ("BCP", "bcp"),
+    24: ("", "steel_plate"),
+    25: ("", "steel_plate"),
+    26: ("", "steel_plate"),
+    27: ("", "steel_plate"),
+    28: ("", "steel_plate"),
+    29: ("", "steel_plate"),
+    30: ("", "steel_plate"),
+    31: ("ID Holder", "id_holder"),
+    32: ("OD Holder", "od_holder"),
+    33: ("ID Pot", "id_pot"),
+    34: ("OD Pot", "od_pot"),
+}
+
+_BMS_NAME_TO_ROLE = {
+    "tcp": "tcp",
+    "bcp": "bcp",
+    "id holder": "id_holder",
+    "od holder": "od_holder",
+    "id pot": "id_pot",
+    "od pot": "od_pot",
+    "id pot block": "id_pot",
+    "od pot block": "od_pot",
+}
+
+
+def _cell_str(val) -> str:
+    if val is None:
+        return ""
+    return str(val).strip()
+
+
+def _iter_workbook_rows(wb_path: Path, sheet_names: tuple[str, ...] | None = None):
+    """Yield (sheet_name, 1-based_row_index, cell_values_list)."""
+    suffix = wb_path.suffix.lower()
+    if suffix == ".xls":
+        try:
+            import xlrd  # type: ignore
+        except ImportError:
+            return
+        try:
+            book = xlrd.open_workbook(str(wb_path))
+        except Exception:
+            return
+        for name in book.sheet_names():
+            if sheet_names and name not in sheet_names:
+                low = name.lower()
+                if not any(s.lower() in low for s in sheet_names):
+                    continue
+            sh = book.sheet_by_name(name)
+            for r in range(sh.nrows):
+                yield name, r + 1, list(sh.row_values(r))
+        return
+
+    try:
+        import openpyxl  # type: ignore
+    except ImportError:
+        return
+    try:
+        wb = openpyxl.load_workbook(wb_path, read_only=True, data_only=True)
+    except Exception:
+        return
+    try:
+        for name in wb.sheetnames:
+            if sheet_names and name not in sheet_names:
+                low = name.lower()
+                if not any(s.lower() in low for s in sheet_names):
+                    continue
+            ws = wb[name]
+            for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=280, values_only=True), start=1):
+                yield name, r_idx, list(row) if row else []
+    finally:
+        wb.close()
+
+
+def _cms_final_original_load_steel_plate_lines(job_dir: Path) -> list[dict]:
+    """Steel plates from quote workbook #2 block, else J000 steel sheet."""
+    wb = _find_workbook(job_dir)
+    if not wb:
+        return _load_steel_from_bom_match(job_dir)
+
+    # Prefer QuoteWorksheet BMS #2 block (has hours/price formulas when calculated).
+    quote_lines = _load_steel_from_quote_block(wb)
+    if quote_lines:
+        return quote_lines
+
+    steel_lines = _load_steel_from_j000(wb)
+    if steel_lines:
+        return steel_lines
+
+    return _load_steel_from_bom_match(job_dir)
+
+
+def _load_steel_from_quote_block(wb_path: Path) -> list[dict]:
+    lines: list[dict] = []
+    for sheet_name, row_idx, cells in _iter_workbook_rows(
+        wb_path, ("QuoteWorksheet", "Quote")
+    ):
+        if row_idx not in _BMS_QUOTE_STEEL_ROWS:
+            continue
+        default_name, role = _BMS_QUOTE_STEEL_ROWS[row_idx]
+        # Pad cells so index access is safe (openpyxl may truncate trailing empties).
+        while len(cells) < 10:
+            cells.append(None)
+
+        name = _cell_str(cells[0]) or default_name
+        qty = _safe_float(cells[2], 0.0)
+        thickness = _parse_fraction(cells[3])
+        width = _parse_fraction(cells[4])
+        length = _parse_fraction(cells[5])
+        hours = _safe_float(cells[6], 0.0)
+        price = _safe_float(cells[7], 0.0)
+
+        # Skip empty / zero-qty template rows (flipper blanks, etc.).
+        if qty <= 0 and thickness <= 0 and width <= 0 and length <= 0:
+            continue
+        if not name:
+            continue
+        if qty <= 0:
+            continue
+
+        role_key = _BMS_NAME_TO_ROLE.get(_norm(name), role)
+        cu_in = 0.0
+        if thickness > 0 and width > 0 and length > 0:
+            cu_in = round(qty * thickness * width * length, 2)
+
+        lines.append(
+            {
+                "component": name,
+                "role": role_key,
+                "qty": qty,
+                "thickness": thickness,
+                "width": width,
+                "length": length,
+                "hours": hours if hours > 0 else None,
+                "cu_in": cu_in if cu_in > 0 else None,
+                "price": round(price, 2) if price > 0 else 0.0,
+                "price_source": f"quote_workbook:{sheet_name}:row{row_idx}",
+                "source_sheet": sheet_name,
+            }
+        )
+    return lines
+
+
+def _load_steel_from_j000(wb_path: Path) -> list[dict]:
+    """J000 Steel Order / Machining Sheet: A=Qty B=Name C=T E=W G=L."""
+    lines: list[dict] = []
+    seen: set[str] = set()
+    for sheet_name, row_idx, cells in _iter_workbook_rows(
+        wb_path, ("Steel Order", "Machining Sheet", "Steel")
+    ):
+        if row_idx < 19:
+            continue
+        while len(cells) < 8:
+            cells.append(None)
+        name = _cell_str(cells[1])
+        if not name:
+            continue
+        role = _BMS_NAME_TO_ROLE.get(_norm(name), "")
+        # Also accept standard plate names via PLATE_SHEET_NAMES keywords.
+        if not role:
+            cn = _norm(name)
+            for r, names in PLATE_SHEET_NAMES.items():
+                if any(n in cn for n in names):
+                    role = r
+                    break
+        if not role:
+            continue
+        qty = _safe_float(cells[0], 1.0)
+        if qty <= 0:
+            continue
+        thickness = _parse_fraction(cells[2])
+        width = _parse_fraction(cells[4])
+        length = _parse_fraction(cells[6])
+        if thickness <= 0 or width <= 0 or length <= 0:
+            continue
+        key = _norm(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        cu_in = round(qty * thickness * width * length, 2)
+        lines.append(
+            {
+                "component": name,
+                "role": role,
+                "qty": qty,
+                "thickness": thickness,
+                "width": width,
+                "length": length,
+                "hours": None,
+                "cu_in": cu_in,
+                "price": 0.0,
+                "price_source": f"steel_workbook:{sheet_name}:row{row_idx}",
+                "source_sheet": sheet_name,
+            }
+        )
+    return lines
+
+
+def _load_steel_from_bom_match(job_dir: Path) -> list[dict]:
+    """Fallback: XT_Export_BOM_Match_Report.csv QuoteName + CAD dims."""
+    for name in (
+        "XT_Export_BOM_Match_Report.csv",
+        "documents/XT_Export_BOM_Match_Report.csv",
+    ):
+        rows = _read_csv_rows(job_dir / name)
+        if not rows:
+            continue
+        lines: list[dict] = []
+        for row in rows:
+            qn = _cell_str(row.get("QuoteName") or row.get("quoteName"))
+            if not qn:
+                continue
+            role = _BMS_NAME_TO_ROLE.get(_norm(qn), "")
+            if not role:
+                continue
+            qty = _safe_float(row.get("Qty") or row.get("QTY") or 1, 1.0)
+            thickness = _safe_float(row.get("CAD_Thickness") or row.get("BOM_Thickness"))
+            width = _safe_float(row.get("CAD_Width") or row.get("BOM_Width"))
+            length = _safe_float(row.get("CAD_Length") or row.get("BOM_Length"))
+            if thickness <= 0 or width <= 0 or length <= 0:
+                continue
+            cu_in = round(qty * thickness * width * length, 2)
+            lines.append(
+                {
+                    "component": qn,
+                    "role": role,
+                    "qty": qty,
+                    "thickness": thickness,
+                    "width": width,
+                    "length": length,
+                    "hours": None,
+                    "cu_in": cu_in,
+                    "price": 0.0,
+                    "price_source": "bom_match_report",
+                    "source_sheet": "",
+                }
+            )
+        if lines:
+            return lines
+    return []
+
+
+def load_pullcore_lines(job_dir: Path) -> list[dict]:
+    """Pull cores & keys from Pullcore Prices.csv (Module6121 WritePullcorePriceFile)."""
+    rows = load_job_pullcore(job_dir)
+    lines: list[dict] = []
+    for row in rows:
+        name = _cell_str(
+            row.get("Pull Core / Key")
+            or row.get("Description")
+            or row.get("Component")
+        )
+        if not name or name.upper() in ("TOTAL", "RATE ($/IN3)", "RATE"):
+            continue
+        if name.upper().startswith("RATE"):
+            continue
+        qty = _safe_float(row.get("Qty") or row.get("QTY") or 1, 1.0)
+        thickness = _safe_float(row.get("Thickness"))
+        width = _safe_float(row.get("Width"))
+        length = _safe_float(row.get("Length"))
+        cu_in = _safe_float(row.get("Cu In") or row.get("Cu. In.") or row.get("CuIn"))
+        price = _safe_float(row.get("Price USD") or row.get("Price"))
+        if cu_in <= 0 and thickness > 0 and width > 0 and length > 0:
+            cu_in = round(qty * thickness * width * length, 2)
+        lines.append(
+            {
+                "component": name,
+                "role": "pullcore",
+                "qty": qty,
+                "thickness": thickness,
+                "width": width,
+                "length": length,
+                "hours": None,
+                "cu_in": cu_in if cu_in > 0 else None,
+                "price": round(price, 2),
+                "price_source": "job_csv:Pullcore Prices.csv",
+                "material": _cell_str(row.get("Material")),
+            }
+        )
+    return lines
+
+
+def _cms_final_original_load_purchased_lines(job_dir: Path) -> list[dict]:
+    """Purchased components from Purchased Components Quote.csv."""
+    rows = load_job_purchased_quote(job_dir)
+    lines: list[dict] = []
+    for row in rows:
+        desc = _cell_str(row.get("Description") or row.get("Component"))
+        comp = _cell_str(row.get("Component") or desc)
+        if not desc and not comp:
+            continue
+        if (desc or comp).upper() == "TOTAL":
+            continue
+        qty = _safe_float(row.get("QTY") or row.get("Qty") or 1, 1.0)
+        unit = _safe_float(row.get("UnitPrice"))
+        ext = _safe_float(row.get("Extended"))
+        if ext <= 0 and unit > 0:
+            ext = unit * max(qty, 1)
+        lines.append(
+            {
+                "component": desc or comp,
+                "role": "purchased_component",
+                "qty": qty,
+                "thickness": None,
+                "width": None,
+                "length": None,
+                "hours": None,
+                "cu_in": None,
+                "price": round(ext, 2),
+                "price_source": "job_csv:Purchased Components Quote.csv",
+                "vendor": _cell_str(row.get("Vendor")),
+                "part_number": _cell_str(row.get("PartNumber")),
+                "unit_price": unit,
+                "category": comp,
+            }
+        )
+    return lines
+
+
+def load_quote_summary(job_dir: Path) -> dict:
+    """Best-effort summary totals from QuoteWorksheet (hours / price / commission)."""
+    wb = _find_workbook(job_dir)
+    summary = {
+        "total_hours": None,
+        "total_price_rough": None,
+        "total_price_finish": None,
+        "commission_pct": None,
+        "commission_rough": None,
+        "commission_finish": None,
+        "grand_total_rough": None,
+        "grand_total_finish": None,
+    }
+    if not wb:
+        return summary
+
+    for sheet_name, row_idx, cells in _iter_workbook_rows(
+        wb, ("QuoteWorksheet", "Quote")
+    ):
+        if not cells:
+            continue
+        label = _norm(_cell_str(cells[0]))
+        nums = [_safe_float(c) for c in cells[1:6] if _safe_float(c) != 0]
+        if "total hours" in label and nums:
+            summary["total_hours"] = nums[0]
+        elif label == "commission" or label.startswith("commission"):
+            # Often: Commission | 6% | $545 | $550
+            pct = None
+            for c in cells[1:4]:
+                s = _cell_str(c)
+                if s.endswith("%"):
+                    pct = _safe_float(s.replace("%", ""))
+            money = [_safe_float(c) for c in cells[1:5] if _safe_float(c) > 1]
+            if pct is not None:
+                summary["commission_pct"] = pct
+            if len(money) >= 1:
+                summary["commission_rough"] = money[0]
+            if len(money) >= 2:
+                summary["commission_finish"] = money[1]
+        elif label == "total price":
+            money = [_safe_float(c) for c in cells[1:5] if _safe_float(c) > 1]
+            # First Total Price row is subtotal; later one (after commission) is grand.
+            if summary["total_price_rough"] is None and money:
+                summary["total_price_rough"] = money[0]
+                if len(money) >= 2:
+                    summary["total_price_finish"] = money[1]
+            elif money:
+                summary["grand_total_rough"] = money[0]
+                if len(money) >= 2:
+                    summary["grand_total_finish"] = money[1]
+    return summary
+
+
+def _match_shop_price(role: str, component_name: str, shop_rows: list[dict]) -> tuple[float, str]:
+    """Return (unit_price, csv_component_matched)."""
+    comp_norm = _norm(component_name)
+    keywords = ROLE_CSV_KEYWORDS.get(role, [])
+    best_price = 0.0
+    best_match = ""
+    is_plate_role = role.endswith("_plate") or role in ("rail", "pin_plate")
+
+    for row in shop_rows:
+        csv_comp = _norm(row.get("Component") or "")
+        price = _safe_float(row.get("UnitPrice"))
+        if price <= 0 or not csv_comp:
+            continue
+
+        # Plates must not pick up pin/bushing hardware rows.
+        if is_plate_role and any(x in csv_comp for x in ("pin", "bushing", "strap", "ring", "insulation")):
+            if "plate" not in csv_comp:
+                continue
+        if role == "leader_pin" and "pin" not in csv_comp:
+            continue
+        if role == "leader_pin_bushing" and "bush" not in csv_comp:
+            continue
+
+        if csv_comp in comp_norm or comp_norm in csv_comp:
+            return price, row.get("Component", "")
+
+        for kw in keywords:
+            if len(kw) < 3:
+                continue
+            if kw in csv_comp or (kw in comp_norm and not is_plate_role):
+                if price > best_price:
+                    best_price = price
+                    best_match = row.get("Component", "")
+
+    return best_price, best_match
+
+
+def _match_job_purchased(
+    component_name: str, job_rows: list[dict]
+) -> tuple[float, str]:
+    comp_norm = _norm(component_name)
+    for row in job_rows:
+        csv_comp = _norm(row.get("Component") or "")
+        if not csv_comp:
+            continue
+        unit = _safe_float(row.get("UnitPrice"))
+        qty = _safe_float(row.get("QTY") or row.get("Qty") or 1, 1.0)
+        ext = _safe_float(row.get("Extended"))
+        if ext > 0:
+            return ext, row.get("Component", "")
+        if unit > 0:
+            return unit * max(qty, 1), row.get("Component", "")
+        if csv_comp in comp_norm or comp_norm in csv_comp:
+            return unit * max(qty, 1), row.get("Component", "")
+    return 0.0, ""
+
+
+def _parse_fraction(val) -> float:
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    m = re.match(r"^(\d+)\s+(\d+)/(\d+)$", s)
+    if m:
+        return int(m.group(1)) + int(m.group(2)) / int(m.group(3))
+    m = re.match(r"^(\d+)/(\d+)$", s)
+    if m:
+        return int(m.group(1)) / int(m.group(2))
+    return _safe_float(s)
+
+
+def _find_workbook(job_dir: Path) -> Path | None:
+    patterns = ("*quote*.xls*", "*Quote*.xls*", "*steel*.xls*", "*J000*.xls*")
+    for sub in ("", "documents"):
+        base = job_dir / sub if sub else job_dir
+        if not base.exists():
+            continue
+        for pat in patterns:
+            hits = sorted(base.glob(pat))
+            if hits:
+                return hits[0]
+    return None
+
+
+def read_sheet_dimensions(job_dir: Path) -> dict[str, dict]:
+    """Parse quote/steel Excel for plate names and T/W/L (stock sizes on quote sheet)."""
+    wb_path = _find_workbook(job_dir)
+    if not wb_path:
+        return {}
+    try:
+        import openpyxl  # type: ignore
+
+    except ImportError:
+        return {}
+
+    out: dict[str, dict] = {}
+    try:
+        wb = openpyxl.load_workbook(wb_path, read_only=True, data_only=True)
+    except Exception:
+        return {}
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        for row in ws.iter_rows(min_row=1, max_row=250, values_only=True):
+            if not row:
+                continue
+            cells = [str(c).strip() if c is not None else "" for c in row]
+            for role, names in PLATE_SHEET_NAMES.items():
+                if role in out:
+                    continue
+                for cell in cells:
+                    cn = _norm(cell)
+                    if any(n in cn for n in names):
+                        nums = [_parse_fraction(c) for c in cells if _parse_fraction(c) > 0]
+                        if len(nums) >= 3:
+                            out[role] = {
+                                "thickness": nums[0],
+                                "width": nums[1],
+                                "length": nums[2],
+                                "sheet_name": cell,
+                                "source_sheet": sheet_name,
+                            }
+                        break
+    wb.close()
+    return out
+
+
+def price_for_part(
+    row: dict,
+    shop_rows: list[dict],
+    job_purchased: list[dict],
+    sheet_dims: dict[str, dict],
+) -> dict:
+    """Return pricing dict with price, source, and sheet dimensions when available."""
+    role = row.get("role", "")
+    component = row.get("Component") or row.get("component") or ""
+    quote_flag = bool(row.get("quote") or row.get("Quote"))
+
+    dims = sheet_dims.get(role, {})
+    thickness = dims.get("thickness") or _safe_float(row.get("Thickness"))
+    width = dims.get("width") or _safe_float(row.get("Width"))
+    length = dims.get("length") or _safe_float(row.get("Length"))
+
+    if not quote_flag:
+        return {
+            "price": 0.0,
+            "price_source": "",
+            "thickness": thickness,
+            "width": width,
+            "length": length,
+        }
+
+    price = 0.0
+    source = ""
+
+    if job_purchased:
+        price, match = _match_job_purchased(component, job_purchased)
+        if price > 0:
+            source = f"job_csv:{match}"
+
+    if price <= 0 and shop_rows:
+        price, match = _match_shop_price(role, component, shop_rows)
+        if price > 0:
+            source = f"shop_csv:{match}"
+
+    if price <= 0:
+        source = "no_csv_price"
+
+    return {
+        "price": round(price, 2),
+        "price_source": source,
+        "thickness": thickness,
+        "width": width,
+        "length": length,
+    }
+
+def load_steel_plate_lines(*args, **kwargs):
+    # CMS FINAL SAFE PATCH:
+    # Wait until Module6121 is complete. Then read the final Quote Steel Grinding
+    # workbook first. CSV fallback is used only if the final workbook is incomplete.
+    job_dir = _cms_final_job_dir_from_args(args, kwargs)
+
+    if not _cms_final_macro_done(job_dir):
+        return []
+
+    workbook_rows = _cms_final_read_bms_from_quote_workbook(job_dir)
+    if len(workbook_rows) >= 4:
+        return workbook_rows
+
+    result = _cms_final_original_load_steel_plate_lines(*args, **kwargs)
+
+    csv_rows = _cms_final_read_bms_from_bom_match_csv(job_dir)
+    if len(csv_rows) >= 4:
+        return csv_rows
+
+    return result
+
+def load_purchased_lines(*args, **kwargs):
+    # CMS FINAL SAFE PATCH:
+    # Purchased Components Quote.csv is trusted only after Module6121 is complete.
+    job_dir = _cms_final_job_dir_from_args(args, kwargs)
+
+    if _cms_final_macro_done(job_dir):
+        purchased_rows = _cms_final_read_purchased_csv(job_dir)
+        if purchased_rows:
+            return purchased_rows
+
+    return _cms_final_original_load_purchased_lines(*args, **kwargs)

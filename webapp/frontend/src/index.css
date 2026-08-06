@@ -225,3 +225,220 @@ h1, h2, h3 {
 .glow-pulse {
   animation: glow-pulse 2.5s ease-in-out infinite;
 }
+
+/* ==========================================================================
+   REFINEMENT LAYER
+   Additive only -- every class above still behaves exactly as before. This
+   sharpens depth, motion and (most importantly for a quoting tool) numbers.
+   ========================================================================== */
+
+/* --- Numbers -------------------------------------------------------------
+   A quote is a column of figures. Tabular numerals make them scan; without
+   them a 1 is narrower than a 7 and columns visibly wobble. */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "ss01" 1;
+  letter-spacing: 0;
+}
+
+.num-lg {
+  font-variant-numeric: tabular-nums;
+  font-size: 1.75rem;
+  line-height: 1.05;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--color-ink-100);
+}
+
+.num-xl {
+  font-variant-numeric: tabular-nums;
+  font-size: 2.5rem;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  background: linear-gradient(180deg, #ffffff 0%, #b9c4d6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Money that has to be trusted at a glance. */
+.num-money {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* --- Elevation ------------------------------------------------------------
+   Three real steps instead of one flat glass. Layered shadows (tight contact
+   + broad ambient) read as physical depth; a single large blur reads as fog. */
+.elev-1 {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 2px 8px rgba(0, 0, 0, 0.24);
+}
+
+.elev-2 {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.45),
+    0 4px 16px rgba(0, 0, 0, 0.3),
+    0 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+.elev-3 {
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.5),
+    0 8px 28px rgba(0, 0, 0, 0.38),
+    0 28px 80px rgba(0, 0, 0, 0.42);
+}
+
+/* --- Interactive cards ---------------------------------------------------- */
+.card-lift {
+  transition:
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 0.22s ease;
+  will-change: transform;
+}
+
+.card-lift:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.5),
+    0 10px 32px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(10, 132, 255, 0.18);
+}
+
+.card-lift:active {
+  transform: translateY(0);
+  transition-duration: 0.08s;
+}
+
+/* Accent rail on the leading edge of a highlighted card. */
+.rail-brand { box-shadow: inset 3px 0 0 var(--color-brand-500); }
+.rail-green { box-shadow: inset 3px 0 0 var(--color-accent-green); }
+.rail-amber { box-shadow: inset 3px 0 0 var(--color-accent-amber); }
+.rail-rose  { box-shadow: inset 3px 0 0 var(--color-accent-rose); }
+
+/* --- Motion -------------------------------------------------------------
+   Short, high-tension easing. Long linear fades feel sluggish. */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.rise-in {
+  animation: rise-in 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Stagger children so a list assembles instead of popping. */
+.rise-in-1 { animation-delay: 0.03s; }
+.rise-in-2 { animation-delay: 0.06s; }
+.rise-in-3 { animation-delay: 0.09s; }
+.rise-in-4 { animation-delay: 0.12s; }
+.rise-in-5 { animation-delay: 0.15s; }
+.rise-in-6 { animation-delay: 0.18s; }
+
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* Loading placeholder that reads as "working", not "broken". */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 25%,
+    rgba(255, 255, 255, 0.09) 50%,
+    rgba(255, 255, 255, 0.04) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  border-radius: 0.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise-in, .skeleton, .glow-pulse, .card-lift { animation: none; transition: none; }
+  .card-lift:hover { transform: none; }
+}
+
+/* --- Data tables ---------------------------------------------------------
+   Sticky headers and a hairline grid, so a 200-row parts list stays legible. */
+.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(180deg, rgba(26, 26, 36, 0.98), rgba(26, 26, 36, 0.92));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-ink-500);
+  padding: 0.625rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  white-space: nowrap;
+}
+
+.data-table tbody tr {
+  transition: background 0.12s ease;
+}
+
+.data-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.data-table tbody td {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.data-table tbody tr:last-child td { border-bottom: none; }
+
+/* --- Bars ---------------------------------------------------------------- */
+.meter {
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--color-brand-600), var(--color-brand-400));
+  transition: width 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.meter-fill-green { background: linear-gradient(90deg, #1f9e46, var(--color-accent-green)); }
+.meter-fill-amber { background: linear-gradient(90deg, #c97a00, var(--color-accent-amber)); }
+.meter-fill-rose  { background: linear-gradient(90deg, #c0281f, var(--color-accent-rose)); }
+
+/* --- Focus --------------------------------------------------------------
+   Visible for keyboard users, invisible for mouse users. */
+:focus-visible {
+  outline: 2px solid var(--color-brand-400);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --- Texture ------------------------------------------------------------
+   A whisper of noise stops large dark gradients from banding on cheap panels. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.022;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}

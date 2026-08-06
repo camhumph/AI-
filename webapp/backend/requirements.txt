@@ -4,3 +4,21 @@ python-multipart==0.0.9
 pydantic==2.9.2
 openpyxl==3.1.5
 xlrd==2.0.1
+
+# Lets a plate rename in the web app write straight into the .xls quote sheet
+# and steel sheet, by driving Excel over COM the same way Module6121 does.
+#
+# Needed because both workbooks are legacy BIFF8 .xls: openpyxl cannot write
+# that format at all, and xlrd 2.x is read-only. The xlwt route can write .xls
+# but discards formulas, and the quote sheet is formula-driven.
+#
+# Windows-only, and OPTIONAL -- without it the rename still saves and still
+# reaches the sheets on the next macro run via the bridge file. The marker keeps
+# a Linux install from failing. Grade changes use the same route: see
+# app/sheet_grades.py.
+pywin32==306; sys_platform == "win32"
+
+# Renders the macro's diagnostic CSVs as readable PDFs
+# (app/job_housekeeping.py, tidy_job_folder.py). Chosen over an HTML-to-PDF
+# route because it needs no browser engine and no external binary.
+reportlab==5.0.0

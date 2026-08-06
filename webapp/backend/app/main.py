@@ -1,5 +1,6 @@
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -9,7 +10,22 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, credentials, email_service, jobs, pricing, quote_pipeline, vba_bridge
+from . import (
+    config,
+    credentials,
+    email_service,
+    jobs,
+    learning,
+    machining,
+    name_learning,
+    plate_grades,
+    plate_names,
+    pricing,
+    quote_pipeline,
+    sheet_grades,
+    sheet_rename,
+    vba_bridge,
+)
 
 app = FastAPI(title="CMS AI Quoting")
 
@@ -161,6 +177,467 @@ def api_quote_sheet(job_id: str):
     return sheet
 
 
+@app.get("/api/jobs/{job_id}/machining")
+def api_machining(job_id: str):
+    """Machining time estimate, broken out per part and per operation.
+
+    Rough / finish / grind are derived from measured CAD volume and area. Drill
+    and tap counts are pattern estimates, reported separately so the caller can
+    see how much of the total rests on assumption.
+    """
+    job = jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    sheet = pricing.build_quote_sheet(job)
+    return machining.estimate_job(sheet, job.get("parts", []))
+
+
+# --------------------------------------------------------------------------
+# Plate name overrides
+#
+# A rename changes the LABEL, never the ROLE -- see app/plate_names.py. The role
+# decides the quote row and the price, so relabelling a plate for a customer
+# cannot move money between rows of the grade block.
+# --------------------------------------------------------------------------
+class PlateRenameIn(BaseModel):
+    # {cad_index: "New Name"}. An empty string or null clears that override.
+    names: dict
+    # Also rewrite the .xls quote/steel sheets now. Needs Excel + pywin32 on this
+    # machine; when unavailable the rename still saves and the next macro run
+    # applies it.
+    write_sheets: bool = True
+    dry_run: bool = False
+
+
+# --------------------------------------------------------------------------
+# Steel grade overrides
+#
+# Unlike a rename, this DOES move money: the grade picks which block of the quote
+# workbook a plate is priced in. See app/plate_grades.py.
+# --------------------------------------------------------------------------
+class PlateGradeIn(BaseModel):
+    # {cad_index_or_"role:<role>": "4140"}. Empty string or null clears that key.
+    grades: dict
+    # Also rewrite the .xls quote/steel sheets now, the same way a rename does.
+    # Needs Excel + pywin32; without them the override still saves and the next
+    # macro run applies it.
+    write_sheets: bool = True
+    dry_run: bool = False
+
+
+@app.get("/api/jobs/{job_id}/plate-grades")
+def api_get_plate_grades(job_id: str):
+    job_dir = jobs.job_dir(job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "job_id": job_id,
+        "grades": plate_grades.get_overrides(job_dir),
+        "valid": list(plate_grades.VALID_GRADES),
+        "labels": plate_grades.GRADE_LABELS,
+    }
+
+
+@app.put("/api/jobs/{job_id}/plate-grades")
+def api_put_plate_grades(job_id: str, body: PlateGradeIn):
+    job_dir = jobs.job_dir(job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    # Read the sheet BEFORE saving, for the same reason the rename endpoint does:
+    # the workbook rows are located by the text that is in them right now, and the
+    # slot comes from the plate's role. After the save the row still says the old
+    # name, but resolving it here keeps both endpoints working the same way.
+    plates_before = _plate_rows_for_sheet_edit(job_id)
+
+    saved = plate_grades.set_overrides(job_dir, body.grades or {})
+
+    # Which plates does each submitted key actually name? A cad-index key is one
+    # plate; a "role:" key is every plate with that role, so a single pick on a
+    # steel row that stands for a role regrades all of them -- matching how the
+    # override itself is applied in pricing.py. A "name:" key is the last resort
+    # for a row with neither, which is every BMS steel row and every row the sheet
+    # parser could not map.
+    changes = []
+    for key, value in (body.grades or {}).items():
+        grade = plate_grades.clean_grade(value)
+        if not grade:
+            continue  # cleared or rejected; nothing to write
+        k = str(key).strip()
+        role_only = (
+            k[len(plate_grades.ROLE_PREFIX):]
+            if k.startswith(plate_grades.ROLE_PREFIX)
+            else ""
+        )
+        is_name_key = k.startswith(plate_grades.NAME_PREFIX)
+        for p in plates_before:
+            if role_only:
+                if (p.get("role") or "") != role_only:
+                    continue
+            elif is_name_key:
+                # Re-derive the key from the row's own name rather than comparing
+                # raw text: both sides then go through the same normaliser the UI
+                # used to build the key.
+                if plate_grades.name_key(p.get("name") or "") != k:
+                    continue
+            elif str(p.get("index")) != k:
+                continue
+            if not p.get("name"):
+                continue
+            changes.append(
+                {"name": p["name"], "role": p.get("role") or "", "grade": grade}
+            )
+
+    sheets = {"skipped_reason": "not requested"}
+    if body.write_sheets and changes:
+        sheets = sheet_grades.rewrite_grades(job_dir, changes, dry_run=body.dry_run)
+
+    out = {
+        "job_id": job_id,
+        "grades": saved["grades"],
+        "regraded": changes,
+        "sheets": sheets,
+    }
+    if saved.get("rejected"):
+        # 200 with the rejects named, not a silent success: an unrecognised grade
+        # has no rows in the workbook, so the plate would drop off the sheet.
+        out["rejected"] = saved["rejected"]
+        out["detail"] = (
+            "Some grades were not recognised and were not saved. Valid: "
+            + ", ".join(plate_grades.VALID_GRADES)
+        )
+    return out
+
+
+def _current_labels_by_rename_key(job_id: str, before: dict) -> dict:
+    """Just the names, for callers that do not need the rest. See the context version."""
+    return {k: v["label"] for k, v in _plate_context_by_rename_key(job_id, before).items()}
+
+
+def _plate_context_by_rename_key(job_id: str, before: dict) -> dict:
+    """What each plate IS right now, keyed every way the UI might key it.
+
+    Returns {key: {"label", "role", "component", "dims"}}. The label is what the
+    rename has to find in the workbook; the role and the measurements are what
+    app/name_learning.py needs to file the rename under something reusable -- a
+    rename recorded without its role teaches nothing, because the role is the
+    only part of it that another job will ever share.
+
+    renameKeyFor() in PartsTable.tsx picks the most specific of three keys:
+
+        "7"                 a CAD index
+        "role:b_plate"      a role
+        "name:b plate"      the normalised displayed name, last resort
+
+    This lookup used to be built only from `before["parts"]`, and only for the
+    first two. So a `name:` key resolved to no old name at all, and a `role:` key
+    resolved only when a CAD part carried that role. When the old name came back
+    empty the rename list stayed empty, and the endpoint then reported
+    `"not requested"` -- which is how renaming "Top Clamping Plate" on a BMS steel
+    row answered "Renamed. Sheets not rewritten: not requested" while the workbooks
+    were never opened.
+
+    Built from the priced quote sheet as well, because that is the list the Parts
+    tab actually renders and therefore the text that is really in the workbook.
+    """
+    ctx: dict = {}
+
+    def offer(key: str, label: str, role: str = "", component: str = "", dims=None) -> None:
+        if not key or not label or key in ctx:
+            return
+        ctx[key] = {
+            "label": label,
+            "role": (role or "").strip(),
+            "component": component or "",
+            "dims": dims or {},
+        }
+
+    # CAD parts: index keys, and role keys where the role is specific.
+    for p in before.get("parts", []) or []:
+        lbl = p.get("role_label") or ""
+        original = p.get("role_label_original") or lbl
+        role = (p.get("role") or "").strip()
+        comp = p.get("Component") or ""
+        dims = {
+            "thickness": p.get("Thickness"),
+            "width": p.get("Width"),
+            "length": p.get("Length"),
+        }
+        offer(str(p.get("index")), lbl, role, comp, dims)
+        if role and role not in plate_names.GENERIC_ROLES:
+            offer(plate_names.role_key(role), original, role, comp, dims)
+        if lbl:
+            offer(plate_names.name_key(lbl), lbl, role, comp, dims)
+
+    # The rows the Parts tab shows. These carry the names the workbook holds, and
+    # they are the only source for a steel row that has no CAD part behind it.
+    for r in _plate_rows_for_sheet_edit(job_id):
+        name = r.get("name") or ""
+        if not name:
+            continue
+        role = (r.get("role") or "").strip()
+        dims = r.get("dims") or {}
+        idx = r.get("index")
+        if idx is not None:
+            offer(str(idx), name, role, name, dims)
+        # Generic roles are skipped for the same reason renameKeyFor() skips them:
+        # "steel_plate" identifies nothing, so a role key built from it would tie
+        # every unmapped row together and resolve to whichever came first.
+        if role and role not in plate_names.GENERIC_ROLES:
+            offer(plate_names.role_key(role), name, role, name, dims)
+        offer(plate_names.name_key(name), name, role, name, dims)
+
+    return ctx
+
+
+def _plate_rows_for_sheet_edit(job_id: str):
+    """Plate name / role / cad index as they stand right now, for locating rows.
+
+    Uses the priced quote sheet rather than the raw job so the name matches what
+    the workbook actually says, including any rename override already applied.
+    """
+    try:
+        job = jobs.get_job(job_id)
+        if not job:
+            return []
+        sheet = pricing.build_quote_sheet(job)
+    except Exception:
+        return []
+
+    rows = []
+    for it in sheet.get("line_items", []) or []:
+        if it.get("section") not in ("steel", "classified"):
+            continue
+        name = it.get("component") or it.get("name") or ""
+        # Strip the " — 1.375" thk" and " (Mold 2)" decorations pricing.py adds for
+        # display; the workbook cell holds the bare plate name.
+        name = re.split(r"\s+[—-]\s+", str(name))[0].strip()
+        name = re.sub(r"\s*\((?:Mold|Base)\s*\d+\)\s*$", "", name).strip()
+        if not name:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "role": it.get("role") or "",
+                "index": it.get("index") if it.get("index") is not None else it.get("_cad_index"),
+                "dims": {
+                    "thickness": it.get("thickness"),
+                    "width": it.get("width"),
+                    "length": it.get("length"),
+                    "qty": it.get("qty"),
+                },
+            }
+        )
+    return rows
+
+
+@app.get("/api/jobs/{job_id}/plate-names")
+def api_get_plate_names(job_id: str):
+    job_dir = jobs.job_dir(job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"job_id": job_id, "names": plate_names.get_overrides(job_dir)}
+
+
+@app.put("/api/jobs/{job_id}/plate-names")
+def api_put_plate_names(job_id: str, body: PlateRenameIn):
+    job_dir = jobs.job_dir(job_id)
+    if job_dir is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    # Capture what each plate is called NOW, before saving, so the sheet rewrite
+    # knows which text to search for. After the save the old name is gone.
+    before = jobs.get_job(job_id) or {}
+    context = _plate_context_by_rename_key(job_id, before)
+    label_by_index = {k: v["label"] for k, v in context.items()}
+
+    saved = plate_names.set_overrides(job_dir, body.names or {})
+
+    renames = []
+    learned = []
+    for idx, new_name in (body.names or {}).items():
+        old = label_by_index.get(str(idx), "")
+        new = plate_names.clean_name(new_name) if new_name else ""
+        # Clearing an override renames the sheet back to the role's default.
+        if not new:
+            key = str(idx)
+            role_only = (
+                key[len(plate_names.ROLE_PREFIX):]
+                if key.startswith(plate_names.ROLE_PREFIX)
+                else ""
+            )
+            new = plate_names.clean_name(
+                next(
+                    (
+                        p.get("role_label_original") or p.get("role_label") or ""
+                        for p in before.get("parts", [])
+                        if (role_only and (p.get("role") or "") == role_only)
+                        or (not role_only and str(p.get("index")) == key)
+                    ),
+                    "",
+                )
+            )
+        if old and new and old != new:
+            renames.append((old, new))
+
+            # TRAIN ON IT NOW, BEFORE THE SHEETS ARE TOUCHED.
+            #
+            # Recorded here rather than after the Excel write on purpose: the
+            # lesson is in what the estimator TYPED, and it is worth keeping even
+            # when the workbooks are unreachable, read-only, or on a machine with
+            # no Excel. Nothing about rewriting an .xls makes the name more or
+            # less correct. See app/name_learning.py.
+            ctx = context.get(str(idx)) or {}
+            key_role = ctx.get("role") or ""
+            if not key_role and str(idx).startswith(plate_names.ROLE_PREFIX):
+                key_role = str(idx)[len(plate_names.ROLE_PREFIX):]
+            try:
+                learned.append(
+                    name_learning.record_rename(
+                        job_id=job_id,
+                        base_type=before.get("base_type") or "standard",
+                        key=str(idx),
+                        role=key_role,
+                        old_name=old,
+                        new_name=new,
+                        component=ctx.get("component") or "",
+                        dims=ctx.get("dims") or {},
+                    )
+                )
+            except Exception as e:
+                # A rename is never lost to a training failure.
+                learned.append({"learned": False, "not_learned_because": str(e)})
+
+    # SAY WHICH OF THE THREE REASONS IT WAS.
+    #
+    # This used to report "not requested" whenever the rename list came out empty,
+    # regardless of why -- so a key whose old name could not be resolved looked
+    # identical to the caller having asked for no sheet write. "Renamed to 'Top
+    # Clamping Plates'. Sheets not rewritten: not requested" was that: the write
+    # WAS requested, the old name just was not found.
+    if not body.write_sheets:
+        sheets = {"skipped_reason": "not requested"}
+    elif renames:
+        sheets = sheet_rename.rewrite_names(job_dir, renames, dry_run=body.dry_run)
+    else:
+        unresolved = [
+            str(k) for k in (body.names or {}) if not label_by_index.get(str(k))
+        ]
+        if unresolved:
+            sheets = {
+                "skipped_reason": (
+                    "Could not tell what these plates are currently called, so there "
+                    "is no text to find in the workbooks: "
+                    + ", ".join(unresolved)
+                    + ". The new name IS saved and will reach the sheets on the next "
+                    "macro run."
+                ),
+                "unresolved_keys": unresolved,
+            }
+        else:
+            sheets = {
+                "skipped_reason": "The new name matches what the sheets already say; "
+                "nothing to rewrite."
+            }
+
+    return {
+        "job_id": job_id,
+        "names": saved,
+        "renames": [{"from": a, "to": b} for a, b in renames],
+        "sheets": sheets,
+        # What the app took away from this edit: why it thinks the name was
+        # wrong, and whether every future job of this base type now uses the new
+        # one. Returned with the save so the estimator sees the lesson land
+        # instead of having to go looking for it on another page.
+        "learning": learned,
+    }
+
+
+# --------------------------------------------------------------------------
+# Estimator learning: actual hours vs quoted hours
+#
+# This is what turns the estimator from a fixed calculator into something that
+# gets better the longer the shop runs it. See app/learning.py for why the store
+# is append-only.
+# --------------------------------------------------------------------------
+class JobActualIn(BaseModel):
+    job_id: str
+    display_name: str = ""
+    quoted_min: float
+    actual_min: float
+    recorded_by: str = ""
+    material: str = ""
+    role: str = ""
+    note: str = ""
+    # Optional per-operation-class split, when the shop tracks that finely.
+    # {"rough": {"quoted_min": 60, "actual_min": 78}, ...}
+    by_class: Optional[dict] = None
+
+
+@app.get("/api/learning/actuals")
+def api_get_actuals():
+    return {"actuals": learning.load_actuals()}
+
+
+@app.post("/api/learning/actuals")
+def api_post_actual(entry: JobActualIn):
+    if entry.quoted_min <= 0 or entry.actual_min <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="quoted_min and actual_min must both be greater than zero.",
+        )
+    return learning.append_actual(entry.model_dump())
+
+
+# --------------------------------------------------------------------------
+# Plate-name learning: what the estimator's renames taught the app
+#
+# Separate from the machining actuals above because it learns a different kind
+# of thing from a different kind of evidence -- a stated name rather than a
+# measured duration -- and applies it from one example instead of four. See the
+# docstring in app/name_learning.py for why that difference is deliberate.
+# --------------------------------------------------------------------------
+@app.get("/api/learning/names")
+def api_get_learned_names():
+    """Learned labels, the renames behind them, and the ones worth a second look."""
+    return {
+        "labels": name_learning.learned_labels(),
+        "history": name_learning.history(limit=200),
+        "review": name_learning.review_queue(),
+    }
+
+
+class ForgetNameIn(BaseModel):
+    base_type: str = "standard"
+    role: str
+
+
+@app.post("/api/learning/names/forget")
+def api_forget_learned_name(body: ForgetNameIn):
+    """Take back a learned label. The role goes back to its built-in name."""
+    role = (body.role or "").strip()
+    if not role:
+        raise HTTPException(status_code=400, detail="role is required")
+    entry = name_learning.forget(body.base_type, role)
+    return {"forgotten": True, "role": role, "entry": entry}
+
+
+@app.get("/api/learning/factors")
+def api_get_learned_factors():
+    """Learned factors plus the accuracy record they came from.
+
+    Both are returned together on purpose: a factor without the sample count and
+    scatter behind it is an unauditable number, and this model is meant to be
+    argued with.
+    """
+    return {
+        "factors": learning.learn_factors(),
+        "accuracy": learning.accuracy_report(),
+        "min_samples": learning.MIN_SAMPLES,
+        "clamp": list(learning.LEARN_CLAMP),
+    }
+
+
 # --------------------------------------------------------------------------
 # Pricing config
 # --------------------------------------------------------------------------
@@ -200,7 +677,20 @@ def api_vba_classify(body: VbaClassifyBody):
     imported = jobs.import_raw_csv(job_id, body.csv_path)
 
     base_type = "bms" if body.base_type.strip().lower() in ("bms", "pot", "pot_block") else "standard"
-    jobs.update_meta(job_id, base_type=base_type)
+    # Record the shop folder the CSV came from: bom_roles follows source_folder to
+    # find the customer BOM, which is still sitting there mid-run and has not been
+    # copied into the webapp job dir yet.
+    src_folder = ""
+    try:
+        parent = Path(body.csv_path).parent
+        if parent.is_dir():
+            src_folder = str(parent)
+    except Exception:
+        pass
+    if src_folder:
+        jobs.update_meta(job_id, base_type=base_type, source_folder=src_folder)
+    else:
+        jobs.update_meta(job_id, base_type=base_type)
 
     if base_type == "bms":
         return "BMS_REGISTERED: BOM-driven flow retained; AI classification skipped."
@@ -426,6 +916,68 @@ def api_email_messages(limit: int = 40, q: str = ""):
     for m in messages:
         m["matched_jobs"] = [t for t in m["job_tokens"] if t in job_ids]
     return messages
+
+
+@app.get("/api/jobs/{job_id}/bom-roles")
+def api_job_bom_roles(job_id: str, refresh: bool = False):
+    """BOM-derived role/name hints for this job's CAD parts.
+
+    Each hint is a match between a BOM detail number and a CAD component, so the
+    role comes from the customer's own plate name rather than from geometry.
+    Rows with role "" matched a part but carry no nameable role -- see
+    bom_roles.role_for_description.
+    """
+    from . import bom_roles
+
+    d = jobs.job_dir(job_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    if refresh:
+        return bom_roles.refresh(d)
+    hints = bom_roles.load_hints(d)
+    if not hints:
+        return bom_roles.refresh(d)
+    return {"bom": "", "hints": list(hints.values()), "cached": True}
+
+
+@app.get("/api/jobs/{job_id}/email-brief")
+def api_job_email_brief(job_id: str):
+    """The local-model reading of the RFQ that started this job.
+
+    llm.pending is True while the model is still running: the counts, line items,
+    reconciliation and flags are already final at that point (they are computed,
+    not generated), so a caller can render immediately and poll for the
+    interpretation fields. See email_ai.analyze_async.
+    """
+    from . import email_ai
+
+    d = jobs.job_dir(job_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    brief = email_ai.load_brief(d)
+    if brief is None:
+        raise HTTPException(status_code=404, detail="No email brief for this job")
+    return brief
+
+
+@app.post("/api/jobs/{job_id}/email-brief/rerun")
+def api_job_email_brief_rerun(job_id: str, deep: bool = False, model: str = ""):
+    """Re-read the job's saved attachments. Returns the facts brief right away."""
+    from . import email_ai
+
+    d = jobs.job_dir(job_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    previous = email_ai.load_brief(d) or {}
+    src = previous.get("source", {})
+    docs = d / "documents"
+    files = sorted(p for p in docs.glob("*") if p.is_file()) if docs.is_dir() else []
+    if not files:
+        raise HTTPException(status_code=409, detail="Job has no saved attachments to re-read")
+    return email_ai.analyze_async(
+        d, src.get("subject", ""), src.get("body", ""), files,
+        from_addr=src.get("from", ""), model=model, deep=deep,
+    )
 
 
 @app.get("/api/email/messages/{message_id}")

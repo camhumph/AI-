@@ -14,18 +14,42 @@ from ultralytics import YOLO
 BASE_DIR = Path(r"C:\CMS_AI")
 UPLOAD_DIR = BASE_DIR / "uploads"
 RESULT_DIR = BASE_DIR / "results"
-MODEL_PATH = BASE_DIR / "models" / "cms_mold_yolo26.pt"
+# MODEL CHOICE -- see geometry_classifier/dataset_audit.py for how this was
+# settled, and re-run it before changing this line.
+#
+# Every .pt previously in models/ came from a training run whose validation set
+# was ALSO its training set, so none of their scores meant anything. Worse, the
+# file this used to load (cms_mold_yolo26.pt) came from train-6, which trained on
+# the 1-image `right_view_only` dataset and scored mAP50 0.052 -- the lowest of
+# all eleven runs. Production was quietly running the worst model in the repo,
+# while a 0.746 figure from the most-leaked run was the one on record.
+#
+# cms_mold_clean_split_best.pt is train-3/weights/best.pt, the best result from
+# the only cleanly-split dataset (cms_molds, 0 train/val overlap): mAP50 0.583 at
+# epoch 11. Caveat worth knowing: that run collapsed to 0.046 by epoch 30, so
+# epoch 11 is a peak on an unstable run, not a settled optimum. It is still the
+# only honestly-measured weight file available.
+MODEL_PATH = BASE_DIR / "models" / "cms_mold_clean_split_best.pt"
+# Kept for comparison; do NOT promote without a clean split behind it.
+LEGACY_MODEL_PATH = BASE_DIR / "models" / "cms_mold_yolo26.pt"
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Use your custom mold model if it exists. Otherwise use YOLO26s.
+# Prefer the cleanly-validated model, fall back to the legacy one, then to stock
+# COCO weights. The fallback chain is explicit so the log says which one is live
+# -- "custom model" told you nothing about whether it was any good.
 if MODEL_PATH.exists():
     model = YOLO(str(MODEL_PATH))
-    MODEL_USED = str(MODEL_PATH)
+    MODEL_USED = f"{MODEL_PATH.name} (clean split, mAP50 0.583)"
+elif LEGACY_MODEL_PATH.exists():
+    model = YOLO(str(LEGACY_MODEL_PATH))
+    MODEL_USED = f"{LEGACY_MODEL_PATH.name} (LEAKED VALIDATION, mAP50 0.052 -- untrustworthy)"
 else:
     model = YOLO("yolo26s.pt")
-    MODEL_USED = "yolo26s.pt fallback generic model"
+    MODEL_USED = "yolo26s.pt fallback generic model (not trained on molds at all)"
+
+print(f"[cms_local_mold_ai] model: {MODEL_USED}")
 
 app = FastAPI(title="CMS Local Mold AI")
 app.mount("/results", StaticFiles(directory=str(RESULT_DIR)), name="results")
