@@ -218,6 +218,76 @@ Each job folder should contain `XT_Export_CAD_Dimensions.csv` plus the
 finished quote/steel Excel. The script matches steel-sheet plate names back to
 CAD components and writes `geometry_classifier\outputs\training\*_CORRECT_ME.csv`.
 
+## Plate naming from the STL mesh (two-pass)
+
+The naming that fills the steel sheet has three modes. `POST
+/api/jobs/<id>/classify` takes `{"mode": "rules" | "llm" | "stl"}`:
+
+| mode | what it reads | speed |
+|---|---|---|
+| `rules` | CAD dimension export, deterministic geometry/shop-token rules | seconds |
+| `llm` | same export, one Qwen pass | a few minutes |
+| `stl` | **two Qwen passes with the exported plate meshes measured in between** | 10-40 min on CPU |
+
+`stl` mode runs:
+
+1. **Candidates.** Qwen reads the whole `XT_Export_CAD_Dimensions.csv` -- sizes,
+   stack positions, steel weight, stack order -- and proposes a name for each
+   structural part. Hardware is *not* sent to the model; the geometry rules
+   already separate 127 fasteners reliably, and asking for all of them spends the
+   whole generation on the parts that were never wrong. The hardware list is still
+   shown so the model can pull a plate back out of it.
+2. **Measure.** The per-plate STL triangle meshes for those candidates are read
+   and measured by `geometry_classifier/stl_geometry.py` (numpy only, no trimesh):
+   true stack thickness, pocket area and depth *per face*, through-holes,
+   counterbores, cross-drilling, full-thickness fraction.
+3. **Final call.** Qwen sees its own candidate next to the measurements and is
+   told to overrule itself wherever they disagree. Every change is logged in
+   `job_analysis.changed_by_mesh`.
+
+CLI equivalent (two-pass turns itself on when the job has meshes):
+
+```cmd
+python geometry_classifier\qwen_classify_xt_csv.py "<job>\XT_Export_CAD_Dimensions.csv" --model qwen3.5:9b
+```
+
+`--no-stl` forces the old single-pass behaviour, `--rules-only` skips Qwen
+entirely, `--stl-dir` overrides mesh auto-detection.
+
+### Things about these files that are measured, not assumed
+
+Established by measuring the C178 jobs, and the reason the module never
+hardcodes any of it:
+
+- **The meshes are in millimetres**, despite `FORCE_INCH_STL_EXPORT` in the
+  macro. Nothing in an STL records units, so `detect_units` decides.
+- **The stack axis is Y, not Z.** A job's CSV `CenterZ` equals the STL's Y centre
+  to the thousandth. `detect_stack_axis` measures it per job.
+- **Per-plate STLs are re-zeroed to their own origin**, so their absolute
+  positions are meaningless -- C17880's eight plates all report a stack centre
+  between 0.4" and 5.6". Orientation *is* shared. So position always comes from
+  the CSV and shape always comes from the mesh, joined on **volume**: SolidWorks'
+  `BBoxVolume x SolidFillPct` and the mesh integration agree to four significant
+  figures on all eight C17880 plates.
+- **The merged `<job>.stl` cannot be split into parts** -- plates that touch face
+  to face share welded vertices, so C17879's top clamp + A + B come back as one
+  10.625" body. `<job> component.stl` is the complement (plates *hidden*), not a
+  superset. Only the per-plate files in `stl\` are one body each.
+- **The macro writes its current guess into the STL filename and mesh header**
+  ("Plate 4.STL"). That is withheld from both prompts -- feeding it back is how a
+  wrong name survives a re-run. A regression test asserts it never reaches a
+  prompt.
+
+### Known gap: an unnamed plate has no mesh
+
+`EXPORT_PER_PLATE_STLS` only writes an STL for a plate the macro already named,
+so the parts most in need of measuring are the ones least likely to have a mesh.
+On C17879 the four real ejector plates have no STL at all; they are named from
+the CSV plus derived stack facts (inside the ejector box, mirror twins, plan-area
+fraction). Closing this properly means having Module6121 export every steel body,
+named or not -- see `EXPORT_ALL_STEEL_PART_STLS`, whose leftover sweep currently
+skips anything it cannot already name.
+
 ## Known limitations / honesty notes
 
 - **Email** only activates once IMAP/SMTP secrets are set; there is no fake

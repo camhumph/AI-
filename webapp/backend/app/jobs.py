@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config
+from . import config, job_housekeeping, name_learning, plate_names
 from .roles import role_label, role_group
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -28,8 +28,20 @@ MODEL_EXTS = {".stl"}
 DOC_EXTS = {".pdf", ".csv", ".xlsx", ".xls", ".txt", ".docx"}
 
 
+class InvalidJobId(ValueError):
+    """job_id was empty or unusable after sanitising."""
+
+
 def _job_dir(job_id: str) -> Path:
-    safe = job_id.strip().replace("..", "").replace("/", "_")
+    safe = (job_id or "").strip().replace("..", "").replace("/", "_").replace("\\", "_")
+    # An empty id made `JOBS_ROOT / ""` resolve to JOBS_ROOT ITSELF, so a job
+    # with a blank C-number wrote meta.json at the registry root and could
+    # rmtree the whole registry. C17267 hit the front half of this: the macro
+    # POSTed job-complete with a blank folder ("DONE ACTIVE CAD QUOTE. Output
+    # folder:" with nothing after it), sync_completed_job resolved Path("") to
+    # ".", and import_from_folder derived job_id = "".
+    if not safe:
+        raise InvalidJobId("job_id is empty after sanitising")
     return config.JOBS_ROOT / safe
 
 
@@ -89,6 +101,35 @@ def _read_classification_csv_by_index(job_dir: Path) -> dict:
     return by_index
 
 
+def _read_xt_mass_by_index(job_dir: Path) -> dict:
+    """Measured mass in lb per CAD index, from XT_Export_CAD_Dimensions.csv.
+
+    The macro gets this from SolidWorks' own CreateMassProperty (mass x 2.20462),
+    falling back to volume x 0.283 when a part has no material assigned. It is a
+    real measurement, so the UI should prefer it over estimating mass from STL
+    mesh volume -- an STL carries no material data and no units.
+
+    Column is `Mass_or_Vol`; older exports may spell it `Mass`.
+    """
+    by_index = {}
+    csv_path = job_housekeeping.find_job_file(job_dir, "XT_Export_CAD_Dimensions.csv")
+    if csv_path is None:
+        return by_index
+    try:
+        with csv_path.open("r", newline="", encoding="utf-8-sig", errors="replace") as f:
+            for row in csv.DictReader(f):
+                raw = row.get("Mass_or_Vol", row.get("Mass", ""))
+                try:
+                    val = float(str(raw).strip())
+                except (TypeError, ValueError):
+                    continue
+                if val > 0:
+                    by_index[str(row.get("Index", "")).strip()] = val
+    except Exception:
+        pass
+    return by_index
+
+
 def list_jobs() -> list:
     jobs = []
     if not config.JOBS_ROOT.exists():
@@ -98,7 +139,7 @@ def list_jobs() -> list:
             continue
         meta = _read_meta(job_dir)
         classification = _read_classification(job_dir)
-        has_raw = (job_dir / "XT_Export_CAD_Dimensions.csv").exists()
+        has_raw = job_housekeeping.job_file_exists(job_dir, "XT_Export_CAD_Dimensions.csv")
         part_count = len(classification.get("classifications", [])) if classification else 0
         sequenced = bool(
             classification
@@ -131,15 +172,26 @@ def get_job(job_id: str) -> dict:
     meta = _read_meta(job_dir)
     classification = _read_classification(job_dir) or {"job_analysis": {}, "classifications": []}
     csv_by_index = _read_classification_csv_by_index(job_dir)
+    mass_by_index = _read_xt_mass_by_index(job_dir)
+
+    base_type = meta.get("base_type", "standard")
 
     rows = []
     for item in classification.get("classifications", []):
         role = item.get("role", "")
-        csv_row = csv_by_index.get(str(item.get("index", "")), {})
+        idx = str(item.get("index", ""))
+        csv_row = csv_by_index.get(idx, {})
+        # What the shop has already told us this role is called, from a rename on
+        # an earlier job. Falls straight back to the built-in label when nothing
+        # has been learned. See app/name_learning.py.
+        label = name_learning.label_for(role, base_type, role_label(role))
+        # Measured lb from SolidWorks. classification.csv does not carry it, so
+        # fall back to the raw XT export keyed on the same CAD index.
+        mass = csv_row.get("Mass_or_Vol", csv_row.get("Mass", "")) or mass_by_index.get(idx, "")
         rows.append(
             {
                 **item,
-                "role_label": role_label(role),
+                "role_label": label,
                 "role_group": role_group(role),
                 "Component": csv_row.get("Component", ""),
                 "Thickness": csv_row.get("Thickness", ""),
@@ -148,21 +200,28 @@ def get_job(job_id: str) -> dict:
                 "CenterX": csv_row.get("CenterX", ""),
                 "CenterY": csv_row.get("CenterY", ""),
                 "CenterZ": csv_row.get("CenterZ", ""),
+                "MassLb": str(mass) if mass != "" else "",
             }
         )
+
+    # User renames, applied last so they win over the role's default label.
+    # role is deliberately NOT touched -- see plate_names.py.
+    overrides = plate_names.get_overrides(job_dir)
+    plate_names.apply_to_rows(rows, overrides)
 
     return {
         "job_id": job_dir.name,
         "display_name": meta.get("display_name", job_dir.name),
         "customer": meta.get("customer", ""),
         "notes": meta.get("notes", ""),
-        "base_type": meta.get("base_type", "standard"),
+        "base_type": base_type,
         "job_analysis": classification.get("job_analysis", {}),
         "parts": rows,
+        "plate_name_overrides": overrides,
         "images": _list_assets(job_dir, "images", IMAGE_EXTS),
         "models": _list_assets(job_dir, "models", MODEL_EXTS),
         "documents": _list_assets(job_dir, "documents", DOC_EXTS),
-        "has_raw_csv": (job_dir / "XT_Export_CAD_Dimensions.csv").exists(),
+        "has_raw_csv": job_housekeeping.job_file_exists(job_dir, "XT_Export_CAD_Dimensions.csv"),
         "has_classification": classification is not None and bool(classification.get("classifications")),
     }
 
@@ -222,6 +281,19 @@ def delete_job(job_id: str) -> dict:
         pass
 
     return {"deleted": True, "job_id": job_id}
+
+
+def job_dir(job_id: str) -> Path | None:
+    """Public, existence-checked accessor. None when the job is not registered.
+
+    `_job_dir` raises on a blank id and does not check existence, so callers
+    outside this module would have to duplicate both checks.
+    """
+    try:
+        d = _job_dir(job_id)
+    except InvalidJobId:
+        return None
+    return d if d.exists() else None
 
 
 def update_meta(job_id: str, **fields) -> None:
@@ -313,12 +385,12 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
             has_quote = False
             has_steel = False
             if is_dir and not quick:
-                has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
+                has_xt = job_housekeeping.job_file_exists(child, "XT_Export_CAD_Dimensions.csv")
                 has_quote = any(child.glob("*quote*.xls*")) or any(child.glob("*Quote*.xls*"))
                 has_steel = any(child.glob("*steel*.xls*")) or any(child.glob("*J000*.xls*"))
             elif is_dir and quick:
                 # Cheap single-file check only (no wildcards)
-                has_xt = (child / "XT_Export_CAD_Dimensions.csv").exists()
+                has_xt = job_housekeeping.job_file_exists(child, "XT_Export_CAD_Dimensions.csv")
             quote_ready = is_dir and (
                 _looks_like_quote_job(child.name) or bool(c_num) or has_xt or has_quote or has_steel
             )
@@ -406,23 +478,33 @@ def _folder_looks_like_bms(folder: Path) -> bool:
 
 
 def _hoist_macro_deliverables(src: Path, job_dir: Path) -> dict:
-    """Copy Module6121 root/base deliverables into images/ and models/.
+    """Copy Module6121 root/base/stl deliverables into images/ and models/.
 
     The macro writes `{base} ISO.jpg`, `{base} BACK ISO.jpg`, and `{base}.stl`
     to the job ROOT (and a copy under base\\). The UI only lists images/ and
     models/, so without this hoist the Quotes page shows No STL / No images.
+
+    It also writes one STL per quoted plate into `stl\\` when
+    EXPORT_PER_PLATE_STLS is on -- `{base}_A Plate.STL`, `{base}_Rails 1.STL`,
+    and so on, all in the same corrected CMS frame as the full-assembly STL.
+    Those are hoisted too, which is what fills the 3D tab's part gallery.
     """
     images = job_dir / "images"
     models = job_dir / "models"
     images.mkdir(exist_ok=True)
     models.mkdir(exist_ok=True)
-    copied = {"images": 0, "models": 0}
+    copied = {"images": 0, "models": 0, "pruned": 0}
 
     search_roots = [src]
     base_sub = src / "base"
     if base_sub.is_dir():
         search_roots.append(base_sub)
+    # Per-plate STLs from ExportPlateStlsForComparison.
+    stl_sub = src / "stl"
+    if stl_sub.is_dir():
+        search_roots.append(stl_sub)
 
+    hoisted_plates = set()
     for root in search_roots:
         for f in root.iterdir():
             if not f.is_file():
@@ -441,7 +523,48 @@ def _hoist_macro_deliverables(src: Path, job_dir: Path) -> dict:
                 if not dest.exists() or dest.stat().st_size != f.stat().st_size:
                     shutil.copy2(f, dest)
                     copied["models"] += 1
+                if root == stl_sub:
+                    hoisted_plates.add(f.name)
+
+    if stl_sub.is_dir():
+        copied["pruned"] = _prune_stale_plate_models(models, hoisted_plates)
     return copied
+
+
+# Names hoisted out of the macro's stl\ folder on the previous import. Kept so a
+# plate that disappears between runs (a re-classify collapsing "Rails 1"/"Rails
+# 2" into one "Rails", say) can be removed from models/ without ever touching an
+# STL the user uploaded by hand -- only files this function put there are
+# candidates for deletion.
+_PLATE_MANIFEST = ".plate_stls.json"
+
+
+def _prune_stale_plate_models(models: Path, current: set) -> int:
+    manifest = models / _PLATE_MANIFEST
+    previous = set()
+    if manifest.exists():
+        try:
+            loaded = json.loads(manifest.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                previous = {str(n) for n in loaded}
+        except Exception:
+            previous = set()
+
+    pruned = 0
+    for name in previous - current:
+        stale = models / name
+        try:
+            if stale.is_file():
+                stale.unlink()
+                pruned += 1
+        except Exception:
+            pass
+
+    try:
+        manifest.write_text(json.dumps(sorted(current), indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return pruned
 
 
 def _is_pot_block_dims(t: float, w: float, l: float, max_fp: float) -> bool:
@@ -471,8 +594,8 @@ def _xt_looks_like_pot_block(job_dir: Path) -> bool:
     Must NEVER fire on a standard mold stack (5+ full-footprint plates).
     Prefer real pot cubes over insulation sheets alone.
     """
-    xt = job_dir / "XT_Export_CAD_Dimensions.csv"
-    if not xt.exists():
+    xt = job_housekeeping.find_job_file(job_dir, "XT_Export_CAD_Dimensions.csv")
+    if xt is None:
         return False
     try:
         with xt.open(newline="", encoding="utf-8-sig") as fh:
@@ -539,7 +662,15 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
         raise FileNotFoundError(f"Folder not found: {folder_path}")
 
     c_num = _extract_c_number(src.name)
-    job_id = c_num or src.name[:40]
+    job_id = (c_num or src.name[:40] or "").strip()
+    if not job_id:
+        # A blank folder_path resolves to "." and would derive an empty job_id,
+        # which used to mean "the registry root". Refuse instead.
+        raise InvalidJobId(
+            f"Could not derive a job id from folder {folder_path!r}. "
+            "Check that the macro sent a real CurrentJobFolder in its "
+            "job-complete POST."
+        )
     job_dir = _job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -561,7 +692,10 @@ def import_from_folder(folder_path: str, run_quote: bool = False) -> dict:
             dest_sub = job_dir / sub
             dest_sub.mkdir(exist_ok=True)
             for f in src_sub.iterdir():
-                if f.is_file():
+                # Skip dotfiles: re-importing a folder that is itself a job
+                # registry would otherwise drag in its .plate_stls.json and
+                # prune this job's plates against a manifest it never wrote.
+                if f.is_file() and not f.name.startswith("."):
                     shutil.copy2(f, dest_sub / f.name)
 
     # Module6121 writes STL + ISO JPGs at job root / base\ — hoist into UI folders.
@@ -766,10 +900,15 @@ def classify_job(job_id: str, mode: str = "rules") -> dict:
     (fast, no LLM required -- this is what runs in this sandbox).
     mode="llm" additionally tries Ollama/Qwen if it is installed and on
     PATH (matches geometry_classifier/qwen_classify_xt_csv.py --long-knowledge).
+    mode="stl" runs the two-pass STL naming: Qwen picks candidate names from the
+    whole CAD export, the exported per-plate meshes for those candidates are
+    measured, and Qwen makes a final call against the real geometry. Slowest and
+    best-evidenced -- it is the only mode that can see a plate's true stack
+    thickness or which face its pockets open on.
     """
     job_dir = _job_dir(job_id)
-    raw_csv = job_dir / "XT_Export_CAD_Dimensions.csv"
-    if not raw_csv.exists():
+    raw_csv = job_housekeeping.find_job_file(job_dir, "XT_Export_CAD_Dimensions.csv")
+    if raw_csv is None:
         raise FileNotFoundError(
             f"No XT_Export_CAD_Dimensions.csv found for job '{job_id}'. "
             "Upload the raw CAD export first."
@@ -780,12 +919,21 @@ def classify_job(job_id: str, mode: str = "rules") -> dict:
         raise FileNotFoundError(f"Classifier script not found at {script}")
 
     args = [sys.executable, str(script), str(raw_csv), "--include-names", "--max-rows", "5000"]
+    # Two LLM passes plus the mesh measurement do not fit in the 10 minutes the
+    # single-pass modes need, and a timeout here loses the whole run.
+    timeout = 600
     if mode == "rules":
         args.append("--rules-only")
+    elif mode == "stl":
+        args += ["--stl-two-pass", "--long-knowledge"]
+        timeout = 5400
     else:
-        args.append("--long-knowledge")
+        # --no-stl keeps this mode byte-identical to what it did before the STL
+        # path existed; the CLI would otherwise pick two-pass up automatically
+        # whenever a job has meshes.
+        args += ["--long-knowledge", "--no-stl"]
 
-    result = subprocess.run(args, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Classifier failed")
 
@@ -798,6 +946,27 @@ def classify_job(job_id: str, mode: str = "rules") -> dict:
         (job_dir / "classification.json").write_bytes(produced_json.read_bytes())
     if produced_csv.exists():
         (job_dir / "classification.csv").write_bytes(produced_csv.read_bytes())
+
+    # Overlay the customer BOM's own plate names where a detail number matches a
+    # CAD component. The classifier reasons from bounding boxes and hole
+    # topology and never sees the BOM, but the BOM usually just says which plate
+    # is which -- "Stationary retainer plate", "Ejector retainer plate" -- and a
+    # matched detail number is a lookup, not a guess. Never fatal: a bad BOM must
+    # not cost us the geometry classification we already have.
+    try:
+        from . import bom_roles
+
+        hints = bom_roles.refresh(job_dir)
+        if hints.get("hints"):
+            data = json.loads((job_dir / "classification.json").read_text(encoding="utf-8"))
+            data = bom_roles.apply_to_classification(job_dir, data)
+            data.setdefault("job_analysis", {}).setdefault("bom_role_hints", {})["bom"] = \
+                hints.get("bom", "")
+            (job_dir / "classification.json").write_text(
+                json.dumps(data, indent=2), encoding="utf-8"
+            )
+    except Exception as e:
+        print(f"[bom_roles] skipped for {job_id}: {type(e).__name__}: {e}")
 
     meta = _read_meta(job_dir)
     meta["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")

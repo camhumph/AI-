@@ -5,12 +5,26 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+# Two-pass STL naming. Imported through a try/except because this file is run both
+# as a script (python geometry_classifier\qwen_classify_xt_csv.py ...) and as a
+# module by the web app, and only the second form has the package on sys.path.
+try:
+    from . import stl_plate_naming as _stl_naming
+except ImportError:  # pragma: no cover - script invocation
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from geometry_classifier import stl_plate_naming as _stl_naming
 
 
 BASE = Path(__file__).resolve().parent
 KNOWLEDGE = BASE / "mold_geometry_knowledge.md"
 VENDOR_KNOWLEDGE = BASE / "vendor_knowledge_sources.md"
+# PCS is what most non-BMS work sits on, and the series (A/B/T/AX/5X/6X) changes
+# the expected stack order -- a T-series has TWO parting lines, so naming keyed on
+# one of them inverts. Loaded alongside the generic vendor notes.
+PCS_KNOWLEDGE = BASE / "pcs_mold_base_reference.md"
 OUT_DIR = BASE / "outputs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -60,6 +74,29 @@ clamp plate as missing rather than forcing a 5-plate pattern.
 Quote-row mapping: ejector-stack and pin-plate rows must never be merged or
 mapped into the a_plate row.
 
+PCS series (most non-BMS work sits on a PCS base). Six series exist: A, B, T,
+AX, 5X, 6X. COUNT THE FULL-FOOTPRINT PLATES between the top clamp plate and the
+B plate before naming anything -- that count identifies the series, and the
+series fixes the stack order:
+  0 extra full plates            -> A-series (or B-series if no support plate)
+  2 extra, above the cavity      -> T-series: X-1 (runner stripper) then X-2
+  1 extra, between AX and BX     -> stripper series (AX / 5X / 6X)
+T-series has TWO parting lines. The FIRST opens between X-1 and X-2 to break the
+part off the gate; the main one opens after. So a single-parting-line assumption
+will invert the naming on a T-series -- anchor on rails and the ejector stack
+(bottom-up) as above, never on "the" parting line.
+X-2 IS the cavity plate: it quotes on the A-plate row, not a row of its own.
+X-1 is a separate plate with its own row.
+A hot-runner base adds a manifold plate and a manifold BACKING plate above the
+A plate. "Manifold Backing Plate" is a backing plate, not the manifold plate.
+
+PCS item numbers are parseable and are strong evidence of plate thickness:
+  <nominal size><series>-<A thk code>-<B thk code>     e.g. 1016A-13-37
+Thickness codes are whole inches plus a trailing 3 (=3/8") or 7 (=7/8"):
+  13 = 1-3/8"   17 = 1-7/8"   23 = 2-3/8"   37 = 3-7/8"   57 = 5-7/8"
+Nominal size is NOT actual: 1016 means 9-7/8 x 16", the width rounded UP to the
+next whole inch. Do not reject a 9.875" plate as not matching a "10" base.
+
 Analyze the whole mold first:
 - Find the stack axis from full-footprint plates.
 - Full-footprint plates have nearly the same width/length as the largest base footprint.
@@ -88,6 +125,12 @@ Analyze the whole mold first:
 
 ROLES = [
     "top_clamp_plate",
+    # A full-footprint plate in the injection half that is NOT the cavity: on a
+    # hot-runner base it carries the manifold and the runner cross-drilling.
+    # Without this role the plate had nowhere to go, so counting plates down from
+    # the top slid a_plate/b_plate/support_plate one position each. See
+    # _detect_ab_by_facing_gap.
+    "manifold_plate",
     "a_plate",
     "b_plate",
     "stripper_plate",
@@ -139,6 +182,36 @@ def read_rows(csv_path, include_names=False):
             "x": safe_float(row.get("CenterX")),
             "y": safe_float(row.get("CenterY")),
             "z": safe_float(row.get("CenterZ")),
+            # B-rep hole signature from Module6121's MeasureHoleSignaturesForPlates.
+            # Absent on jobs exported before that pass existed, so every reader
+            # must treat 0 as "not measured" rather than "measured as none".
+            "nthru": int(safe_float(row.get("NThruHoles"))),
+            "ncbore": int(safe_float(row.get("NCbore"))),
+            "ncross": int(safe_float(row.get("NCrossAxis"))),
+            "maxbore": safe_float(row.get("MaxBoreDia")),
+            "holesig": (row.get("HoleSig") or "").strip(),
+            "npockets": int(safe_float(row.get("NPockets"))),
+            "pocketarea": safe_float(row.get("PocketAreaIn2")),
+            "pocketdepth": safe_float(row.get("MaxPocketDepth")),
+            # The same pockets split by which face they were cut from, along the
+            # part's thickness axis. "up" = the +axis face, "dn" = the -axis face,
+            # and the axis is always a POSITIVE unit vector, so for a plate lying
+            # flat in the stack "up" is the face toward the plate above it.
+            #
+            # This is what identifies the A/B pair: the cavity and the core open
+            # toward each other across the parting line, so the A plate has a big
+            # recess on its DOWN face and the B plate a big recess on its UP face.
+            # No other adjacent pair in a mold base has large openings facing one
+            # another -- that gap is where the moulded part sits.
+            "pocketarea_up": safe_float(row.get("PocketAreaUpIn2")),
+            "pocketarea_dn": safe_float(row.get("PocketAreaDnIn2")),
+            "pocketdepth_up": safe_float(row.get("PocketDepthUp")),
+            "pocketdepth_dn": safe_float(row.get("PocketDepthDn")),
+            # Solid volume as a % of the bounding box. The single strongest cheap
+            # plate discriminator measured so far: clamp plates and rails land
+            # ~92-95%, an A plate with a cavity ~74%, a deeply cored B plate ~50%.
+            # 0 means "not measured" (older export, or a part the pass skipped).
+            "fillpct": safe_float(row.get("SolidFillPct")),
         }
         if include_names:
             item["name"] = row.get("Component", "")[:80]
@@ -149,7 +222,12 @@ def read_rows(csv_path, include_names=False):
 def build_prompt(rows, csv_path, long_knowledge=False):
     if long_knowledge:
         knowledge = KNOWLEDGE.read_text(encoding="utf-8")
-        vendor_knowledge = VENDOR_KNOWLEDGE.read_text(encoding="utf-8") if VENDOR_KNOWLEDGE.exists() else ""
+        parts = []
+        if VENDOR_KNOWLEDGE.exists():
+            parts.append(VENDOR_KNOWLEDGE.read_text(encoding="utf-8"))
+        if PCS_KNOWLEDGE.exists():
+            parts.append(PCS_KNOWLEDGE.read_text(encoding="utf-8"))
+        vendor_knowledge = "\n\n".join(parts)
     else:
         knowledge = SHORT_RULES
         vendor_knowledge = ""
@@ -206,6 +284,17 @@ Rows:
 
 
 def extract_json(text):
+    # Try the text exactly as it came first. When the request went through the
+    # HTTP API with a schema, the response IS the JSON object, and the salvage
+    # rules below would only put it at risk -- the backtick strip in particular
+    # would eat the contents of any reason string that happens to contain one.
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            return json.loads(stripped)
+        except ValueError:
+            pass  # genuinely malformed; fall through to the salvage path
+
     # Ollama/Qwen can emit terminal control characters or thinking text. Strip
     # those first, then extract the first JSON object.
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
@@ -370,6 +459,102 @@ def looks_like_pot_block_geometry(rows) -> bool:
     )
 
 
+# A recess has to be this deep, and this much of the plate footprint, before it
+# counts as a mold opening rather than a screw seat or a relief cut.
+AB_GAP_MIN_DEPTH_IN = 0.10
+AB_GAP_MIN_AREA_FRAC = 0.04
+
+
+def _detect_ab_by_facing_gap(full_plates, notes=None):
+    """Find the A/B pair by the opposed recesses that form the mold cavity.
+
+    `full_plates` must already be sorted top-to-bottom along the stack axis.
+    Returns (index_of_upper_plate, evidence_text) where the index is into
+    `full_plates` and identifies the A plate, or None when the geometry does not
+    show a facing gap -- an unmeasured job, or a base whose cavity lives in
+    separate inserts rather than in the plates.
+
+    Deliberately conservative: returning None falls back to positional naming,
+    which is what shipped before, so a job this cannot read is no worse off.
+    """
+    if len(full_plates) < 2:
+        return None
+
+    best = None
+    best_score = 0.0
+    for k in range(len(full_plates) - 1):
+        upper = full_plates[k]
+        lower = full_plates[k + 1]
+
+        # The A plate's cavity opens DOWN, toward the B plate below it.
+        # The B plate's core opens UP, toward the A plate above it.
+        up_area = upper.get("pocketarea_dn", 0.0)
+        up_deep = upper.get("pocketdepth_dn", 0.0)
+        lo_area = lower.get("pocketarea_up", 0.0)
+        lo_deep = lower.get("pocketdepth_up", 0.0)
+
+        # Both sides must clear the gates. min() is the whole test: one hollow
+        # plate beside a solid one is not a mold gap.
+        if min(up_deep, lo_deep) < AB_GAP_MIN_DEPTH_IN:
+            continue
+        gate_u = max(1.0, upper["w"] * upper["l"] * AB_GAP_MIN_AREA_FRAC)
+        gate_l = max(1.0, lower["w"] * lower["l"] * AB_GAP_MIN_AREA_FRAC)
+        if up_area < gate_u or lo_area < gate_l:
+            continue
+
+        score = min(up_area, lo_area) * min(up_deep, lo_deep)
+        if score > best_score:
+            best_score = score
+            best = k
+
+    if best is None:
+        return None
+
+    a_row = full_plates[best]
+    b_row = full_plates[best + 1]
+    evidence = (
+        "A/B pair identified by the opposed pocket faces that form the mold gap: "
+        f"idx {a_row['i']} opens downward ({a_row.get('pocketarea_dn', 0.0):.1f} in2, "
+        f"{a_row.get('pocketdepth_dn', 0.0):.3f} deep) onto "
+        f"idx {b_row['i']} opening upward ({b_row.get('pocketarea_up', 0.0):.1f} in2, "
+        f"{b_row.get('pocketdepth_up', 0.0):.3f} deep)."
+    )
+    return best, evidence
+
+
+def _stack_names_around_ab(full_plates, a_at, top_clamp_present):
+    """Name the whole full-footprint stack outward from a known A/B pair.
+
+    Above the A plate: the topmost plate is the top clamp, and anything between it
+    and the A plate is a manifold plate -- a full-footprint plate in the injection
+    half that is not the cavity. Below the B plate: support plate(s), with the
+    lowest being the bottom clamp.
+    """
+    n = len(full_plates)
+    names = [None] * n
+
+    names[a_at] = "a_plate"
+    names[a_at + 1] = "b_plate"
+
+    # --- above the A plate ---
+    if a_at > 0:
+        start = 0
+        if top_clamp_present:
+            names[0] = "top_clamp_plate"
+            start = 1
+        for k in range(start, a_at):
+            names[k] = "manifold_plate"
+
+    # --- below the B plate ---
+    below = list(range(a_at + 2, n))
+    if below:
+        names[below[-1]] = "bottom_clamp_plate"
+        for k in below[:-1]:
+            names[k] = "support_plate"
+
+    return [nm if nm else "full_footprint_plate" for nm in names]
+
+
 def classify_geometry(rows):
     """Rule-based fallback for when the LLM does not return valid JSON."""
     if not rows:
@@ -422,26 +607,83 @@ def classify_geometry(rows):
         stack_axis = {"x": "CenterX", "y": "CenterY", "z": "CenterZ"}[stack_axis_key]
 
     full_plates.sort(key=lambda r: r[stack_axis_key], reverse=True)
-    if len(full_plates) >= 5:
+    n_full = len(full_plates)
+
+    # ── A/B by the gap that faces itself ────────────────────────────────────────
+    #
+    # Position alone cannot find the A and B plates, and on C17267 it got them
+    # wrong. That base is a hot-runner base: TCP / MANIFOLD / A / B, so counting
+    # down from the top put a_plate on the manifold plate, b_plate on the A plate,
+    # and pushed the real B plate into support_plate. Four names, one shift, all
+    # wrong -- and no amount of stack ordering fixes it, because the manifold plate
+    # is a full-footprint plate of the same size sitting in the same place.
+    #
+    # What separates them is what the plates are FOR. The moulded part sits in the
+    # gap between the cavity and the core, so the A plate is hollowed out on the
+    # face pointing down and the B plate on the face pointing up, and those two
+    # recesses face each other across the parting line. Nothing else in a mold base
+    # does that: a manifold plate is drilled through but not hollowed, and clamp,
+    # support and rail plates carry no opposed pair of pockets at all.
+    #
+    # So: walk adjacent pairs and score each on the smaller of the two facing
+    # openings. Taking the SMALLER is the whole point -- it demands a real recess
+    # on BOTH sides, which one deeply pocketed plate next to a flat one cannot fake.
+    ab_hit = _detect_ab_by_facing_gap(full_plates)
+    ab_pair, ab_evidence = ab_hit if ab_hit else (None, "")
+
+    if n_full >= 4:
         inner = full_plates[1:-1]
         avg_inner_t = sum(r["t"] for r in inner) / len(inner) if inner else 0.0
         top_clamp_present = True
         if avg_inner_t > 0 and full_plates[0]["t"] > avg_inner_t * 1.35:
             top_clamp_present = False
 
-        if top_clamp_present:
+        # FOUR full plates is the most common standard/PCS layout there is:
+        # Top Clamp / A / B / Bottom Clamp, with the ejector stack and rails
+        # below it. It used to fall through to the generic branch below, which
+        # assigns no stack role at all -- so on a plain 4-plate base the AI named
+        # nothing, and the bottom clamp plate ended up in "Other Hardware".
+        #
+        # Deliberately matches Module6121's StdFullPlateName Case 4, so the AI
+        # bridge and the macro's own geometry fallback cannot disagree about the
+        # same stack.
+        if ab_pair is not None and top_clamp_present:
+            # Geometry found the mold gap, so build the stack AROUND it instead of
+            # counting positions from the top. Everything above the A plate is
+            # clamp/manifold, everything below the B plate is support/clamp.
+            #
+            # Only on the top-clamp-present layout. The `top_clamp_present == False`
+            # branch below is this code's stripper-plate signature, and a stripper
+            # plate sits BETWEEN the A and B plates -- so A and B are not adjacent
+            # there and the facing-gap pair would be A/stripper. That layout has no
+            # ground truth behind it yet, so leave it exactly as it was.
+            stack_names = _stack_names_around_ab(full_plates, ab_pair, top_clamp_present)
+        elif n_full == 4:
+            stack_names = (
+                ["top_clamp_plate", "a_plate", "b_plate", "bottom_clamp_plate"]
+                if top_clamp_present
+                else ["a_plate", "b_plate", "support_plate", "bottom_clamp_plate"]
+            )
+        elif top_clamp_present:
             stack_names = ["top_clamp_plate", "a_plate", "b_plate", "support_plate", "bottom_clamp_plate"]
         else:
             stack_names = ["a_plate", "stripper_plate", "b_plate", "support_plate", "bottom_clamp_plate"]
+        if ab_pair is not None and top_clamp_present:
+            base_reason = (
+                "Full-footprint plate, named outward from the A/B pair that "
+                "geometry found. " + ab_evidence
+            )
+        elif top_clamp_present:
+            base_reason = "Full-footprint plate, assigned by top-to-bottom mold stack order."
+        else:
+            base_reason = (
+                "Full-footprint plate, assigned by top-to-bottom mold stack order. "
+                "Top clamp missing."
+            )
         for name, row in zip(stack_names, full_plates):
             idx = str(row["i"])
             if idx not in roles:
-                roles[idx] = (
-                    name,
-                    "HIGH",
-                    "Full-footprint plate, assigned by top-to-bottom mold stack order. Top clamp missing." if not top_clamp_present else "Full-footprint plate, assigned by top-to-bottom mold stack order.",
-                    True,
-                )
+                roles[idx] = (name, "HIGH", base_reason, True)
     else:
         for row in full_plates:
             idx = str(row["i"])
@@ -449,7 +691,7 @@ def classify_geometry(rows):
                 roles[idx] = (
                     "full_footprint_plate",
                     "MEDIUM",
-                    "Full-footprint plate, but fewer than 5 full plates were found so standard stack role was not forced.",
+                    "Full-footprint plate, but fewer than 4 full plates were found so standard stack role was not forced.",
                     True,
                 )
 
@@ -571,7 +813,25 @@ def classify_geometry(rows):
         side_offset = max(abs(row[axis]) for axis in side_coords)
         centered_side = side_offset <= max_w * 0.15
         side_block = side_offset >= max_w * 0.25
-        narrow_width = max_w * 0.18 <= row["w"] <= max_w * 0.72
+        # Rail width.
+        #
+        # The lower bound used to be a pure fraction of the base width
+        # (max_w * 0.18), which silently rejects narrow rails on wide bases:
+        # C17267's rails are 4.000" wide against a 23.750" base, and
+        # 0.18 * 23.750 = 4.275 -- so they missed by 0.275" and fell through to
+        # hardware_other/LOW, which cost the job its Rails quote row AND its
+        # Rails STL. A rail is defined by being long, narrow, thick enough to
+        # be structural, and offset to one side; its width does not scale with
+        # the base the way the lower bound assumed.
+        #
+        # So: keep a fractional UPPER bound (a rail is never most of the base),
+        # but make the lower bound an absolute structural minimum.
+        RAIL_MIN_WIDTH_IN = 1.5
+        narrow_width = (
+            row["w"] >= RAIL_MIN_WIDTH_IN
+            and row["w"] <= max_w * 0.72
+            and row["l"] >= row["w"] * 2.25   # genuinely slender, not a block
+        )
         ejector_width = max_w * 0.58 <= row["w"] <= max_w * 0.86
 
         axis_pos = row[stack_axis_key]
@@ -588,6 +848,74 @@ def classify_geometry(rows):
             roles[idx] = ("hardware_other", "LOW", "Inside mold stack but not enough geometry to name confidently.", False)
         else:
             roles[idx] = ("ignore", "LOW", "Outside main standard-base classification rules.", False)
+
+    # ------------------------------------------------------------------
+    # Ejector Retainer vs Back-Up, decided by COUNTERBORE instead of thickness.
+    #
+    # The rule above splits the pair on "thinner = retainer". That is a shop
+    # convention, not a measurement, and on a base where the two plates share a
+    # footprint (C18522: both 8.375 x 19.985, differing only 0.518" vs 1.125")
+    # thickness is the only thing separating them. The physical difference is that
+    # the RETAINER plate is counterbored to seat the ejector pin heads and the
+    # BACK-UP plate has plain through-holes. Module6121's B-rep pass measures that
+    # directly, so where the holes disagree with thickness, believe the holes.
+    #
+    # Guards, in order of how badly each would bite:
+    #   * needs a real hole signature on both plates -- the NCbore column is absent
+    #     on jobs exported before the pass existed, and 0 there means "not
+    #     measured", not "measured as none"
+    #   * needs a decisive margin, not a 1-hole edge, so facet noise cannot flip it
+    #   * never overrides a strong shop token: EJ-RET-PLATE in the CAD name wins
+    # ------------------------------------------------------------------
+    rules_note_holes = ""
+    ej_pair = [
+        r for r in rows
+        if roles.get(str(r["i"]), ("",))[0] in {"ejector_plate", "bottom_ejector_plate"}
+    ]
+    if len(ej_pair) == 2 and all(r.get("holesig") for r in ej_pair):
+        seated, plain = sorted(ej_pair, key=lambda r: r.get("ncbore", 0), reverse=True)
+        n_seated = seated.get("ncbore", 0)
+        n_plain = plain.get("ncbore", 0)
+        # Decisive: at least 4 seats (a real ejector pattern) and at least double
+        # the other plate, so a stray counterbore for a socket screw cannot decide it.
+        if n_seated >= 4 and n_seated >= max(2 * n_plain, n_plain + 3):
+            by_thickness = {
+                str(r["i"]): roles.get(str(r["i"]), ("",))[0] for r in ej_pair
+            }
+            _set_role_if_unlocked(
+                roles,
+                str(seated["i"]),
+                "ejector_plate",
+                "HIGH",
+                f"Counterbored ejector-pin seats measured from the solid "
+                f"({n_seated} vs {n_plain} on the paired plate): this is the plate the "
+                f"pin heads sit in. CMS naming: Ejector Plate.",
+                True,
+            )
+            _set_role_if_unlocked(
+                roles,
+                str(plain["i"]),
+                "bottom_ejector_plate",
+                "HIGH",
+                f"Paired ejector-stack plate with plain through-holes "
+                f"({n_plain} counterbores vs {n_seated}): backing plate behind the "
+                f"retainer. CMS naming: Bottom Ejector Plate.",
+                True,
+            )
+            flipped = [
+                i for i, old in by_thickness.items()
+                if old != roles.get(i, ("",))[0]
+            ]
+            if flipped:
+                rules_note_holes = (
+                    "Ejector-stack pair was re-assigned from measured counterbores "
+                    "rather than relative thickness."
+                )
+            else:
+                rules_note_holes = (
+                    "Ejector-stack pair confirmed by measured counterbores; agrees "
+                    "with the thickness rule."
+                )
 
     leader_rows = [r for r in rows if roles.get(str(r["i"]), ("",))[0] == "leader_pin"]
     shoulder_bushings = [r for r in rows if roles.get(str(r["i"]), ("",))[0] == "leader_pin_bushing"]
@@ -668,6 +996,10 @@ def classify_geometry(rows):
         "Round guide hardware was separated by diameter and length.",
         "Exact shop-name tokens (A-PLATE, B-PLATE, SC-RETAINER, SC-BACKUP, EJ-RET, EJ-BACKUP, RAIL, LDR-PIN, LBB) were treated as strong anchors and applied before geometry-only rules.",
     ]
+    # Only stated when hole evidence was actually available and decisive, so the
+    # rules list never claims a measurement the export did not carry.
+    if rules_note_holes:
+        rules_for_this_job.append(rules_note_holes)
     if has_latch_lock:
         parting = (
             "Primary parting line between a_plate and b_plate from the full-footprint stack order. "
@@ -690,6 +1022,109 @@ def classify_geometry(rows):
         },
         "classifications": classifications,
     }
+
+
+OLLAMA_URL = "http://127.0.0.1:11434"
+
+
+def _classification_schema(roles):
+    """A JSON schema Ollama enforces during generation.
+
+    Worth doing rather than validating after the fact, because it removes two
+    whole failure modes instead of reporting them: the model cannot invent a role
+    outside the list (qwen3:8b offered "support_beam" on its first C17880 run),
+    and it cannot wrap the answer in prose that then has to be salvaged.
+    """
+    return {
+        "type": "object",
+        "required": ["job_analysis", "classifications"],
+        "properties": {
+            "job_analysis": {
+                "type": "object",
+                "properties": {
+                    "stack_axis": {"type": "string"},
+                    "parting_line": {"type": "string"},
+                    "rules_for_this_job": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "classifications": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["index", "role", "confidence", "reason"],
+                    "properties": {
+                        "index": {"type": "string"},
+                        "role": {"type": "string", "enum": list(roles)},
+                        "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                        "reason": {"type": "string"},
+                        "quote": {"type": "boolean"},
+                        "measure": {"type": "boolean"},
+                        "changed_from_first_pass": {"type": "boolean"},
+                    },
+                },
+            },
+            "hardware_corrections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["index", "role", "reason"],
+                    "properties": {
+                        "index": {"type": "string"},
+                        "role": {"type": "string", "enum": list(roles)},
+                        "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM", "LOW"]},
+                        "reason": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+
+
+def run_ollama_api(prompt, model, timeout_minutes, schema=None):
+    """Generate through Ollama's HTTP API.
+
+    Preferred over shelling out to `ollama run`, which renders a live streaming
+    display and leaves ANSI cursor-movement escapes (\\x1b[1D\\x1b[K) spliced
+    through the text -- mid-word, so they corrupt JSON string contents. The API
+    returns the completion and nothing else.
+
+    Uses urllib rather than requests: the backend's requirements.txt does not
+    carry requests, and this has to run on the shop PC unchanged.
+    """
+    import urllib.error
+    import urllib.request
+
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        # qwen3 reasons by default and its thinking block is not valid JSON.
+        # /no_think in the prompt is advisory; this is not.
+        "think": False,
+        "options": {"temperature": 0.1, "num_ctx": 32768},
+    }
+    if schema:
+        body["format"] = schema
+
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/generate",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    timeout = timeout_minutes * 60 if timeout_minutes > 0 else None
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    return payload.get("response", "")
+
+
+def ollama_api_available():
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3) as r:
+            return r.status == 200
+    except Exception:
+        return False
 
 
 def run_ollama(prompt, model, timeout_minutes):
@@ -794,6 +1229,179 @@ def write_outputs(data, csv_path):
     return out_json, out_csv, out_review
 
 
+def _ask_qwen_json(prompt, model, timeout_minutes, label, fallback=None, schema=None):
+    """Run one Qwen pass and parse its JSON, falling back rather than dying.
+
+    A pass that cannot be parsed saves its raw output for inspection and returns
+    ``fallback``, so a bad answer from one pass never costs the whole run.
+    """
+    print(f"[{label}] prompt {len(prompt):,} chars; sending to {model} ...", flush=True)
+    started = time.time()
+    if ollama_api_available():
+        raw = run_ollama_api(prompt, model, timeout_minutes, schema=schema)
+    else:
+        print(f"[{label}] Ollama HTTP API not reachable; falling back to the CLI.", flush=True)
+        raw = run_ollama(prompt, model, timeout_minutes)
+    print(f"[{label}] {len(raw):,} chars back in {time.time() - started:.0f}s.", flush=True)
+    try:
+        return extract_json(raw), True
+    except Exception:
+        debug = OUT_DIR / f"last_bad_qwen_output_{label}.txt"
+        debug.write_text(raw, encoding="utf-8", errors="replace")
+        print(f"[{label}] could not parse JSON. Raw output saved to {debug}", flush=True)
+        return (fallback if fallback is not None else {"classifications": []}), False
+
+
+def run_stl_two_pass(
+    csv_path,
+    model_name,
+    timeout_minutes,
+    stl_dir=None,
+    cell_in=None,
+    verbose=True,
+):
+    """Name every part in three steps: candidates, measure, final call.
+
+    1. Qwen reads the whole CAD dimension export -- sizes, stack positions, steel
+       weight, stack order -- and proposes a candidate name per part, flagging
+       which parts are worth measuring.
+    2. The exported STL triangle meshes for those candidates are read and
+       measured: true stack thickness, pockets per face, through-holes,
+       counterbores, cross-drilling.
+    3. Qwen sees its own candidate next to those measurements and gives the final
+       name, expected to overrule itself wherever the mesh disagrees.
+
+    The deterministic geometry rules still run first and are kept as the safety
+    net: anything a pass leaves unclassified is patched from them, so the output
+    always covers every part in the CSV.
+    """
+    csv_path = str(csv_path)
+    kwargs = {}
+    if cell_in:
+        kwargs["cell_in"] = cell_in
+
+    rows = _stl_naming.load_cad_rows(csv_path)
+    stack = _stl_naming.build_stack_model(rows, job=Path(csv_path).resolve().parent.name)
+    if verbose:
+        print(
+            f"Loaded {len(stack.parts)} parts; {len(stack.in_stack_parts())} look structural. "
+            f"Mold footprint {stack.footprint_w:.3f} x {stack.footprint_l:.3f} in."
+            + (
+                f" Ejector box spans {stack.ejector_box[0]:.3f}..{stack.ejector_box[1]:.3f}."
+                if stack.ejector_box
+                else ""
+            ),
+            flush=True,
+        )
+
+    # Deterministic safety net, and the source of sequenced_latch_lock_base, which
+    # the VBA bridge reads to mark secondary parting lines.
+    rules = classify_geometry(read_rows(csv_path, include_names=True))
+
+    # The model is asked about the structural parts only. The rules already
+    # separate the 127 fasteners in a job like C17880 reliably, and spending the
+    # generation on them crowds out the ten plates that are the actual problem.
+    expect = {p.index for p in _stl_naming.structural_parts(stack)}
+
+    # ---- pass 1: candidates from the CSV ---------------------------------
+    p1_prompt = _stl_naming.build_candidate_prompt(stack, csv_path, ROLES, rules=rules)
+    p1, ok1 = _ask_qwen_json(
+        p1_prompt, model_name, timeout_minutes, "pass1", rules,
+        schema=_classification_schema(ROLES),
+    )
+    p1, problems1 = _stl_naming.validate_classifications(p1, stack, ROLES, expect=expect)
+    patched1 = _stl_naming.fill_missing(p1, rules, stack, "geometry rules, not named in pass 1")
+    _stl_naming.apply_candidates(stack, p1)
+    if verbose:
+        for prob in problems1:
+            print(f"  pass1 issue: {prob}", flush=True)
+        if patched1:
+            print(f"  pass1: {patched1} parts patched from the geometry rules.", flush=True)
+
+    # ---- measure the candidates ------------------------------------------
+    wanted = _stl_naming.candidates_to_measure(stack, p1)
+    if verbose:
+        print(f"Measuring STL geometry for {len(wanted)} candidate parts ...", flush=True)
+    measure = _stl_naming.measure_candidates(
+        stack, wanted, stl_dir=stl_dir, csv_path=csv_path, verbose=verbose, **kwargs
+    )
+
+    provenance = {
+        "naming_method": "stl_two_pass",
+        "pass1_parsed": ok1,
+        "pass1_problems": problems1,
+        "stl_dir": measure.get("stl_dir", ""),
+        "stl_files": measure.get("files", 0),
+        "stl_matched_to_cad": measure.get("matched", 0),
+        "parts_measured_from_mesh": measure.get("measured", 0),
+        "candidates_without_mesh": measure.get("wanted_without_mesh", []),
+        "measure_notes": measure.get("notes", []),
+    }
+
+    if not measure.get("measured"):
+        # No mesh to add, so a second pass would see exactly what the first saw.
+        if verbose:
+            print(
+                "No candidate part had an exported STL, so the final pass was skipped "
+                "and the first pass stands.",
+                flush=True,
+            )
+        p1.setdefault("job_analysis", {}).update(provenance)
+        p1["job_analysis"]["naming_method"] = "csv_only_no_stl"
+        p1["job_analysis"].setdefault(
+            "sequenced_latch_lock_base",
+            rules.get("job_analysis", {}).get("sequenced_latch_lock_base", False),
+        )
+        return p1
+
+    # ---- pass 2: final call from the mesh --------------------------------
+    # The mesh can move a part in or out of the stack (a measured thickness changes
+    # its plan area and its gaps), so the expected set is recomputed rather than
+    # reused from pass 1.
+    expect = {p.index for p in _stl_naming.structural_parts(stack)}
+    p2_prompt = _stl_naming.build_final_prompt(
+        stack, csv_path, ROLES, first_pass=p1, rules=rules
+    )
+    p2, ok2 = _ask_qwen_json(
+        p2_prompt, model_name, timeout_minutes, "pass2", p1,
+        schema=_classification_schema(ROLES),
+    )
+    p2, problems2 = _stl_naming.validate_classifications(p2, stack, ROLES, expect=expect)
+    patched2 = _stl_naming.fill_missing(p2, p1, stack, "pass 1, not revised in pass 2")
+    changes = _stl_naming.diff_passes(stack, p2)
+
+    if verbose:
+        for prob in problems2:
+            print(f"  pass2 issue: {prob}", flush=True)
+        if patched2:
+            print(f"  pass2: {patched2} parts carried over from pass 1.", flush=True)
+        if changes:
+            print(f"\nThe mesh changed {len(changes)} names:", flush=True)
+            for c in changes:
+                flag = "measured" if c["measured"] else "cad only"
+                print(
+                    f"  index {c['index']:>3} {c['name'][:34]:34s} "
+                    f"{c['from']} -> {c['to']}  ({flag})",
+                    flush=True,
+                )
+        else:
+            print("\nThe mesh confirmed every name from the first pass.", flush=True)
+
+    provenance.update(
+        {
+            "pass2_parsed": ok2,
+            "pass2_problems": problems2,
+            "changed_by_mesh": changes,
+        }
+    )
+    p2.setdefault("job_analysis", {}).update(provenance)
+    p2["job_analysis"].setdefault(
+        "sequenced_latch_lock_base",
+        rules.get("job_analysis", {}).get("sequenced_latch_lock_base", False),
+    )
+    return p2
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("csv_path", help="Path to XT_Export_CAD_Dimensions.csv")
@@ -803,6 +1411,25 @@ def main():
     parser.add_argument("--include-names", action="store_true", help="include shortened component names in the prompt")
     parser.add_argument("--long-knowledge", action="store_true", help="include full knowledge files instead of compact rules")
     parser.add_argument("--rules-only", action="store_true", help="skip Qwen/Ollama and use deterministic geometry rules only")
+    parser.add_argument(
+        "--stl-two-pass",
+        action="store_true",
+        help="candidates from the CSV, then measure the STL meshes, then a final "
+        "naming pass. On by default when the job has a stl\\ folder.",
+    )
+    parser.add_argument(
+        "--no-stl",
+        action="store_true",
+        help="force the old single-pass CSV-only prompt even if STL meshes exist",
+    )
+    parser.add_argument("--stl-dir", default="", help="per-plate STL folder (default: auto-detect)")
+    parser.add_argument(
+        "--stl-cell-in",
+        type=float,
+        default=0.0,
+        help="mesh rasterisation cell size in inches (default 0.05; smaller finds "
+        "smaller holes and runs slower)",
+    )
     args = parser.parse_args()
 
     rows = read_rows(args.csv_path, include_names=args.include_names)
@@ -811,9 +1438,27 @@ def main():
         print(f"Limiting to first {args.max_rows} rows for this run.", flush=True)
         rows = rows[: args.max_rows]
 
+    # Two-pass is the default whenever the job actually has meshes to read: it is
+    # strictly more evidence than the CSV alone, and it degrades to the first pass
+    # on its own when nothing was measurable.
+    stl_dir = args.stl_dir or None
+    auto_stl = (
+        not args.rules_only
+        and not args.no_stl
+        and _stl_naming.find_stl_dir(args.csv_path, stl_dir) is not None
+    )
+
     if args.rules_only:
         print("Rules-only mode: skipping Qwen/Ollama.", flush=True)
         data = classify_geometry(rows)
+    elif args.stl_two_pass or auto_stl:
+        data = run_stl_two_pass(
+            args.csv_path,
+            args.model,
+            args.timeout_minutes,
+            stl_dir=stl_dir,
+            cell_in=args.stl_cell_in or None,
+        )
     else:
         prompt = build_prompt(rows, args.csv_path, long_knowledge=args.long_knowledge)
         print(f"Prompt size: {len(prompt):,} characters", flush=True)
