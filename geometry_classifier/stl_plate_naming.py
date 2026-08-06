@@ -240,6 +240,29 @@ class StackPart:
     is_rail_like: bool = False
     mirror_twins: list[str] = field(default_factory=list)
 
+    # Which CSV centre column is "up the stack" for this job. Set by
+    # build_stack_model from detect_stack_axis; never assumed.
+    stack_axis_field: str = "center_z"
+
+    @property
+    def stack_pos(self) -> float:
+        """Position up the stack.
+
+        NOT always CenterZ. C18184 is a 5-plate base stacked along **Y** with
+        CenterZ 0.000 on every plate -- reading Z there put all five plates on
+        one level and the stack model produced nothing usable.
+        """
+        return getattr(self, self.stack_axis_field, self.center_z)
+
+    @property
+    def plane_pos(self) -> tuple[float, float]:
+        """The two in-plane centre coordinates, for mirror-twin detection."""
+        return tuple(
+            getattr(self, f)
+            for f in ("center_x", "center_y", "center_z")
+            if f != self.stack_axis_field
+        )
+
     @property
     def thickness(self) -> float:
         """Stack height, best available. The mesh wins outright; failing that an
@@ -272,17 +295,19 @@ class StackPart:
 
     @property
     def stack_top(self) -> float:
-        return self.center_z + self.thickness / 2.0
+        return self.stack_pos + self.thickness / 2.0
 
     @property
     def stack_bottom(self) -> float:
-        return self.center_z - self.thickness / 2.0
+        return self.stack_pos - self.thickness / 2.0
 
 
 @dataclass
 class StackModel:
     job: str = ""
     parts: list[StackPart] = field(default_factory=list)
+    # "center_x" | "center_y" | "center_z"; see detect_stack_axis_field.
+    stack_axis_field: str = "center_z"
     max_plan_area: float = 0.0
     footprint_w: float = 0.0
     footprint_l: float = 0.0
@@ -294,7 +319,7 @@ class StackModel:
         return {p.index: p for p in self.parts}
 
     def in_stack_parts(self) -> list[StackPart]:
-        return sorted((p for p in self.parts if p.in_stack), key=lambda p: -p.center_z)
+        return sorted((p for p in self.parts if p.in_stack), key=lambda p: -p.stack_pos)
 
 
 def build_stack_model(rows: list[dict], job: str = "") -> StackModel:
@@ -329,6 +354,37 @@ def build_stack_model(rows: list[dict], job: str = "") -> StackModel:
     return m
 
 
+def detect_stack_axis_field(parts: list[StackPart]) -> str:
+    """Which CSV centre column runs up the stack. Measured, never assumed.
+
+    Plates share the mold footprint, so in the two in-plane axes every plate sits
+    at essentially the same centre; only along the stack axis do their centres
+    spread out. The axis with the widest spread of plate centres is the stack.
+
+    C18184 is why this exists: a five-plate base stacked along **Y**, with
+    ``CenterZ`` 0.000 on all five. Assuming Z there collapsed the whole stack onto
+    one level. The deterministic rules in qwen_classify_xt_csv already detect this
+    (they reported "CenterY" for that job); this brings the STL path in line.
+
+    Preference is measured among the biggest plates when there are enough of
+    them, because hardware scattered around the mold spreads on every axis and
+    would blur the signal.
+    """
+    if not parts:
+        return "center_z"
+    biggest = max((p.plan_area for p in parts), default=0.0)
+    plates = [p for p in parts if biggest > 0 and p.plan_area >= 0.9 * biggest]
+    sample = plates if len(plates) >= 2 else parts
+    spreads = {}
+    for f in ("center_x", "center_y", "center_z"):
+        vals = [getattr(p, f) for p in sample]
+        spreads[f] = max(vals) - min(vals)
+    best = max(spreads, key=lambda f: spreads[f])
+    # A stack with no spread at all (one plate) tells us nothing; keep the
+    # conventional Z rather than picking an axis on floating-point noise.
+    return best if spreads[best] > 1e-6 else "center_z"
+
+
 def _stack_levels(parts: list[StackPart], tol: float = 0.02) -> list[list[StackPart]]:
     """Group parts into stack levels, highest first.
 
@@ -337,8 +393,8 @@ def _stack_levels(parts: list[StackPart], tol: float = 0.02) -> list[list[StackP
     negative "gaps" between C17879's twinned ejector plates.
     """
     levels: list[list[StackPart]] = []
-    for p in sorted(parts, key=lambda x: -x.center_z):
-        if levels and abs(levels[-1][0].center_z - p.center_z) <= tol:
+    for p in sorted(parts, key=lambda x: -x.stack_pos):
+        if levels and abs(levels[-1][0].stack_pos - p.stack_pos) <= tol:
             levels[-1].append(p)
         else:
             levels.append([p])
@@ -392,6 +448,13 @@ def refresh_derived(m: StackModel) -> None:
             p.plan_area = dims[1] * dims[2]
     m.max_plan_area = max((p.plan_area for p in m.parts), default=0.0)
 
+    # Settle the stack axis before anything reads a position off a part. Plan
+    # areas are needed first (the detector prefers the big plates), and every
+    # ordering, gap and ejector-box test below goes through StackPart.stack_pos.
+    m.stack_axis_field = detect_stack_axis_field(m.parts)
+    for p in m.parts:
+        p.stack_axis_field = m.stack_axis_field
+
     biggest = max(m.parts, key=lambda p: p.plan_area, default=None)
     if biggest is not None:
         if biggest.stl is not None:
@@ -417,7 +480,7 @@ def refresh_derived(m: StackModel) -> None:
         p.mirror_twins = []
     for i, a in enumerate(m.parts):
         for b in m.parts[i + 1 :]:
-            if abs(a.center_z - b.center_z) > 0.02:
+            if abs(a.stack_pos - b.stack_pos) > 0.02:
                 continue
             if (
                 abs(a.csv_thickness - b.csv_thickness) > DIM_TOL_IN
@@ -425,11 +488,11 @@ def refresh_derived(m: StackModel) -> None:
                 or abs(a.csv_length - b.csv_length) > DIM_TOL_IN
             ):
                 continue
-            if (
-                abs(a.center_x + b.center_x) < 0.05
-                or abs(a.center_x - b.center_x) < 0.05
-                or abs(a.center_y + b.center_y) < 0.05
-                or abs(a.center_y - b.center_y) < 0.05
+            # Mirrored across a centreline in one of the two IN-PLANE axes,
+            # which depend on where the stack runs -- not always X and Y.
+            ap, bp = a.plane_pos, b.plane_pos
+            if any(
+                abs(u + v) < 0.05 or abs(u - v) < 0.05 for u, v in zip(ap, bp)
             ):
                 a.mirror_twins.append(b.index)
                 b.mirror_twins.append(a.index)
@@ -445,8 +508,8 @@ def refresh_derived(m: StackModel) -> None:
     full_levels = _stack_levels([p for p in m.parts if p.footprint_family])
     best_gap = 0.0
     for upper, lower in zip(full_levels, full_levels[1:]):
-        top_of_lower = max(q.center_z + q.thickness / 2.0 for q in lower)
-        bot_of_upper = min(q.center_z - q.thickness / 2.0 for q in upper)
+        top_of_lower = max(q.stack_pos + q.thickness / 2.0 for q in lower)
+        bot_of_upper = min(q.stack_pos - q.thickness / 2.0 for q in upper)
         gap = bot_of_upper - top_of_lower
         if gap > best_gap and gap > 0.5:
             best_gap = gap
@@ -458,7 +521,7 @@ def refresh_derived(m: StackModel) -> None:
         long_side = max(p.csv_width, p.csv_length)
         short_side = min(p.csv_width, p.csv_length)
         in_box = bool(
-            m.ejector_box and m.ejector_box[0] - 0.05 <= p.center_z <= m.ejector_box[1] + 0.05
+            m.ejector_box and m.ejector_box[0] - 0.05 <= p.stack_pos <= m.ejector_box[1] + 0.05
         )
         at_edge = bool(p.mirror_twins)
         p.is_rail_like = (
@@ -481,7 +544,7 @@ def refresh_derived(m: StackModel) -> None:
     if m.ejector_box:
         lo, hi = m.ejector_box
         for p in m.parts:
-            if not p.is_rail_like and lo - 0.02 <= p.center_z <= hi + 0.02:
+            if not p.is_rail_like and lo - 0.02 <= p.stack_pos <= hi + 0.02:
                 p.inside_ejector_box = True
 
     # Stack order and gaps, by level so side-by-side parts share a position.
@@ -500,15 +563,15 @@ def refresh_derived(m: StackModel) -> None:
         return 0.0 if abs(gap) < 0.01 else round(gap, 4)
 
     for i, level in enumerate(levels):
-        top_i = max(q.center_z + q.thickness / 2.0 for q in level)
-        bot_i = min(q.center_z - q.thickness / 2.0 for q in level)
+        top_i = max(q.stack_pos + q.thickness / 2.0 for q in level)
+        bot_i = min(q.stack_pos - q.thickness / 2.0 for q in level)
         for p in level:
             p.order_from_top = i + 1
             if i > 0:
-                prev_bot = min(q.center_z - q.thickness / 2.0 for q in levels[i - 1])
+                prev_bot = min(q.stack_pos - q.thickness / 2.0 for q in levels[i - 1])
                 p.gap_above = _clean_gap(prev_bot - top_i)
             if i + 1 < len(levels):
-                next_top = max(q.center_z + q.thickness / 2.0 for q in levels[i + 1])
+                next_top = max(q.stack_pos + q.thickness / 2.0 for q in levels[i + 1])
                 p.gap_below = _clean_gap(bot_i - next_top)
 
     # Rails still need a position in the listing, so order them by where their
@@ -517,7 +580,7 @@ def refresh_derived(m: StackModel) -> None:
         if not p.is_rail_like or not p.in_stack:
             continue
         p.order_from_top = 1 + sum(
-            1 for lvl in levels if lvl[0].center_z > p.center_z
+            1 for lvl in levels if lvl[0].stack_pos > p.stack_pos
         )
 
 
@@ -575,7 +638,7 @@ def _candidate_payload(p: StackPart) -> dict:
         "qty": p.qty,
         "thickness_in": round(p.csv_thickness, 4),
         "plan_in": [round(p.csv_width, 3), round(p.csv_length, 3)],
-        "stack_center": round(p.center_z, 4),
+        "stack_center": round(p.stack_pos, 4),
         "pos_x": round(p.center_x, 3),
         "pos_y": round(p.center_y, 3),
         "plan_area_frac": round(p.plan_area_frac, 3),
@@ -626,7 +689,7 @@ def structural_parts(model: StackModel) -> list[StackPart]:
     """The parts the model is asked to name, highest in the stack first."""
     return sorted(
         (p for p in model.parts if p.in_stack or p.is_rail_like),
-        key=lambda p: -p.center_z,
+        key=lambda p: -p.stack_pos,
     )
 
 
@@ -644,7 +707,7 @@ def _hardware_payload(p: StackPart, rules_role: str) -> dict:
             round(p.csv_width, 3),
             round(p.csv_length, 3),
         ],
-        "stack_center": round(p.center_z, 3),
+        "stack_center": round(p.stack_pos, 3),
         "pos_x": round(p.center_x, 3),
         "pos_y": round(p.center_y, 3),
         "rules_role": rules_role or "hardware_other",
@@ -1146,7 +1209,7 @@ def _final_payload(p: StackPart) -> dict:
         "index": p.index,
         "name": p.short_name,
         "qty": p.qty,
-        "stack_center": round(p.center_z, 4),
+        "stack_center": round(p.stack_pos, 4),
         "pos_x": round(p.center_x, 3),
         "pos_y": round(p.center_y, 3),
         "order_from_top": p.order_from_top or None,

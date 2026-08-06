@@ -275,6 +275,43 @@ def test_a_sheet_above_the_top_clamp_plate_is_outside_the_stack():
     assert p.weight_lb_if_solid > 0, "an upper-bound weight should still be available"
 
 
+# C18184's real stack: five plates on a 9.875 x 11.875 footprint stacked along
+# **Y**, with CenterZ 0.000 on every one of them.
+C18184_STACK = [
+    # idx  thk     w       l      cx     cy      cz    fill
+    ("3",  1.875, 9.875, 11.875, 0.0,  2.813,  0.0,  84.8),
+    ("2",  1.875, 9.875, 11.875, 0.0,  0.937,  0.0,  73.1),
+    ("5",  1.375, 9.875, 11.875, 0.0, -0.688,  0.0,  90.9),
+    ("4",  1.375, 9.875, 11.875, 0.0, -2.063,  0.0,  67.7),
+    ("1",  3.625, 9.875, 11.875, 0.0, -4.563,  0.0,  90.7),
+]
+
+
+def test_the_stack_axis_is_measured_not_assumed():
+    """Not every base stacks along Z.
+
+    C18184 stacks along Y with CenterZ 0.000 on all five plates. Reading Z there
+    put every plate on one stack level, which makes order, gaps, the ejector box
+    and mirror twins all meaningless at once. The deterministic rules already got
+    this right for that job ("stack_axis": "CenterY").
+    """
+    m = _model_from(C18184_STACK)
+    assert m.stack_axis_field == "center_y", (
+        f"stack axis detected as {m.stack_axis_field}; C18184 stacks along Y"
+    )
+    levels = spn._stack_levels([p for p in m.parts if p.in_stack])
+    assert len(levels) == 5, f"{len(levels)} stack levels for a 5-plate stack"
+
+    order = [p.index for p in m.in_stack_parts()]
+    assert order == ["3", "2", "5", "4", "1"], f"top-to-bottom order wrong: {order}"
+    for p in m.parts:
+        assert p.stack_pos == p.center_y, "stack_pos must follow the detected axis"
+
+    # And a Z-stacked base must still come out as Z.
+    z = _model_from(C17879_STACK)
+    assert z.stack_axis_field == "center_z", z.stack_axis_field
+
+
 def test_side_by_side_parts_share_a_stack_level():
     """Twins at one height are one level. Treating them as two produced negative
     gaps, which read as an interference that is not there."""
@@ -384,6 +421,7 @@ if __name__ == "__main__":
         test_rail_thickness_becomes_the_stack_height()
         test_half_footprint_ejector_plates_stay_in_the_stack()
         test_a_sheet_above_the_top_clamp_plate_is_outside_the_stack()
+        test_the_stack_axis_is_measured_not_assumed()
         test_side_by_side_parts_share_a_stack_level()
         test_the_model_is_never_shown_the_macros_old_guess(tmp)
         test_hardware_is_not_handed_to_the_model()
