@@ -792,11 +792,16 @@ class EmailSettingsBody(BaseModel):
 
 class QuoteEmailBody(BaseModel):
     launch_macro: bool = True
+    # "rules" (default, seconds) or "stl" (two Qwen passes over the exported
+    # plate meshes). Chosen before pressing Quote; acted on when the CAD lands,
+    # because the meshes this reads are produced by the run itself.
+    naming_mode: str = "rules"
 
 
 class QuoteEmailBatchBody(BaseModel):
     message_ids: list[str]
     launch_macro: bool = True
+    naming_mode: str = "rules"
 
 
 @app.get("/api/settings/email")
@@ -1092,7 +1097,9 @@ def api_email_archive(message_id: str):
 def api_quote_email(message_id: str, body: QuoteEmailBody = QuoteEmailBody()):
     """One-click Quote: pull attachments, write cms_email.txt, start launcher."""
     try:
-        return email_service.quote_from_message(message_id, launch_macro=body.launch_macro)
+        return email_service.quote_from_message(
+            message_id, launch_macro=body.launch_macro, naming_mode=body.naming_mode
+        )
     except email_service.EmailNotConfigured as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
@@ -1105,7 +1112,9 @@ def api_quote_email(message_id: str, body: QuoteEmailBody = QuoteEmailBody()):
 def api_quote_email_batch(body: QuoteEmailBatchBody):
     """Quote multiple inbox messages as one sequential SolidWorks batch."""
     try:
-        return email_service.quote_from_messages(body.message_ids, launch_macro=body.launch_macro)
+        return email_service.quote_from_messages(
+            body.message_ids, launch_macro=body.launch_macro, naming_mode=body.naming_mode
+        )
     except email_service.EmailNotConfigured as e:
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:

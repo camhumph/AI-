@@ -628,8 +628,20 @@ def run_dme_price_lookup(wait: bool = False) -> bool:
         return False
 
 
-def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = None) -> dict:
-    """Write handoff files, run DME lookup, start CMS_Launcher /usemail."""
+def launch_full_quote(
+    quote_id: str,
+    attach_dir: str,
+    email_info: dict | None = None,
+    naming_mode: str = "rules",
+) -> dict:
+    """Write handoff files, run DME lookup, start CMS_Launcher /usemail.
+
+    ``naming_mode`` is the estimator's choice, made before pressing Quote, of how
+    the plates get named once this job's CAD lands. It cannot be acted on now --
+    the CAD export and the STL meshes are produced *by* this run -- so it is
+    recorded on the quote status and read back by :func:`poll_completion` when
+    the macro finishes. See :func:`sync_completed_job`.
+    """
     LOCAL_WORKSPACE.mkdir(parents=True, exist_ok=True)
     _deploy_launcher_assets()
     _delete_if_exists(TRAINING_TRIGGER)
@@ -704,6 +716,10 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
         cad_path=local_cad or None,
         warning=cad_warning or None,
         cad_job_mismatch=True if cad_warning else None,
+        # Carried on the status file because that is the only thing that
+        # survives from pressing Quote to the macro finishing, which can be
+        # twenty minutes and a SolidWorks restart later.
+        naming_mode=naming_mode or "rules",
     )
 
     run_dme_price_lookup(wait=False)
@@ -792,7 +808,7 @@ def launch_full_quote(quote_id: str, attach_dir: str, email_info: dict | None = 
     }
 
 
-def launch_batch_quotes(items: list[dict]) -> dict:
+def launch_batch_quotes(items: list[dict], naming_mode: str = "rules") -> dict:
     """Queue multiple quotes and run them one-at-a-time (never two Module6121s at once).
 
     Each item: quote_id, attach_dir, and optional email fields
@@ -913,6 +929,9 @@ def launch_batch_quotes(items: list[dict]) -> dict:
             cad_path=(prep.get("email_info") or {}).get("cad_path") or None,
             warning=cad_warning or None,
             cad_job_mismatch=True if cad_warning else None,
+            # Recorded on every queued job, not just the first: job 5 of a batch
+            # starts long after the click and must still know what was ticked.
+            naming_mode=naming_mode or "rules",
         )
         jobs.create_job(
             c_num,
@@ -930,6 +949,7 @@ def launch_batch_quotes(items: list[dict]) -> dict:
         first["quote_id"],
         first.get("attach_dir") or "",
         email_info=first.get("email_info") or {},
+        naming_mode=naming_mode,
     )
     # Preserve batch metadata on the active status.
     set_status(
@@ -1076,6 +1096,9 @@ def _start_next_batch_job(batch_id: str, finished_quote_id: str = "") -> dict | 
         qid,
         next_item.get("attach_dir") or "",
         email_info=next_item.get("email_info") or {},
+        # Read back off this job's own queued status, which launch_batch_quotes
+        # stamped at click time. Nothing else survives the wait.
+        naming_mode=(get_status(qid) or {}).get("naming_mode") or "rules",
     )
     set_status(
         qid,
@@ -1125,8 +1148,19 @@ def _folder_looks_like_bms(folder: Path) -> bool:
     return jobs._folder_looks_like_bms(folder)
 
 
-def sync_completed_job(job_id: str, folder_path: str, base_type: str = "standard") -> dict:
-    """Import finished macro outputs into the webapp registry."""
+def sync_completed_job(
+    job_id: str,
+    folder_path: str,
+    base_type: str = "standard",
+    naming_mode: str = "rules",
+) -> dict:
+    """Import finished macro outputs into the webapp registry.
+
+    ``naming_mode`` is what the estimator ticked before pressing Quote:
+    "rules" (seconds, the default) or "stl" (two Qwen passes with the exported
+    plate meshes measured in between -- minutes, but it is the only mode that
+    reads a plate's true stack thickness or which face its pockets open on).
+    """
     folder = Path(folder_path)
     if not folder.exists():
         raise FileNotFoundError(f"Completed job folder not found: {folder_path}")
@@ -1145,11 +1179,29 @@ def sync_completed_job(job_id: str, folder_path: str, base_type: str = "standard
     jobs.update_meta(job_id, base_type=resolved_type, quote_status="completed", source_folder=str(folder))
 
     # Auto-classify if XT exists but no classification yet (non-BMS).
+    #
+    # A requested "stl" run falls back to "rules" if it fails for any reason --
+    # Ollama not running, no meshes exported, a pass that would not parse. A
+    # finished quote must never come out with no names at all just because the
+    # slower namer could not run, so the fast one always gets the second attempt.
     if resolved_type != "bms" and job.get("has_raw_csv") and not job.get("has_classification"):
+        wanted = (naming_mode or "rules").strip().lower()
+        if wanted not in {"rules", "llm", "stl"}:
+            wanted = "rules"
         try:
-            job = jobs.classify_job(job_id, mode="rules")
-        except Exception:
-            pass
+            job = jobs.classify_job(job_id, mode=wanted)
+            if wanted != "rules":
+                _append_quote_log(f"{job_id}: plates named with AI mode '{wanted}'.")
+        except Exception as e:
+            if wanted != "rules":
+                _append_quote_log(
+                    f"{job_id}: AI naming ('{wanted}') failed ({type(e).__name__}: {e}); "
+                    f"falling back to the geometry rules."
+                )
+                try:
+                    job = jobs.classify_job(job_id, mode="rules")
+                except Exception:
+                    pass
 
     # Tidy the shop folder: render each diagnostic CSV to PDF, then move the CSVs
     # and the macro's run logs into pdf\, leaving only deliverables in the root.
@@ -1575,7 +1627,13 @@ def poll_completion(quote_id: str) -> dict:
         if ready:
             if status.get("phase") != "completed":
                 try:
-                    sync_completed_job(job_id, str(local))
+                    # The estimator's AI-naming choice was recorded on the
+                    # status when the quote started; this is where it is spent.
+                    sync_completed_job(
+                        job_id,
+                        str(local),
+                        naming_mode=status.get("naming_mode") or "rules",
+                    )
                     status = get_status(quote_id) or status
                     status["diagnostics"] = diag
                     if diag.get("stuck_reason"):

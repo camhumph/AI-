@@ -673,8 +673,14 @@ def _launch_quote_flow() -> bool:
     return proc is not None
 
 
-def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
-    """Download attachments, write cms_email.txt, optionally launch SolidWorks flow."""
+def quote_from_message(
+    message_id: str, launch_macro: bool = True, naming_mode: str = "rules"
+) -> dict:
+    """Download attachments, write cms_email.txt, optionally launch SolidWorks flow.
+
+    ``naming_mode`` is the AI-naming choice made before pressing Quote; it rides
+    through to quote_pipeline and is spent when the macro finishes.
+    """
     imap = _connect()
     try:
         status, msg_data = imap.fetch(message_id.encode(), "(RFC822)")
@@ -755,6 +761,7 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
                 "ship_date": info["ship_date"],
                 "attachments": attach_count,
             },
+            naming_mode=naming_mode,
         )
         launched = result.get("launched", False)
         job_token = result.get("job_id") or job_token
@@ -773,7 +780,9 @@ def quote_from_message(message_id: str, launch_macro: bool = True) -> dict:
     }
 
 
-def quote_from_messages(message_ids: list[str], launch_macro: bool = True) -> dict:
+def quote_from_messages(
+    message_ids: list[str], launch_macro: bool = True, naming_mode: str = "rules"
+) -> dict:
     """Prepare multiple email quotes, then launch them as one sequential SolidWorks batch."""
     if not message_ids:
         return {"launched": False, "error": "No message ids", "results": []}
@@ -786,7 +795,7 @@ def quote_from_messages(message_ids: list[str], launch_macro: bool = True) -> di
         if not mid:
             continue
         # Prepare attachments/handoff fields without launching each one separately.
-        one = quote_from_message(mid, launch_macro=False)
+        one = quote_from_message(mid, launch_macro=False, naming_mode=naming_mode)
         results.append(one)
         prepared.append(
             {
@@ -817,7 +826,7 @@ def quote_from_messages(message_ids: list[str], launch_macro: bool = True) -> di
 
     from . import quote_pipeline
 
-    batch = quote_pipeline.launch_batch_quotes(prepared)
+    batch = quote_pipeline.launch_batch_quotes(prepared, naming_mode=naming_mode)
     return {
         **batch,
         "results": results,

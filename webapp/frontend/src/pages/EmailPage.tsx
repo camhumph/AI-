@@ -18,13 +18,16 @@ import {
   MailX,
   X,
   Inbox,
+  Sparkles,
 } from "lucide-react";
 import Layout from "../components/Layout";
 import { Button, Spinner, EmptyState } from "../components/ui";
-import { api, type EmailSummary, type EmailDetail } from "../api/client";
+import { api, type EmailSummary, type EmailDetail, type NamingMode } from "../api/client";
 import { useQuoteJobs } from "../context/QuoteJobsContext";
 
 type ComposeMode = "new" | "reply" | "replyAll" | "forward" | null;
+
+const AI_NAMING_KEY = "cms.aiPlateNaming";
 
 export default function EmailPage() {
   const [status, setStatus] = useState<{ configured: boolean; smtp_configured: boolean } | null>(null);
@@ -43,8 +46,20 @@ export default function EmailPage() {
   const [quoteError, setQuoteError] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  // Sticky across sessions: an estimator who wants AI naming wants it on every
+  // job, and re-ticking it before each quote is the kind of step that gets
+  // forgotten on the one job that needed it.
+  const [aiNaming, setAiNaming] = useState<boolean>(
+    () => localStorage.getItem(AI_NAMING_KEY) === "1"
+  );
   const navigate = useNavigate();
   const { startQuote } = useQuoteJobs();
+
+  const setAiNamingSticky = (on: boolean) => {
+    setAiNaming(on);
+    localStorage.setItem(AI_NAMING_KEY, on ? "1" : "0");
+  };
+  const namingMode: NamingMode = aiNaming ? "stl" : "rules";
 
   const refresh = useCallback(() => {
     setLoadError("");
@@ -88,11 +103,13 @@ export default function EmailPage() {
     setQuoting(true);
     setQuoteError("");
     try {
-      const result = await api.quoteEmail(detail.id, true);
+      const result = await api.quoteEmail(detail.id, true, namingMode);
       const qid = result.quote_id || result.job_id;
       startQuote(qid, detail.subject || "Email quote", {
         phase: "running",
-        message: "Running in background — DME → SolidWorks → Module6121",
+        message: aiNaming
+          ? "Running in background — DME → SolidWorks → Module6121 → AI plate naming"
+          : "Running in background — DME → SolidWorks → Module6121",
         job_id: result.job_id,
       });
     } catch (e) {
@@ -118,7 +135,7 @@ export default function EmailPage() {
     setQuoteError("");
     try {
       if (ids.length === 1) {
-        const result = await api.quoteEmail(ids[0], true);
+        const result = await api.quoteEmail(ids[0], true, namingMode);
         const qid = result.quote_id || result.job_id;
         const subj = messages?.find((m) => m.id === ids[0])?.subject || "Email quote";
         startQuote(qid, subj, {
@@ -127,7 +144,7 @@ export default function EmailPage() {
           job_id: result.job_id,
         });
       } else {
-        const result = await api.quoteEmailBatch(ids, true);
+        const result = await api.quoteEmailBatch(ids, true, namingMode);
         if (result.error && !result.launched) {
           throw new Error(result.error);
         }
@@ -287,14 +304,22 @@ export default function EmailPage() {
               <Inbox className="h-3.5 w-3.5" /> Inbox
               {messages && <span className="text-ink-600">({messages.length})</span>}
               {checkedIds.size > 0 && (
-                <button
-                  type="button"
-                  disabled={quoting}
-                  onClick={quoteSelected}
-                  className="ml-auto rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-white hover:bg-sky-600 disabled:opacity-50"
-                >
-                  {quoting ? "Starting…" : `Quote selected (${checkedIds.size})`}
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                  <AiNamingToggle
+                    checked={aiNaming}
+                    onChange={setAiNamingSticky}
+                    disabled={quoting}
+                    compact
+                  />
+                  <button
+                    type="button"
+                    disabled={quoting}
+                    onClick={quoteSelected}
+                    className="rounded bg-sky-700/80 px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-white hover:bg-sky-600 disabled:opacity-50"
+                  >
+                    {quoting ? "Starting…" : `Quote selected (${checkedIds.size})`}
+                  </button>
+                </div>
               )}
             </div>
             <div className="scrollbar-thin flex-1 overflow-y-auto">
@@ -392,6 +417,7 @@ export default function EmailPage() {
                   <ToolbarBtn icon={<ReplyAll className="h-4 w-4" />} title="Reply all" onClick={() => openCompose("replyAll")} />
                   <ToolbarBtn icon={<Forward className="h-4 w-4" />} title="Forward" onClick={() => openCompose("forward")} />
                   <div className="flex-1" />
+                  <AiNamingToggle checked={aiNaming} onChange={setAiNamingSticky} disabled={quoting} />
                   <Button onClick={quoteThis} disabled={quoting} className="mx-2 px-6 py-2">
                     {quoting ? "Starting…" : "Quote"}
                   </Button>
@@ -461,6 +487,53 @@ export default function EmailPage() {
         />
       )}
     </Layout>
+  );
+}
+
+/**
+ * "AI plate naming" opt-in, sitting next to the Quote button.
+ *
+ * The title spells out the sequencing, because the obvious reading of the
+ * checkbox is wrong: nothing can analyse the geometry *before* the quote runs,
+ * since the CAD export and the STL meshes are produced BY the run. Ticking this
+ * chooses what happens the moment that CAD lands.
+ */
+function AiNamingToggle({
+  checked,
+  onChange,
+  disabled,
+  compact,
+}: {
+  checked: boolean;
+  onChange: (on: boolean) => void;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
+  return (
+    <label
+      title={
+        checked
+          ? "When this job's CAD export lands, name the plates by measuring the exported STL meshes (two Qwen passes). Slower — minutes, not seconds — but it reads true stack thickness and which face each pocket opens on. Falls back to the fast rules if Ollama is not running."
+          : "Plates are named by the fast geometry rules (seconds). Tick to measure the STL meshes with the AI instead."
+      }
+      className={`flex shrink-0 cursor-pointer select-none items-center gap-1.5 rounded border px-2 ${
+        compact ? "py-0.5 text-[10px]" : "py-1 text-[11px]"
+      } font-medium normal-case tracking-normal transition ${
+        checked
+          ? "border-sky-600/50 bg-sky-900/30 text-sky-300"
+          : "border-ink-700/40 text-ink-500 hover:text-ink-300"
+      } ${disabled ? "pointer-events-none opacity-50" : ""}`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3 w-3 accent-sky-500"
+      />
+      <Sparkles className="h-3 w-3" />
+      AI plate naming
+    </label>
   );
 }
 

@@ -565,6 +565,17 @@ export interface TrainingSuggestions {
   standard_jobs: number;
 }
 
+/**
+ * How a job's plates get named.
+ *
+ * "rules" -- deterministic geometry/shop-token rules. Seconds, no LLM.
+ * "llm"   -- one Qwen pass over the CAD dimension export.
+ * "stl"   -- two Qwen passes with the exported plate meshes measured in
+ *            between. Minutes on CPU, and the only mode that reads a plate's
+ *            true stack thickness or which face its pockets open on.
+ */
+export type NamingMode = "rules" | "llm" | "stl";
+
 export const api = {
   health: () => req<{ ok: boolean; email_configured: boolean; smtp_configured: boolean }>("/health"),
 
@@ -613,7 +624,7 @@ export const api = {
    *            geometry. Slowest, and the only mode that sees a plate's true
    *            stack thickness or which face its pockets open on.
    */
-  classifyJob: (jobId: string, mode: "rules" | "llm" | "stl" = "rules") =>
+  classifyJob: (jobId: string, mode: NamingMode = "rules") =>
     req<JobDetail>(`/jobs/${encodeURIComponent(jobId)}/classify`, {
       method: "POST",
       body: JSON.stringify({ mode }),
@@ -757,12 +768,25 @@ export const api = {
   testEmail: () => req<{ ok: boolean; message: string }>("/settings/email/test", { method: "POST" }),
   listEmails: (q = "") => req<EmailSummary[]>(`/email/messages${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   getEmail: (id: string) => req<EmailDetail>(`/email/messages/${encodeURIComponent(id)}`),
-  quoteEmail: (id: string, launchMacro = true) =>
+  /**
+   * How this quote's plates get named once its CAD export lands.
+   *
+   * The choice is made before pressing Quote but cannot be acted on then: the
+   * CAD export and the STL meshes are produced BY the run. It rides on the quote
+   * status and is spent when the macro finishes.
+   *
+   * "rules" -- geometry/shop-token rules, seconds. The default.
+   * "stl"   -- two Qwen passes with the exported plate meshes measured in
+   *            between. Minutes, and the only mode that reads a plate's true
+   *            stack thickness or which face its pockets open on. Falls back to
+   *            "rules" if Ollama is down or no meshes were exported.
+   */
+  quoteEmail: (id: string, launchMacro = true, namingMode: NamingMode = "rules") =>
     req<QuoteEmailResult>(`/email/messages/${encodeURIComponent(id)}/quote`, {
       method: "POST",
-      body: JSON.stringify({ launch_macro: launchMacro }),
+      body: JSON.stringify({ launch_macro: launchMacro, naming_mode: namingMode }),
     }),
-  quoteEmailBatch: (messageIds: string[], launchMacro = true) =>
+  quoteEmailBatch: (messageIds: string[], launchMacro = true, namingMode: NamingMode = "rules") =>
     req<{
       launched?: boolean;
       batch?: boolean;
@@ -774,7 +798,11 @@ export const api = {
       macro_started?: boolean;
     }>("/email/quote-batch", {
       method: "POST",
-      body: JSON.stringify({ message_ids: messageIds, launch_macro: launchMacro }),
+      body: JSON.stringify({
+        message_ids: messageIds,
+        launch_macro: launchMacro,
+        naming_mode: namingMode,
+      }),
     }),
   replyEmail: (id: string, to: string, subject: string, body: string, in_reply_to = "") =>
     req(`/email/messages/${encodeURIComponent(id)}/reply`, {
