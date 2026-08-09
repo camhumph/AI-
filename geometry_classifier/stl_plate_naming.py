@@ -1451,6 +1451,71 @@ def validate_classifications(
     return data, problems
 
 
+def structural_sanity_problems(data: dict, model: StackModel) -> list[str]:
+    """Contradictions between an answer and facts the geometry already settles.
+
+    These are not opinions about naming -- they are things that cannot be true of
+    a mold base whatever the shop calls its plates. A model answer that breaks one
+    is wrong, and on hardware where the local model is weak it is worse than the
+    deterministic rules it replaced.
+
+    Written after qwen3:8b named C17880's topmost plate "a_plate" and the A plate
+    below it "top_clamp_plate", then put the B plate four levels further down --
+    and the mesh pass confirmed all of it rather than correcting any of it.
+    """
+    problems: list[str] = []
+    by_index = model.by_index()
+    roles = {c["index"]: c["role"] for c in data.get("classifications", [])}
+    placed = {r: i for i, r in roles.items() if r in SINGULAR_ROLES}
+
+    # Only plates count for stack position; rails stand alongside them.
+    stack = [
+        p for p in model.in_stack_parts() if p.in_stack and not p.is_rail_like
+    ]
+    if not stack:
+        return problems
+    order = {p.index: n for n, p in enumerate(stack, 1)}
+
+    top = placed.get("top_clamp_plate")
+    if top and order.get(top, 0) != 1:
+        problems.append(
+            f"top_clamp_plate is index {top}, which is #{order.get(top)} down the "
+            f"stack -- the top clamp plate is the topmost plate"
+        )
+    bottom = placed.get("bottom_clamp_plate")
+    if bottom and order.get(bottom, 0) not in (len(stack), 0):
+        problems.append(
+            f"bottom_clamp_plate is index {bottom}, #{order.get(bottom)} of "
+            f"{len(stack)} -- the bottom clamp plate is the lowest plate"
+        )
+
+    a, b = placed.get("a_plate"), placed.get("b_plate")
+    if a and b and a in order and b in order:
+        if order[b] <= order[a]:
+            problems.append(
+                f"b_plate (index {b}) sits above a_plate (index {a}); the B plate is "
+                f"below the parting line and the A plate above it"
+            )
+        elif order[b] - order[a] != 1:
+            problems.append(
+                f"a_plate (index {a}) and b_plate (index {b}) are {order[b] - order[a]} "
+                f"levels apart; they meet at the parting line and are adjacent"
+            )
+
+    # When the CAD tree names the halves it settles the parting line outright.
+    for role, want in (("a_plate", "stationary"), ("b_plate", "moving")):
+        idx = placed.get(role)
+        if not idx:
+            continue
+        half = by_index[idx].half if idx in by_index else ""
+        if half and half != want:
+            problems.append(
+                f"{role} (index {idx}) is in the {half} half of the CAD tree, "
+                f"but the {role.replace('_', ' ')} belongs to the {want} half"
+            )
+    return problems
+
+
 def fill_missing(data: dict, fallback: dict, model: StackModel, label: str) -> int:
     """Patch parts an answer skipped, taking their role from ``fallback``.
 

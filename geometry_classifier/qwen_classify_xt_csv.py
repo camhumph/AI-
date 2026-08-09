@@ -1435,13 +1435,42 @@ def run_stl_two_pass(
         else:
             print("\nThe mesh confirmed every name from the first pass.", flush=True)
 
+    # Last gate: does the answer describe a mold base that could exist?
+    #
+    # These are not naming opinions -- a top clamp plate that is not on top, or an
+    # A and B plate four levels apart, is wrong whatever the shop calls things. On
+    # C17880 qwen3:8b produced exactly that and the mesh pass confirmed it rather
+    # than correcting it, giving names materially worse than the deterministic
+    # rules. A weak local model must not be able to put that on a steel sheet.
+    sanity = _stl_naming.structural_sanity_problems(p2, stack)
+    rules_sanity = _stl_naming.structural_sanity_problems(rules, stack)
+    rejected = False
+    if sanity and len(sanity) > len(rules_sanity):
+        rejected = True
+        if verbose:
+            print(
+                f"\nRejecting the AI naming: {len(sanity)} structural contradiction(s) "
+                f"the geometry rules do not have.",
+                flush=True,
+            )
+            for s in sanity:
+                print(f"    {s}", flush=True)
+            print("  Falling back to the deterministic geometry rules.", flush=True)
+        final = dict(rules)
+    else:
+        final = p2
+
     provenance.update(
         {
             "pass2_parsed": ok2,
             "pass2_problems": problems2,
-            "changed_by_mesh": changes,
+            "changed_by_mesh": changes if not rejected else [],
+            "structural_problems": sanity,
+            "ai_naming_rejected": rejected,
+            "rejected_because": sanity if rejected else [],
         }
     )
+    p2 = final
     p2.setdefault("job_analysis", {}).update(provenance)
     p2["job_analysis"].setdefault(
         "sequenced_latch_lock_base",

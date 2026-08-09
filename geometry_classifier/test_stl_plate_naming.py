@@ -489,6 +489,85 @@ def test_a_short_answer_is_patched_not_discarded():
     assert "[geometry rules]" in patched["reason"], "a patched row must say where it came from"
 
 
+def test_a_structurally_impossible_answer_is_caught():
+    """A weak local model must not be able to put nonsense on a steel sheet.
+
+    qwen3:8b named C17880's topmost plate "a_plate" and the A plate below it
+    "top_clamp_plate", then put the B plate four levels further down -- and the
+    mesh pass confirmed all of it rather than correcting any of it. The result
+    was materially worse than the deterministic rules it was meant to improve on.
+
+    These checks are not naming opinions. A top clamp plate that is not on top
+    cannot be true of any mold base, whatever the shop calls its plates.
+    """
+    stack = [
+        # idx  thk     w       l      cx    cy      cz      fill
+        ("4",  1.454, 11.875, 23.5,  0.0,  0.0,  5.604,  92.7),
+        ("1",  4.875, 11.875, 23.5,  0.0,  0.0,  2.440,  40.4),
+        ("3",  1.875, 11.875, 23.5,  0.0,  0.0, -0.939,  50.9),
+        ("5",  1.375, 11.875, 23.5,  0.0,  0.0, -2.565,  83.3),
+        ("2",  1.878, 11.875, 23.5,  0.0,  0.0, -4.188,  83.1),
+        ("6",  0.875, 11.875, 25.5,  0.0,  0.0, -9.565,  94.2),
+    ]
+    m = _model_from(stack)
+
+    # What qwen3:8b actually returned for this job.
+    bad = {"classifications": [
+        {"index": "4", "role": "a_plate"},
+        {"index": "1", "role": "top_clamp_plate"},
+        {"index": "3", "role": "support_plate"},
+        {"index": "2", "role": "b_plate"},
+        {"index": "6", "role": "bottom_clamp_plate"},
+    ]}
+    problems = spn.structural_sanity_problems(bad, m)
+    assert any("topmost" in p for p in problems), problems
+    assert any("levels apart" in p for p in problems), problems
+
+    # The correct reading trips nothing.
+    good = {"classifications": [
+        {"index": "4", "role": "top_clamp_plate"},
+        {"index": "1", "role": "a_plate"},
+        {"index": "3", "role": "b_plate"},
+        {"index": "5", "role": "support_plate"},
+        {"index": "2", "role": "support_plate"},
+        {"index": "6", "role": "bottom_clamp_plate"},
+    ]}
+    assert spn.structural_sanity_problems(good, m) == [], spn.structural_sanity_problems(good, m)
+
+    # B above A is impossible whichever way round the rest is.
+    flipped = {"classifications": [
+        {"index": "1", "role": "b_plate"},
+        {"index": "3", "role": "a_plate"},
+    ]}
+    assert any("sits above" in p for p in spn.structural_sanity_problems(flipped, m))
+
+
+def test_the_cad_half_tokens_settle_the_parting_line():
+    """When the CAD tree says which half a plate is in, that is not negotiable."""
+    rows = [
+        {"index": "1", "component": "24-258--bs-quote_1-1/24-258--1200-a00_1-1", "qty": 1,
+         "thickness": 4.875, "width": 11.875, "length": 23.5, "bbox_volume": 1360.4,
+         "solid_fill_pct": 40.4, "center_x": 0.0, "center_y": 0.0, "center_z": 2.44,
+         "n_thru": 0, "n_cbore": 0, "n_cross": 0, "max_bore": 0.0, "hole_sig": "",
+         "n_pockets": 0, "pocket_area": 0.0, "pocket_up": 0.0, "pocket_dn": 0.0, "raw": {}},
+        {"index": "3", "component": "24-258--bm-quote_1-1/24-258--1500-a00_1-1", "qty": 1,
+         "thickness": 1.875, "width": 11.875, "length": 23.5, "bbox_volume": 523.2,
+         "solid_fill_pct": 50.9, "center_x": 0.0, "center_y": 0.0, "center_z": -0.939,
+         "n_thru": 0, "n_cbore": 0, "n_cross": 0, "max_bore": 0.0, "hole_sig": "",
+         "n_pockets": 0, "pocket_area": 0.0, "pocket_up": 0.0, "pocket_dn": 0.0, "raw": {}},
+    ]
+    m = spn.build_stack_model(rows, job="C17880")
+    assert m.by_index()["1"].half == "stationary", m.by_index()["1"].half
+    assert m.by_index()["3"].half == "moving", m.by_index()["3"].half
+
+    swapped = {"classifications": [
+        {"index": "1", "role": "b_plate"},
+        {"index": "3", "role": "a_plate"},
+    ]}
+    problems = spn.structural_sanity_problems(swapped, m)
+    assert any("stationary half" in p or "moving half" in p for p in problems), problems
+
+
 def test_a_second_a_plate_is_caught():
     m = _model_from(C17879_STACK)
     roles = ["a_plate", "full_footprint_plate"]
@@ -525,5 +604,7 @@ if __name__ == "__main__":
         test_the_model_is_never_shown_the_macros_old_guess(tmp)
         test_hardware_is_not_handed_to_the_model()
         test_a_short_answer_is_patched_not_discarded()
+        test_a_structurally_impossible_answer_is_caught()
+        test_the_cad_half_tokens_settle_the_parting_line()
         test_a_second_a_plate_is_caught()
     print("OK: STL plate naming regressions passed")
