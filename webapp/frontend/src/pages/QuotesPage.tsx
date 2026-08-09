@@ -345,16 +345,26 @@ function FolderPickerModal({
             <span className="truncate font-mono">{browse?.path || "..."}</span>
             {browse?.roots && browse.roots.length > 0 && (
               <div className="ml-auto flex flex-wrap gap-1">
-                {browse.roots.slice(0, 3).map((root) => (
-                  <button
-                    key={root}
-                    onClick={() => load(root)}
-                    className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-400 hover:border-white/20 hover:text-ink-200"
-                    title={root}
-                  >
-                    {root.split(/[/\\]/).filter(Boolean).slice(-2).join("\\") || root}
-                  </button>
-                ))}
+                {browse.roots.slice(0, 5).map((root) => {
+                  // An offline share stays visible and says so. Hiding it would
+                  // leave someone wondering where the network went.
+                  const offline = browse.unreachable?.includes(root) ?? false;
+                  return (
+                    <button
+                      key={root}
+                      onClick={() => !offline && load(root)}
+                      disabled={offline}
+                      className={
+                        offline
+                          ? "cursor-not-allowed rounded-full border border-white/5 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-600 line-through"
+                          : "rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-wider text-ink-400 hover:border-white/20 hover:text-ink-200"
+                      }
+                      title={offline ? `${root}\n\nNot reachable — off the company wifi?` : root}
+                    >
+                      {root.split(/[/\\]/).filter(Boolean).slice(-2).join("\\") || root}
+                    </button>
+                  );
+                })}
               </div>
             )}
             {browse?.parent && (

@@ -371,7 +371,14 @@ export interface WorkspaceBrowse {
   exists: boolean;
   parent: string | null;
   entries: WorkspaceEntry[];
+  /** Places to look for job folders, the ones that answer listed first. */
   roots: string[];
+  /**
+   * Roots that did not answer -- normally the network share when the PC is off
+   * the company wifi. Still listed in `roots` so the button stays visible and
+   * explains itself, rather than the share silently vanishing.
+   */
+  unreachable?: string[];
 }
 
 export interface EmailSummary {

@@ -21,12 +21,41 @@ JOBS_ROOT = Path(os.environ.get("CMS_JOBS_ROOT", DATA_DIR / "jobs"))
 WORKSPACE_ROOT = Path(
     os.environ.get("CMS_WORKSPACE_ROOT", r"\\Mycloudex2ultra\mexico\Downloads")
 )
-# Additional roots scanned for existing quote folders (network drive, month folders).
+
+# The network share is only reachable on the company wifi. Off it, the month
+# folders get copied into the local Downloads instead, and the folder picker
+# used to come up empty with no way to get anywhere useful -- the only fix was
+# editing START_CMS_QUOTING_APP.bat.
+#
+# These are searched alongside the configured root, so the same install works on
+# and off the network with nothing to change. jobs._workspace_roots() puts the
+# ones that actually answer first.
+def _default_local_roots() -> list[str]:
+    home = Path.home()
+    candidates = [
+        home / "Downloads",
+        home / "OneDrive" / "Downloads",
+        home / "Desktop",
+        Path(r"C:\CMS_Local_Workspace"),
+    ]
+    out = []
+    for c in candidates:
+        try:
+            if c.is_dir():
+                out.append(str(c))
+        except OSError:
+            continue
+    return out
+
+
+# Additional roots scanned for existing quote folders (network drive, month
+# folders, and the local fallbacks above). Env entries come first so an explicit
+# setting always outranks discovery.
 WORKSPACE_EXTRA_ROOTS = [
     p.strip()
     for p in os.environ.get("CMS_WORKSPACE_EXTRA_ROOTS", "").split(";")
     if p.strip()
-]
+] + _default_local_roots()
 
 # Where the AI classifier lives (repo-relative), used to actually (re)run
 # classification against a job's raw XT_Export_CAD_Dimensions.csv.

@@ -1768,23 +1768,109 @@ Function NormalizeCFolder(ByVal s)
     End If
 End Function
 
+' Every folder that might hold the customer month folders, best first.
+'
+' The share is only reachable on the company wifi. Off it the month folders get
+' copied into the local Downloads instead, and this used to log "customer
+' Downloads root not found" and give up -- so a job sitting right there in
+' Downloads could not be found at all.
+Function CustomerDownloadsRoots()
+    Dim cand, out(), n, i, c
+    cand = Array(CUSTOMER_DOWNLOADS_ROOT, DOWNLOADS_FOLDER)
+    n = 0
+    ReDim out(UBound(cand))
+    For i = 0 To UBound(cand)
+        c = Trim(CStr(cand(i)))
+        If c <> "" Then
+            If fso.FolderExists(c) Then
+                out(n) = c
+                n = n + 1
+            End If
+        End If
+    Next
+    If n = 0 Then
+        CustomerDownloadsRoots = Array()
+    Else
+        ReDim Preserve out(n - 1)
+        CustomerDownloadsRoots = out
+    End If
+End Function
+
 Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
     FindCustomerDownloadJobFolder = ""
 
     On Error Resume Next
 
-    Dim cTok, jobTok
+    Dim cTok, jobTok, roots, r, hit
     cTok = NormalizeCFolder(cLocal)
     jobTok = CleanFolderToken(custJob)
 
     If jobTok = "" Or cTok = "" Then Exit Function
-    If Not fso.FolderExists(CUSTOMER_DOWNLOADS_ROOT) Then
-        LogStep "customer Downloads root not found: " & CUSTOMER_DOWNLOADS_ROOT
+
+    roots = CustomerDownloadsRoots()
+    If UBound(roots) < 0 Then
+        LogStep "no customer Downloads root reachable (tried " & CUSTOMER_DOWNLOADS_ROOT & " and " & DOWNLOADS_FOLDER & ")"
         Exit Function
     End If
 
+    For Each r In roots
+        hit = FindJobFolderUnderRoot(r, jobTok, cTok)
+        If hit <> "" Then
+            LogStep "found customer job folder under " & r & ": " & hit
+            FindCustomerDownloadJobFolder = hit
+            On Error GoTo 0
+            Exit Function
+        End If
+    Next
+
+    LogStep "customer job folder not found for " & jobTok & "/" & cTok & " under any Downloads root"
+    On Error GoTo 0
+End Function
+
+' This month's folder under dlRoot, matched loosely on punctuation.
+'
+' DownloadsMonthFolderName builds "000000008. August-2026", but the copy in the
+' local Downloads is named "000000008.August 2026" -- same month, different
+' spacing and separator. An exact string compare missed it and fell through to
+' scanning every subfolder of Downloads, which on this machine is over a
+' thousand entries deep. CleanFolderToken flattens spaces, dots, hyphens and
+' underscores to one dash, so both spellings normalise to the same token.
+Function FindMonthFolderPath(ByVal dlRoot, ByVal d)
+    FindMonthFolderPath = dlRoot & "\" & DownloadsMonthFolderName(d)
+
+    On Error Resume Next
+
+    If fso.FolderExists(FindMonthFolderPath) Then
+        On Error GoTo 0
+        Exit Function
+    End If
+
+    Dim wanted, mon, rootFolder
+    wanted = UCase(CleanFolderToken(DownloadsMonthFolderName(d)))
+    If wanted = "" Then Exit Function
+    If Not fso.FolderExists(dlRoot) Then Exit Function
+
+    Set rootFolder = fso.GetFolder(dlRoot)
+    For Each mon In rootFolder.SubFolders
+        If UCase(CleanFolderToken(mon.Name)) = wanted Then
+            FindMonthFolderPath = mon.Path
+            On Error GoTo 0
+            Exit Function
+        End If
+    Next
+
+    On Error GoTo 0
+End Function
+
+Function FindJobFolderUnderRoot(ByVal dlRoot, ByVal jobTok, ByVal cTok)
+    FindJobFolderUnderRoot = ""
+
+    On Error Resume Next
+
+    If Not fso.FolderExists(dlRoot) Then Exit Function
+
     Dim monthPath, candidate, prefixes, i, p, expected
-    monthPath = CUSTOMER_DOWNLOADS_ROOT & "\" & DownloadsMonthFolderName(Date)
+    monthPath = FindMonthFolderPath(dlRoot, Date)
 
     ' Fast exact check first:
     ' \\Mycloudex2ultra\mexico\Downloads\000000007. July-2026\BMS-851100038-C18605
@@ -1803,7 +1889,7 @@ Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
             candidate = monthPath & "\" & expected
 
             If fso.FolderExists(candidate) Then
-                FindCustomerDownloadJobFolder = candidate
+                FindJobFolderUnderRoot = candidate
                 On Error GoTo 0
                 Exit Function
             End If
@@ -1816,7 +1902,7 @@ Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
     Dim root, mon, sub1, u, best
     best = ""
 
-    Set root = fso.GetFolder(CUSTOMER_DOWNLOADS_ROOT)
+    Set root = fso.GetFolder(dlRoot)
 
     For Each mon In root.SubFolders
         For Each sub1 In mon.SubFolders
@@ -1824,7 +1910,7 @@ Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
 
             If InStr(u, UCase(jobTok)) > 0 And InStr(u, UCase(cTok)) > 0 Then
                 If InStr(u, "BMS-") > 0 Then
-                    FindCustomerDownloadJobFolder = sub1.Path
+                    FindJobFolderUnderRoot = sub1.Path
                     On Error GoTo 0
                     Exit Function
                 End If
@@ -1834,7 +1920,7 @@ Function FindCustomerDownloadJobFolder(ByVal custJob, ByVal cLocal)
         Next
     Next
 
-    If best <> "" Then FindCustomerDownloadJobFolder = best
+    If best <> "" Then FindJobFolderUnderRoot = best
 
     On Error GoTo 0
 End Function

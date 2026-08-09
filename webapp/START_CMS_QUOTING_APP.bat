@@ -34,6 +34,15 @@ rem Email credentials + pricing config (Settings page writes here)
 set CMS_DATA_DIR=C:\CMS_Local_Workspace\cms_data
 
 rem Folder browser for C-number quote jobs (month folders live under Downloads)
+rem
+rem This share is only reachable on the company wifi. You do NOT need to change
+rem it when working off the network: the app also searches your local Downloads,
+rem OneDrive Downloads, Desktop and C:\CMS_Local_Workspace automatically, opens
+rem the folder picker on whichever one answers, and shows the share crossed out
+rem while it is offline. Reconnect and restart the app to get it back.
+rem
+rem To add another place to look, semicolon-separated:
+rem   set CMS_WORKSPACE_EXTRA_ROOTS=D:\Jobs;E:\FromCustomer
 set CMS_WORKSPACE_ROOT=\\Mycloudex2ultra\mexico\Downloads
 
 rem PIN the job registry explicitly.

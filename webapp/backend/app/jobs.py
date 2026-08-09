@@ -338,11 +338,66 @@ def _looks_like_quote_job(name: str) -> bool:
     return False
 
 
-def _workspace_roots() -> list[Path]:
+# An unreachable UNC path does not fail fast: Path.exists() on a share that is
+# not there blocks on an SMB timeout, seconds at a time, every call. The folder
+# picker calls this on every keystroke of navigation, so the answer is probed
+# once with a deadline and remembered.
+_ROOT_REACHABLE: dict[str, bool] = {}
+_ROOT_PROBE_TIMEOUT_S = 1.5
+
+
+def _root_reachable(root: Path, timeout: float = _ROOT_PROBE_TIMEOUT_S) -> bool:
+    """Is this root there, answering within `timeout` seconds?
+
+    Cached for the life of the process. Restart the app after plugging back into
+    the company wifi -- or call _forget_root_reachability().
+    """
+    key = str(root)
+    if key in _ROOT_REACHABLE:
+        return _ROOT_REACHABLE[key]
+
+    # A local path answers instantly; only pay for a thread on a UNC path.
+    if not key.startswith("\\\\") and not key.startswith("//"):
+        try:
+            ok = root.is_dir()
+        except OSError:
+            ok = False
+        _ROOT_REACHABLE[key] = ok
+        return ok
+
+    import concurrent.futures
+
+    # NOT a `with` block: ThreadPoolExecutor.__exit__ joins its threads, so the
+    # timeout would be waited out anyway and the probe took the full SMB stall
+    # regardless. Abandon the executor instead and let the stuck thread finish
+    # whenever the OS lets go of it.
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        ok = bool(ex.submit(root.is_dir).result(timeout=timeout))
+    except Exception:
+        # Timed out or errored: unreachable, rather than hanging the picker.
+        ok = False
+    finally:
+        ex.shutdown(wait=False)
+    _ROOT_REACHABLE[key] = ok
+    return ok
+
+
+def _forget_root_reachability() -> None:
+    """Drop the cache, e.g. after reconnecting to the network."""
+    _ROOT_REACHABLE.clear()
+
+
+def _workspace_roots(reachable_first: bool = True) -> list[Path]:
     from . import config as cfg
 
-    roots = [cfg.WORKSPACE_ROOT, cfg.JOBS_ROOT]
+    # Customer folders first, registry LAST. JOBS_ROOT is where the app keeps its
+    # own copy of each job, not somewhere to go looking for work to quote -- with
+    # it second the picker opened straight into the registry as soon as the
+    # network share went offline.
+    roots = [cfg.WORKSPACE_ROOT]
     roots.extend(Path(p) for p in cfg.WORKSPACE_EXTRA_ROOTS)
+    roots.append(cfg.JOBS_ROOT)
     seen: set[str] = set()
     out: list[Path] = []
     for r in roots:
@@ -350,7 +405,20 @@ def _workspace_roots() -> list[Path]:
         if key not in seen:
             seen.add(key)
             out.append(r)
+    if reachable_first:
+        # Stable sort, so configured order survives within each group and the
+        # network share stays visible (just not first) when it is offline.
+        out.sort(key=lambda r: not _root_reachable(r))
     return out
+
+
+def first_reachable_root() -> Path:
+    from . import config as cfg
+
+    for r in _workspace_roots():
+        if _root_reachable(r):
+            return r
+    return cfg.WORKSPACE_ROOT
 
 
 def browse_workspace(path: str = "", quick: bool = True) -> dict:
@@ -361,15 +429,25 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
     """
     from . import config as cfg
 
-    base = Path(path) if path else cfg.WORKSPACE_ROOT
-    if not base.exists() or not base.is_dir():
-        # Fall back to first existing root
+    # With no path asked for, open on a root that actually answers. Defaulting to
+    # the configured network share left the picker empty and un-navigable off the
+    # company wifi, with the month folders sitting in the local Downloads.
+    base = Path(path) if path else first_reachable_root()
+    if not _root_reachable(base):
         for root in _workspace_roots():
-            if root.exists():
+            if _root_reachable(root):
                 base = root
                 break
         else:
-            return {"path": str(base), "exists": False, "entries": [], "roots": [str(r) for r in _workspace_roots()]}
+            return {
+                "path": str(base),
+                "exists": False,
+                "entries": [],
+                "roots": [str(r) for r in _workspace_roots()],
+                "unreachable": [
+                    str(r) for r in _workspace_roots() if not _root_reachable(r)
+                ],
+            }
 
     entries = []
     try:
@@ -410,12 +488,16 @@ def browse_workspace(path: str = "", quick: bool = True) -> dict:
         pass
 
     parent = str(base.parent) if base.parent != base else None
+    roots = _workspace_roots()
     return {
         "path": str(base),
         "exists": True,
         "parent": parent,
         "entries": entries,
-        "roots": [str(r) for r in _workspace_roots()],
+        "roots": [str(r) for r in roots],
+        # So the picker can grey out a share that is offline rather than
+        # offering a button that hangs for a second and then does nothing.
+        "unreachable": [str(r) for r in roots if not _root_reachable(r)],
     }
 
 
