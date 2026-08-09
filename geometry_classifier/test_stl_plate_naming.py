@@ -152,6 +152,103 @@ def test_pockets_are_separated_by_which_face_they_open_on():
     )
 
 
+def test_an_ejector_housing_is_seen_as_clamp_plate_plus_rails():
+    """One CAD body, three pieces of steel.
+
+    C18027's ejector housing is modelled as a single U-shaped solid: a 0.875"
+    bottom clamp plate with two 3.000" rails standing on it. The CAD export lists
+    it as one 3.875" plate, so the steel sheet ordered a solid 3.875" block and
+    the two rails were never quoted at all. Nothing in the export can reveal
+    this -- only the mesh can.
+
+    Built here as a 8 x 3.875 x 12 channel with a 5.5-wide pocket 3.000 deep.
+    """
+    W, H, L = 8.0, 3.875, 12.0
+    floor, wall = 0.875, 3.0
+    x0, x1 = 1.25, 6.75  # the channel opening, leaving 1.25 of rail each side
+    body = []
+    body += _quad((0, 0, 0), (W, 0, 0), (W, 0, L), (0, 0, L))            # underside
+    for a, b in ((0.0, x0), (x1, W)):                                     # rail tops
+        body += _quad((a, H, 0), (a, H, L), (b, H, L), (b, H, 0))
+    body += _quad((x0, floor, 0), (x1, floor, 0), (x1, floor, L), (x0, floor, L))
+    body += _quad((x0, floor, 0), (x0, floor, L), (x0, H, L), (x0, H, 0))
+    body += _quad((x1, floor, 0), (x1, H, 0), (x1, H, L), (x1, floor, L))
+    body += _quad((0, 0, 0), (0, 0, L), (0, H, L), (0, H, 0))
+    body += _quad((W, 0, 0), (W, H, 0), (W, H, L), (W, 0, L))
+    body += _quad((0, 0, 0), (0, H, 0), (x0, H, 0), (x0, floor, 0))
+    body += _quad((x1, 0, 0), (x1, floor, 0), (W, H, 0), (W, 0, 0))
+    body += _quad((x0, 0, 0), (x0, floor, 0), (x1, floor, 0), (x1, 0, 0))
+    body += _quad((0, 0, L), (x0, floor, L), (x0, H, L), (0, H, L))
+    body += _quad((x1, 0, L), (W, 0, L), (W, H, L), (x1, floor, L))
+    body += _quad((x0, 0, L), (x1, 0, L), (x1, floor, L), (x0, floor, L))
+
+    g = sg.analyze_body(_tris(body), stack_axis=1, cell_in=0.05, cross_axis=False)
+    assert g.is_open_channel, (
+        f"a {H}in body that is only {g.full_thickness_pct:.0f}% full height, with a "
+        f"{g.pocket_top_max_depth:.2f}in pocket, was not recognised as an ejector housing"
+    )
+    assert abs(g.channel_depth_in - wall) < 0.08, f"rail height {g.channel_depth_in}"
+    assert abs(g.channel_floor_in - floor) < 0.08, f"clamp thickness {g.channel_floor_in}"
+    assert len(g.standing_walls) == 2, (
+        f"{len(g.standing_walls)} rails found, expected 2 -- bolt holes through a "
+        f"rail must not split it into fragments"
+    )
+    for w in g.standing_walls:
+        assert abs(w.height_in - wall) < 0.08, "a rail stands the channel depth, not the whole body"
+        assert abs(w.width_in - 1.25) < 0.1, f"rail width {w.width_in}"
+        assert abs(w.length_in - L) < 0.15, f"rail length {w.length_in}"
+
+    # A plain solid plate must NOT trip this.
+    plain = sg.analyze_body(_tris(_box(0, 0, 0, 8, 1.375, 12)), stack_axis=1,
+                            cell_in=0.05, cross_axis=False)
+    assert not plain.is_open_channel, "a solid plate was mistaken for an ejector housing"
+
+
+def test_manifold_plate_needs_hot_runner_evidence():
+    """manifold_plate was handed out on position alone.
+
+    On C18027 that invented a manifold this shop does not run -- and because the
+    stack is named outward from the A/B pair, it pushed the real A plate down to
+    b_plate and the real B plate down to support_plate. One unjustified name
+    silently re-labelled three plates.
+    """
+    from geometry_classifier.qwen_classify_xt_csv import (
+        _looks_like_hot_runner,
+        _stack_names_around_ab,
+    )
+
+    # C18027 index 3: cross-drilling reported by CAD, but the mesh finds one
+    # waterline, and the bore is a sprue, not a runner channel.
+    assert not _looks_like_hot_runner(
+        {"NCrossAxis": "1", "MaxBoreDia": "2.438", "Thickness": "1.375"}
+    )
+    # A genuine hot-runner plate: drilled across, bored, and thick with it.
+    assert _looks_like_hot_runner(
+        {"NCrossAxis": "12", "MaxBoreDia": "1.500", "Thickness": "2.500"}
+    )
+
+    # Five plates, A/B found one position too low, no hot-runner evidence.
+    plates = [
+        {"NCrossAxis": "0", "MaxBoreDia": "0.5", "Thickness": "0.875"},   # top clamp
+        {"NCrossAxis": "1", "MaxBoreDia": "2.438", "Thickness": "1.375"}, # the real A
+        {"NCrossAxis": "1", "MaxBoreDia": "1.438", "Thickness": "1.375"}, # the real B
+        {"NCrossAxis": "0", "MaxBoreDia": "0.812", "Thickness": "1.375"}, # support
+        {"NCrossAxis": "0", "MaxBoreDia": "1.0", "Thickness": "3.875"},   # bottom clamp
+    ]
+    names = _stack_names_around_ab(plates, a_at=2, top_clamp_present=True)
+    assert "manifold_plate" not in names, f"unevidenced manifold survived: {names}"
+    assert names == [
+        "top_clamp_plate", "a_plate", "b_plate", "support_plate", "bottom_clamp_plate"
+    ], names
+
+    # With real evidence the manifold stays and nothing shifts.
+    hot = list(plates)
+    hot[1] = {"NCrossAxis": "14", "MaxBoreDia": "1.25", "Thickness": "2.000"}
+    names_hot = _stack_names_around_ab(hot, a_at=2, top_clamp_present=True)
+    assert names_hot[1] == "manifold_plate", names_hot
+    assert names_hot[2] == "a_plate", names_hot
+
+
 def test_volume_joins_a_mesh_to_its_cad_row():
     """The join key. SolidWorks' bbox x fill and mesh integration agree closely,
     and no two plates in a base share a volume."""
@@ -416,6 +513,8 @@ if __name__ == "__main__":
         test_volume_and_units_are_measured_not_assumed(tmp)
         test_stack_axis_is_detected_from_the_bodies()
         test_pockets_are_separated_by_which_face_they_open_on()
+        test_an_ejector_housing_is_seen_as_clamp_plate_plus_rails()
+        test_manifold_plate_needs_hot_runner_evidence()
         test_volume_joins_a_mesh_to_its_cad_row()
         test_ejector_box_comes_from_the_plate_gap_not_the_rails()
         test_rail_thickness_becomes_the_stack_height()

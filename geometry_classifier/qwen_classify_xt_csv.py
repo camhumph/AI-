@@ -523,17 +523,44 @@ def _detect_ab_by_facing_gap(full_plates, notes=None):
     return best, evidence
 
 
+def _looks_like_hot_runner(plate):
+    """Is there real evidence this plate carries a hot-runner manifold?
+
+    A manifold plate is drilled ACROSS for the runner channels and bored for the
+    nozzle/sprue -- that cross-drilling is the whole point of the plate. Anything
+    without it is a plate that happens to sit above the cavity, which is a
+    different thing.
+    """
+    cross = safe_float(plate.get("NCrossAxis", 0))
+    bore = safe_float(plate.get("MaxBoreDia", 0))
+    thick = safe_float(plate.get("Thickness", 0))
+    return cross >= 6 and bore >= 1.0 and thick >= 1.5
+
+
 def _stack_names_around_ab(full_plates, a_at, top_clamp_present):
     """Name the whole full-footprint stack outward from a known A/B pair.
 
-    Above the A plate: the topmost plate is the top clamp, and anything between it
-    and the A plate is a manifold plate -- a full-footprint plate in the injection
-    half that is not the cavity. Below the B plate: support plate(s), with the
-    lowest being the bottom clamp.
+    Above the A plate: the topmost plate is the top clamp. A plate between it and
+    the A plate is a manifold plate ONLY when it looks like one. Below the B
+    plate: support plate(s), with the lowest being the bottom clamp.
+
+    The manifold gate matters because manifold_plate was being handed out on
+    position alone. On C18027 that produced a manifold this shop does not run,
+    and -- because the roles are assigned outward from A/B -- it pushed the real
+    A plate down to b_plate and the real B plate down to support_plate. One
+    unjustified name silently re-labelled three plates.
+
+    When the evidence is absent the more likely reading is that the A/B pair was
+    found one position too low, so A is re-anchored onto that plate instead.
     """
     n = len(full_plates)
-    names = [None] * n
 
+    # Re-anchor before naming: an unevidenced manifold means A/B sits too low.
+    first_named = 1 if top_clamp_present else 0
+    while a_at > first_named and not _looks_like_hot_runner(full_plates[a_at - 1]):
+        a_at -= 1
+
+    names = [None] * n
     names[a_at] = "a_plate"
     names[a_at + 1] = "b_plate"
 

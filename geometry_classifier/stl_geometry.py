@@ -252,6 +252,25 @@ class HoleGroup:
 
 
 @dataclass
+class StandingWall:
+    """A run of material left at full height beside a deep open pocket.
+
+    On a mold base these are rails: an ejector housing is often modelled as ONE
+    U-shaped body -- bottom clamp plate and both rails in a single solid -- and
+    the shop still has to buy three pieces of steel for it. Nothing in the CAD
+    export says so, because there is only one part there to report.
+    """
+
+    width_in: float
+    length_in: float
+    height_in: float
+    area_in2: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class BodyGeometry:
     """Everything measurable about one solid body. All lengths in inches."""
 
@@ -316,12 +335,24 @@ class BodyGeometry:
     max_bore_dia: float = 0.0
     hole_signature: str = ""
 
+    # --- merged ejector housing ---------------------------------------------
+    # Set when this one body is really a bottom clamp plate with rails standing
+    # on it. See _detect_open_channel.
+    is_open_channel: bool = False
+    channel_floor_in: float = 0.0     # material under the pocket = clamp plate
+    channel_depth_in: float = 0.0     # how tall the walls stand = rail height
+    channel_open_in2: float = 0.0
+    standing_walls: list[StandingWall] = field(default_factory=list)
+
     # --- diagnostics --------------------------------------------------------
     watertight_ratio: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["standing_walls"] = [
+            w.to_dict() if isinstance(w, StandingWall) else w for w in self.standing_walls
+        ]
         d["holes"] = [h.to_dict() if isinstance(h, HoleGroup) else h for h in self.holes]
         return d
 
@@ -719,6 +750,52 @@ def analyze_body(
                 span = float(ext[axis])
                 _bucket(sizes, [span] * len(sizes), "cross", True, frac=32.0)
                 g.n_cross_holes += len(sizes)
+
+    # ---- merged ejector housing --------------------------------------------
+    # One deep pocket open to the top, with material still standing full height
+    # beside it, is a bottom clamp plate with rails on it -- three pieces of
+    # steel modelled as one body. C18027 is the case: 3.875" tall, only 17% of
+    # its footprint at full height, a 62 in2 pocket 3.000" deep, and two runs of
+    # material left standing. The steel sheet ordered it as a single 3.875"
+    # clamp plate and the two rails were never quoted.
+    if (
+        g.pocket_top_in2 > 0.25 * max(g.footprint_in2, 1e-9)
+        and g.pocket_top_max_depth > 0.5 * g.thickness_in
+        and g.full_thickness_pct < 60.0
+    ):
+        # A wall is material whose TOP SURFACE is still at full height. Using the
+        # full-solid-depth mask instead splits each rail into fragments wherever a
+        # bolt hole passes through it, which turned C18027's two rails into four
+        # stubs.
+        standing = occupied & (top_of >= g.stack_max - surf_tol)
+        walls = [
+            b for b in _sparse_blobs(standing, n_u, n_v) if len(b) * cell_area >= 1.0
+        ]
+        if walls:
+            g.is_open_channel = True
+            g.channel_depth_in = round(g.pocket_top_max_depth, 4)
+            g.channel_floor_in = round(g.thickness_in - g.pocket_top_max_depth, 4)
+            g.channel_open_in2 = round(g.pocket_top_in2, 3)
+            for blob in sorted(walls, key=len, reverse=True)[:6]:
+                iu, iv = blob // n_v, blob % n_v
+                span_u = float((iu.max() - iu.min() + 1) * cell)
+                span_v = float((iv.max() - iv.min() + 1) * cell)
+                g.standing_walls.append(
+                    StandingWall(
+                        width_in=round(min(span_u, span_v), 3),
+                        length_in=round(max(span_u, span_v), 3),
+                        # The rail is a separate piece of steel standing ON the
+                        # floor, so its height is the channel depth -- not the
+                        # whole body, which also includes the clamp plate.
+                        height_in=g.channel_depth_in,
+                        area_in2=round(float(len(blob) * cell_area), 2),
+                    )
+                )
+            g.notes.append(
+                f"open channel: {g.channel_floor_in:.3f}in floor with "
+                f"{len(g.standing_walls)} wall(s) standing {g.channel_depth_in:.3f}in -- "
+                f"this is one body but more than one piece of steel"
+            )
 
     g.holes = sorted(holes, key=lambda h: (-h.diameter_in, h.axis))
     if g.holes:

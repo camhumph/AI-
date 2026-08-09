@@ -1201,6 +1201,11 @@ Watch for these specifically:
     sheet on the outside face is usually insulation.
   * An ejector retainer and its back-up plate being the wrong way round. The
     retainer holds the pin heads and carries far more counterbores.
+  * A part carrying "open_channel". That is ONE CAD body that is really an
+    ejector housing -- a bottom clamp plate with rails standing on it. Name the
+    body bottom_clamp_plate, and say in the reason that it also contains the
+    rails and their measured size, because the CAD export lists no rail part at
+    all and they would otherwise never be quoted.
 """
 
 
@@ -1255,6 +1260,23 @@ def _final_payload(p: StackPart) -> dict:
         d["hole_sig"] = g.hole_signature
         if abs(g.thickness_in - p.csv_thickness) > 0.002:
             d["cad_thickness_was"] = round(p.csv_thickness, 4)
+        if g.is_open_channel:
+            # One body, more than one piece of steel.
+            d["open_channel"] = {
+                "floor_in": g.channel_floor_in,
+                "wall_height_in": g.channel_depth_in,
+                "open_area_in2": g.channel_open_in2,
+                "walls": [
+                    {"h": w.height_in, "w": w.width_in, "l": w.length_in}
+                    for w in g.standing_walls
+                ],
+                "means": (
+                    "this single CAD body is an ejector housing: a bottom clamp "
+                    f"plate {g.channel_floor_in:.3f} thick with "
+                    f"{len(g.standing_walls)} rail(s) {g.channel_depth_in:.3f} tall "
+                    "standing on it. The shop buys them as separate pieces of steel."
+                ),
+            }
         if g.notes:
             d["mesh_notes"] = g.notes
     else:

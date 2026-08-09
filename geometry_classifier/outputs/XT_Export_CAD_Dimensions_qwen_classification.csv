@@ -1,138 +1,105 @@
 Index,Component,Role,Confidence,Quote,Thickness,Width,Length,CenterX,CenterY,CenterZ,Reason
-1,24-258--bs-quote_1-1/24-258--1200-a00_1-1,a_plate,HIGH,True,4.875,11.875,23.500,-6.250,0.000,2.440,"Full-footprint plate, assigned by top-to-bottom mold stack order."
-2,24-258--bm-quote_1-1/24-258--1580-a00_1_2-1,bottom_clamp_plate,HIGH,True,1.878,11.875,23.500,-6.250,0.000,-4.188,"Full-footprint plate, assigned by top-to-bottom mold stack order."
-3,24-258--bm-quote_1-1/24-258--1500-a00_1-1,b_plate,HIGH,True,1.875,11.875,23.500,-6.250,0.000,-0.939,"Full-footprint plate, assigned by top-to-bottom mold stack order."
-4,24-258--bs-quote_1-1/24-258--1000-a00_1-1,top_clamp_plate,HIGH,True,1.454,11.875,23.500,-6.250,0.000,5.604,"Full-footprint plate, assigned by top-to-bottom mold stack order."
-5,24-258--bm-quote_1-1/24-258--1540-a00_1-1,support_plate,HIGH,True,1.375,11.875,23.500,-6.250,0.000,-2.565,"Full-footprint plate, assigned by top-to-bottom mold stack order."
-6,24-258--bm-quote_1-1/24-258--1780-a00_1-1,hardware_other,LOW,False,0.875,11.875,25.500,-6.250,0.000,-9.565,Inside mold stack but not enough geometry to name confidently.
-7,24-258--bm-quote_1-1/24-258--1660-a00_1-1,rail,HIGH,True,1.125,8.375,23.485,-6.250,0.000,-8.378,Long narrow full-length side block in ejector/rail zone.
-8,24-258--bm-quote_1-1/24-258--2400-a00_1-1,rail,HIGH,True,1.688,4.000,23.500,-11.344,0.000,-7.127,Long narrow full-length side block in ejector/rail zone.
-9,24-258--bm-quote_1-1/24-258--2401-a00_1-1,hardware_other,LOW,False,1.688,4.000,23.500,-1.156,0.000,-7.127,Inside mold stack but not enough geometry to name confidently.
-10,24-258--bm-quote_1-1/24-258--1680-a00_1-1,rail,HIGH,True,0.641,8.375,23.485,-6.250,0.000,-7.511,Long narrow full-length side block in ejector/rail zone.
-11,24-258--bm-quote_1-1/24-258--2150-a00_1-1,leader_pin,MEDIUM,False,1.240,1.240,7.750,-1.250,10.375,0.633,Long round guide pin matched to short bushing at the same center position plane.
-12,24-258--bm-quote_1-1/24-258--2150-a00_1-4,leader_pin,MEDIUM,False,1.240,1.240,7.750,-1.250,-10.563,0.633,Long round guide pin matched to short bushing at the same center position plane.
-13,24-258--bm-quote_1-1/24-258--2150-a00_1-2,leader_pin,MEDIUM,False,1.240,1.240,7.750,-11.250,10.563,0.633,Long round guide pin matched to short bushing at the same center position plane.
-14,24-258--bm-quote_1-1/24-258--2150-a00_1-3,leader_pin,MEDIUM,False,1.240,1.240,7.750,-11.250,-10.563,0.633,Long round guide pin matched to short bushing at the same center position plane.
-15,24-258--bs-quote_1-1/24-258--2201-a00_1-2,hardware_other,LOW,False,1.500,1.500,4.875,-11.250,10.563,2.427,Round hardware but role is not certain from dimensions alone.
-16,24-258--bs-quote_1-1/24-258--2201-a00_1-3,hardware_other,LOW,False,1.500,1.500,4.875,-11.250,-10.563,2.427,Round hardware but role is not certain from dimensions alone.
-17,24-258--bs-quote_1-1/24-258--2201-a00_1-1,hardware_other,LOW,False,1.500,1.500,4.875,-1.250,10.375,2.427,Round hardware but role is not certain from dimensions alone.
-18,24-258--bs-quote_1-1/24-258--2201-a00_1-4,hardware_other,LOW,False,1.500,1.500,4.875,-1.250,-10.563,2.427,Round hardware but role is not certain from dimensions alone.
-19,24-258--bm-quote_1-1/24-258--5971-a00_1-3,hardware_other,LOW,False,1.500,1.500,4.000,-8.250,0.000,-7.127,Round hardware but role is not certain from dimensions alone.
-20,24-258--bm-quote_1-1/24-258--5971-a00_1-1,hardware_other,LOW,False,1.500,1.500,4.000,-3.750,4.500,-7.127,Round hardware but role is not certain from dimensions alone.
-21,24-258--bm-quote_1-1/24-258--5971-a00_1-4,hardware_other,LOW,False,1.500,1.500,4.000,-4.250,0.000,-7.127,Round hardware but role is not certain from dimensions alone.
-22,24-258--bm-quote_1-1/24-258--5971-a00_1-5,hardware_other,LOW,False,1.500,1.500,4.000,-3.750,-4.500,-7.127,Round hardware but role is not certain from dimensions alone.
-23,24-258--bm-quote_1-1/24-258--5971-a00_1-2,hardware_other,LOW,False,1.500,1.500,4.000,-8.750,4.500,-7.127,Round hardware but role is not certain from dimensions alone.
-24,24-258--bm-quote_1-1/24-258--5971-a00_1-6,hardware_other,LOW,False,1.500,1.500,4.000,-8.750,-4.500,-7.127,Round hardware but role is not certain from dimensions alone.
-25,24-258--bm-quote_1-1/24-258--5970-a00_1-1,hardware_other,LOW,False,1.500,1.500,4.000,-6.250,8.478,-7.127,Round hardware but role is not certain from dimensions alone.
-26,24-258--bm-quote_1-1/24-258--5970-a00_1-2,hardware_other,LOW,False,1.500,1.500,4.000,-6.250,-8.522,-7.127,Round hardware but role is not certain from dimensions alone.
-27,24-258--bm-quote_1-1/24-258--2350-a00_1-1,hardware_other,LOW,False,1.000,1.000,7.812,-3.062,11.001,-3.909,Round hardware but role is not certain from dimensions alone.
-28,24-258--bm-quote_1-1/24-258--2350-a00_1-4,hardware_other,LOW,False,1.000,1.000,7.812,-3.062,-11.126,-3.909,Round hardware but role is not certain from dimensions alone.
-29,24-258--bm-quote_1-1/24-258--2350-a00_1-3,hardware_other,LOW,False,1.000,1.000,7.812,-9.437,-11.126,-3.909,Round hardware but role is not certain from dimensions alone.
-30,24-258--bm-quote_1-1/24-258--2350-a00_1-2,hardware_other,LOW,False,1.000,1.000,7.812,-9.437,11.126,-3.909,Round hardware but role is not certain from dimensions alone.
-31,24-258--bm-quote_1-1/24-258--8150-a00_1-3,hardware_other,LOW,False,1.115,1.115,4.750,-8.125,-10.875,-7.627,Round hardware but role is not certain from dimensions alone.
-32,24-258--bm-quote_1-1/24-258--8150-a00_1-2,hardware_other,LOW,False,1.115,1.115,4.750,-8.125,10.875,-7.627,Round hardware but role is not certain from dimensions alone.
-33,24-258--bm-quote_1-1/24-258--8150-a00_1-4,hardware_other,LOW,False,1.115,1.115,4.750,-4.375,-10.875,-7.627,Round hardware but role is not certain from dimensions alone.
-34,24-258--bm-quote_1-1/24-258--8150-a00_1-1,hardware_other,LOW,False,1.115,1.115,4.750,-4.375,10.875,-7.627,Round hardware but role is not certain from dimensions alone.
-35,24-258--bm-quote_1-1/24-258--2200-a00_1-3,leader_pin_bushing,MEDIUM,False,1.500,1.500,1.875,-11.250,-10.563,-0.927,Short bushing matched to a long guide pin at the same center position plane.
-36,24-258--bm-quote_1-1/24-258--2200-a00_1-2,leader_pin_bushing,MEDIUM,False,1.500,1.500,1.875,-11.250,10.563,-0.927,Short bushing matched to a long guide pin at the same center position plane.
-37,24-258--bm-quote_1-1/24-258--2200-a00_1-1,leader_pin_bushing,MEDIUM,False,1.500,1.500,1.875,-1.250,10.375,-0.927,Short bushing matched to a long guide pin at the same center position plane.
-38,24-258--bm-quote_1-1/24-258--2200-a00_1-4,leader_pin_bushing,MEDIUM,False,1.500,1.500,1.875,-1.250,-10.563,-0.927,Short bushing matched to a long guide pin at the same center position plane.
-39,24-258--bm-quote_1-1/shcs--500 x 7.00_1-5,hardware_other,LOW,False,0.750,0.750,7.500,-11.031,1.000,-6.221,Round hardware but role is not certain from dimensions alone.
-40,24-258--bm-quote_1-1/shcs--500 x 7.00_1-3,hardware_other,LOW,False,0.750,0.750,7.500,-11.031,8.563,-6.221,Round hardware but role is not certain from dimensions alone.
-41,24-258--bm-quote_1-1/shcs--500 x 7.00_1-2,hardware_other,LOW,False,0.750,0.750,7.500,-11.031,-8.562,-6.221,Round hardware but role is not certain from dimensions alone.
-42,24-258--bm-quote_1-1/shcs--500 x 7.00_1-4,hardware_other,LOW,False,0.750,0.750,7.500,-1.469,-8.562,-6.221,Round hardware but role is not certain from dimensions alone.
-43,24-258--bm-quote_1-1/shcs--500 x 7.00_1-1,hardware_other,LOW,False,0.750,0.750,7.500,-1.469,8.563,-6.221,Round hardware but role is not certain from dimensions alone.
-44,24-258--bs-quote_1-1/24-258--8810-a00_1-1/24-258--8810-a00_1-1,insert_or_core_detail,LOW,False,0.740,1.365,3.365,-12.557,9.000,0.000,Smaller block inside cavity/core area; not a standard full plate.
-45,24-258--bm-quote_1-1/24-258--8100-a00_1-2,guided_ejector_bushing,MEDIUM,False,1.427,1.427,1.500,-8.125,10.875,-8.078,Short round cylinder in ejector half; likely guided-ejector bushing.
-46,24-258--bm-quote_1-1/24-258--8100-a00_1-3,guided_ejector_bushing,MEDIUM,False,1.427,1.427,1.500,-8.125,-10.875,-8.078,Short round cylinder in ejector half; likely guided-ejector bushing.
-47,24-258--bm-quote_1-1/24-258--8100-a00_1-4,guided_ejector_bushing,MEDIUM,False,1.427,1.427,1.500,-4.375,-10.875,-8.078,Short round cylinder in ejector half; likely guided-ejector bushing.
-48,24-258--bm-quote_1-1/24-258--8100-a00_1-1,guided_ejector_bushing,MEDIUM,False,1.427,1.427,1.500,-4.375,10.875,-8.078,Short round cylinder in ejector half; likely guided-ejector bushing.
-49,24-258--bs-quote_1-1/24-258--2202-a00_1-3,leader_pin_bushing,MEDIUM,False,1.250,1.250,1.375,-10.000,-9.813,5.565,Short round cylinder near guide hardware size.
-50,24-258--bs-quote_1-1/24-258--2202-a00_1-2,leader_pin_bushing,MEDIUM,False,1.250,1.250,1.375,-10.000,9.813,5.565,Short round cylinder near guide hardware size.
-51,24-258--bs-quote_1-1/24-258--2202-a00_1-4,leader_pin_bushing,MEDIUM,False,1.250,1.250,1.375,-2.500,-9.813,5.565,Short round cylinder near guide hardware size.
-52,24-258--bs-quote_1-1/24-258--2202-a00_1-1,leader_pin_bushing,MEDIUM,False,1.250,1.250,1.375,-2.500,9.625,5.565,Short round cylinder near guide hardware size.
-53,24-258--bs-quote_1-1/24-258--8821-a00_1-1/24-258--8821-a00_1_2-1,insert_or_core_detail,LOW,False,0.500,1.504,2.000,-0.562,0.000,0.124,Smaller block inside cavity/core area; not a standard full plate.
-54,24-258--bs-quote_1-1/24-258--8821-a00_1-2/24-258--8821-a00_1_2-1,insert_or_core_detail,LOW,False,0.500,1.504,2.000,-11.937,0.000,0.124,Smaller block inside cavity/core area; not a standard full plate.
-55,24-258--bs-quote_1-1/24-258--8821-a00_1-4/24-258--8821-a00_1_2-1,insert_or_core_detail,LOW,False,0.500,1.504,2.000,-6.250,11.500,0.124,Smaller block inside cavity/core area; not a standard full plate.
-56,24-258--bs-quote_1-1/24-258--8821-a00_1-3/24-258--8821-a00_1_2-1,insert_or_core_detail,LOW,False,0.500,1.504,2.000,-6.250,-11.500,0.124,Smaller block inside cavity/core area; not a standard full plate.
-57,24-258--bm-quote_1-1/shcs--375 x 4.25_1-1,hardware_other,LOW,False,0.563,0.563,4.625,-6.250,8.478,-6.780,Round hardware but role is not certain from dimensions alone.
-58,24-258--bm-quote_1-1/shcs--375 x 4.25_1-2,hardware_other,LOW,False,0.563,0.563,4.625,-6.250,-8.522,-6.780,Round hardware but role is not certain from dimensions alone.
-59,24-258--bm-quote_1-1/24-258--8820-a00_1-2/24-258--8820-a00_1-1,insert_or_core_detail,LOW,False,0.500,1.375,2.000,-11.937,0.000,-0.689,Smaller block inside cavity/core area; not a standard full plate.
-60,24-258--bm-quote_1-1/24-258--8820-a00_1-4/24-258--8820-a00_1-1,insert_or_core_detail,LOW,False,0.500,1.375,2.000,-6.250,11.500,-0.689,Smaller block inside cavity/core area; not a standard full plate.
-61,24-258--bm-quote_1-1/24-258--8820-a00_1-3/24-258--8820-a00_1-1,insert_or_core_detail,LOW,False,0.500,1.375,2.000,-6.250,-11.500,-0.689,Smaller block inside cavity/core area; not a standard full plate.
-62,24-258--bm-quote_1-1/24-258--8820-a00_1-1/24-258--8820-a00_1-1,insert_or_core_detail,LOW,False,0.500,1.375,2.000,-0.562,0.000,-0.689,Smaller block inside cavity/core area; not a standard full plate.
-63,24-258--bm-quote_1-1/24-258--2300-a00_1-2,hardware_other,LOW,False,0.750,0.750,2.375,-11.031,-8.562,-4.189,Round hardware but role is not certain from dimensions alone.
-64,24-258--bm-quote_1-1/24-258--2300-a00_1-1,hardware_other,LOW,False,0.750,0.750,2.375,-1.469,8.563,-4.189,Round hardware but role is not certain from dimensions alone.
-65,24-258--bs-quote_1-1/shcs--500 X 1.75_1-3,hardware_other,LOW,False,0.750,0.750,2.250,-11.219,8.563,5.096,Round hardware but role is not certain from dimensions alone.
-66,24-258--bs-quote_1-1/shcs--500 X 1.75_1-5,hardware_other,LOW,False,0.750,0.750,2.250,-11.219,-0.875,5.096,Round hardware but role is not certain from dimensions alone.
-67,24-258--bs-quote_1-1/shcs--500 X 1.75_1-2,hardware_other,LOW,False,0.750,0.750,2.250,-11.219,-8.563,5.096,Round hardware but role is not certain from dimensions alone.
-68,24-258--bs-quote_1-1/shcs--500 X 1.75_1-6,hardware_other,LOW,False,0.750,0.750,2.250,-1.281,0.875,5.096,Round hardware but role is not certain from dimensions alone.
-69,24-258--bs-quote_1-1/shcs--500 X 1.75_1-4,hardware_other,LOW,False,0.750,0.750,2.250,-1.281,-8.563,5.096,Round hardware but role is not certain from dimensions alone.
-70,24-258--bs-quote_1-1/shcs--500 X 1.75_1-1,hardware_other,LOW,False,0.750,0.750,2.250,-1.281,8.563,5.096,Round hardware but role is not certain from dimensions alone.
-71,24-258--ba-quote_1_1-1/24-258--ba-quote_1-1,insert_or_core_detail,LOW,False,0.490,0.990,2.490,-12.432,9.000,0.000,Smaller block inside cavity/core area; not a standard full plate.
-72,24-258--bm-quote_1-1/shcs--500 x 1.00_1-3,hardware_other,LOW,False,0.750,0.750,1.750,-11.031,11.125,-9.096,Round hardware but role is not certain from dimensions alone.
-73,24-258--bm-quote_1-1/shcs--500 x 1.00_1-2,hardware_other,LOW,False,0.750,0.750,1.750,-11.031,-11.125,-9.096,Round hardware but role is not certain from dimensions alone.
-74,24-258--bm-quote_1-1/shcs--500 x 1.00_1-4,hardware_other,LOW,False,0.750,0.750,1.750,-1.469,-11.125,-9.096,Round hardware but role is not certain from dimensions alone.
-75,24-258--bm-quote_1-1/shcs--500 x 1.00_1-1,hardware_other,LOW,False,0.750,0.750,1.750,-1.469,11.125,-9.096,Round hardware but role is not certain from dimensions alone.
-76,24-258--bs-quote_1-1/24-258--8810-a00_1-1/24-258--8810-a00_1_3-1,hardware_other,LOW,False,0.750,0.750,1.500,-12.147,9.000,1.000,Round hardware but role is not certain from dimensions alone.
-77,24-258--bs-quote_1-1/24-258--8810-a00_1-1/24-258--8810-a00_1_2-1,hardware_other,LOW,False,0.750,0.750,1.500,-12.147,9.000,-1.000,Round hardware but role is not certain from dimensions alone.
-78,24-258--bm-quote_1-1/shcs--375 x 1.00_1-1,hardware_other,LOW,False,0.563,0.563,1.375,-3.750,4.500,-9.283,Round hardware but role is not certain from dimensions alone.
-79,24-258--bm-quote_1-1/shcs--375 x 1.00_1-3,hardware_other,LOW,False,0.563,0.563,1.375,-8.250,0.000,-9.283,Round hardware but role is not certain from dimensions alone.
-80,24-258--bm-quote_1-1/shcs--375 x 1.00_1-5,hardware_other,LOW,False,0.563,0.563,1.375,-3.750,-4.500,-9.283,Round hardware but role is not certain from dimensions alone.
-81,24-258--bm-quote_1-1/shcs--375 x 1.00_1-6,hardware_other,LOW,False,0.563,0.563,1.375,-8.750,-4.500,-9.283,Round hardware but role is not certain from dimensions alone.
-82,24-258--bm-quote_1-1/shcs--375 x 1.00_1-4,hardware_other,LOW,False,0.563,0.563,1.375,-4.250,0.000,-9.283,Round hardware but role is not certain from dimensions alone.
-83,24-258--bm-quote_1-1/shcs--375 x 1.00_1-2,hardware_other,LOW,False,0.563,0.563,1.375,-8.750,4.500,-9.283,Round hardware but role is not certain from dimensions alone.
-84,24-258--bm-quote_1-1/shcs--312 x 1.25_1-1,hardware_other,LOW,False,0.468,0.468,1.563,-2.437,-10.250,-8.128,Round hardware but role is not certain from dimensions alone.
-85,24-258--bm-quote_1-1/shcs--312 x 1.25_1-4,hardware_other,LOW,False,0.468,0.468,1.563,-2.437,0.000,-8.128,Round hardware but role is not certain from dimensions alone.
-86,24-258--bm-quote_1-1/shcs--312 x 1.25_1-5,hardware_other,LOW,False,0.468,0.468,1.563,-2.437,10.250,-8.128,Round hardware but role is not certain from dimensions alone.
-87,24-258--bm-quote_1-1/shcs--312 x 1.25_1-6,hardware_other,LOW,False,0.468,0.468,1.563,-10.062,10.250,-8.128,Round hardware but role is not certain from dimensions alone.
-88,24-258--bm-quote_1-1/shcs--312 x 1.25_1-3,hardware_other,LOW,False,0.468,0.468,1.563,-10.062,0.000,-8.128,Round hardware but role is not certain from dimensions alone.
-89,24-258--bm-quote_1-1/shcs--312 x 1.25_1-2,hardware_other,LOW,False,0.468,0.468,1.563,-10.062,-10.250,-8.128,Round hardware but role is not certain from dimensions alone.
-90,24-258--bm-quote_1-1/24-258--7500-a00_1-4,hardware_other,LOW,False,0.500,0.500,1.250,-1.469,-9.844,-9.246,Round hardware but role is not certain from dimensions alone.
-91,24-258--bm-quote_1-1/24-258--7500-a00_1-1,hardware_other,LOW,False,0.500,0.500,1.250,-1.469,9.844,-9.246,Round hardware but role is not certain from dimensions alone.
-92,24-258--bm-quote_1-1/24-258--7500-a00_1-2,hardware_other,LOW,False,0.500,0.500,1.250,-11.031,-9.844,-9.246,Round hardware but role is not certain from dimensions alone.
-93,24-258--bm-quote_1-1/24-258--7500-a00_1-3,hardware_other,LOW,False,0.500,0.500,1.250,-11.031,9.844,-9.246,Round hardware but role is not certain from dimensions alone.
-94,24-258--bs-quote_1-1/24-258--2301-a00_1-2,hardware_other,LOW,False,0.500,0.750,0.750,-11.219,-8.563,4.877,Round hardware but role is not certain from dimensions alone.
-95,24-258--bs-quote_1-1/24-258--2301-a00_1-1,hardware_other,LOW,False,0.500,0.750,0.750,-1.281,8.563,4.877,Round hardware but role is not certain from dimensions alone.
-96,24-258--ba-quote_1_1-1/24-258--ba-quote_1_3-1,hardware_other,LOW,False,0.468,0.468,1.062,-12.072,9.000,-0.750,Round hardware but role is not certain from dimensions alone.
-97,24-258--ba-quote_1_1-1/24-258--ba-quote_1_2-1,hardware_other,LOW,False,0.468,0.468,1.062,-12.072,9.000,0.750,Round hardware but role is not certain from dimensions alone.
-98,24-258--bm-quote_1-1/24-258--2450-a00_1-4,hardware_other,LOW,False,0.188,0.688,0.688,-3.062,-2.750,-9.034,Round hardware but role is not certain from dimensions alone.
-99,24-258--bm-quote_1-1/24-258--2450-a00_1-5,hardware_other,LOW,False,0.188,0.688,0.688,-3.062,-6.250,-9.034,Round hardware but role is not certain from dimensions alone.
-100,24-258--bm-quote_1-1/24-258--2450-a00_1-7,hardware_other,LOW,False,0.188,0.688,0.688,-9.437,10.938,-9.034,Round hardware but role is not certain from dimensions alone.
-101,24-258--bm-quote_1-1/24-258--2450-a00_1-8,hardware_other,LOW,False,0.188,0.688,0.688,-9.437,6.250,-9.034,Round hardware but role is not certain from dimensions alone.
-102,24-258--bm-quote_1-1/24-258--2450-a00_1-10,hardware_other,LOW,False,0.188,0.688,0.688,-9.437,-10.938,-9.034,Round hardware but role is not certain from dimensions alone.
-103,24-258--bm-quote_1-1/24-258--2450-a00_1-1,hardware_other,LOW,False,0.188,0.688,0.688,-3.062,10.938,-9.034,Round hardware but role is not certain from dimensions alone.
-104,24-258--bm-quote_1-1/24-258--2450-a00_1-12,hardware_other,LOW,False,0.188,0.688,0.688,-9.437,2.750,-9.034,Round hardware but role is not certain from dimensions alone.
-105,24-258--bm-quote_1-1/24-258--2450-a00_1-11,hardware_other,LOW,False,0.188,0.688,0.688,-9.437,-2.750,-9.034,Round hardware but role is not certain from dimensions alone.
-106,24-258--bm-quote_1-1/24-258--2450-a00_1-2,hardware_other,LOW,False,0.188,0.688,0.688,-3.062,6.250,-9.034,Round hardware but role is not certain from dimensions alone.
-107,24-258--bm-quote_1-1/24-258--2450-a00_1-6,hardware_other,LOW,False,0.188,0.688,0.688,-3.062,-10.938,-9.034,Round hardware but role is not certain from dimensions alone.
-108,24-258--bm-quote_1-1/24-258--2450-a00_1-3,hardware_other,LOW,False,0.188,0.688,0.688,-3.062,2.750,-9.034,Round hardware but role is not certain from dimensions alone.
-109,24-258--bm-quote_1-1/24-258--2450-a00_1-9,hardware_other,LOW,False,0.188,0.688,0.688,-9.437,-6.250,-9.034,Round hardware but role is not certain from dimensions alone.
-110,24-258--bm-quote_1-1/fhs--10-24 x .50_1-7,hardware_other,LOW,False,0.411,0.411,0.500,-9.437,-10.938,-8.858,Round hardware but role is not certain from dimensions alone.
-111,24-258--bm-quote_1-1/fhs--10-24 x .50_1-12,hardware_other,LOW,False,0.411,0.411,0.500,-9.437,2.750,-8.858,Round hardware but role is not certain from dimensions alone.
-112,24-258--bm-quote_1-1/fhs--10-24 x .50_1-9,hardware_other,LOW,False,0.411,0.411,0.500,-9.437,10.938,-8.858,Round hardware but role is not certain from dimensions alone.
-113,24-258--bm-quote_1-1/fhs--10-24 x .50_1-8,hardware_other,LOW,False,0.411,0.411,0.500,-9.437,-2.750,-8.858,Round hardware but role is not certain from dimensions alone.
-114,24-258--bm-quote_1-1/fhs--10-24 x .50_1-10,hardware_other,LOW,False,0.411,0.411,0.500,-9.437,6.250,-8.858,Round hardware but role is not certain from dimensions alone.
-115,24-258--bm-quote_1-1/fhs--10-24 x .50_1-11,hardware_other,LOW,False,0.411,0.411,0.500,-9.437,-6.250,-8.858,Round hardware but role is not certain from dimensions alone.
-116,24-258--bm-quote_1-1/fhs--10-24 x .50_1-1,hardware_other,LOW,False,0.411,0.411,0.500,-3.062,10.938,-8.858,Round hardware but role is not certain from dimensions alone.
-117,24-258--bm-quote_1-1/fhs--10-24 x .50_1-4,hardware_other,LOW,False,0.411,0.411,0.500,-3.062,-2.750,-8.858,Round hardware but role is not certain from dimensions alone.
-118,24-258--bm-quote_1-1/fhs--10-24 x .50_1-5,hardware_other,LOW,False,0.411,0.411,0.500,-3.062,-6.250,-8.858,Round hardware but role is not certain from dimensions alone.
-119,24-258--bm-quote_1-1/fhs--10-24 x .50_1-3,hardware_other,LOW,False,0.411,0.411,0.500,-3.062,2.750,-8.858,Round hardware but role is not certain from dimensions alone.
-120,24-258--bm-quote_1-1/fhs--10-24 x .50_1-6,hardware_other,LOW,False,0.411,0.411,0.500,-3.062,-10.938,-8.858,Round hardware but role is not certain from dimensions alone.
-121,24-258--bm-quote_1-1/fhs--10-24 x .50_1-2,hardware_other,LOW,False,0.411,0.411,0.500,-3.062,6.250,-8.858,Round hardware but role is not certain from dimensions alone.
-122,24-258--bs-quote_1-1/24-258--8821-a00_1-1/24-258--8821-a00_1-1,hardware_other,LOW,False,0.320,0.320,0.812,-0.751,0.688,0.564,Round hardware but role is not certain from dimensions alone.
-123,24-258--bm-quote_1-1/24-258--8820-a00_1-1/24-258--8820-a00_1_2-1,hardware_other,LOW,False,0.320,0.320,0.812,-0.751,-0.688,-1.064,Round hardware but role is not certain from dimensions alone.
-124,24-258--bm-quote_1-1/24-258--8820-a00_1-1/24-258--8820-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-0.751,0.688,-1.064,Round hardware but role is not certain from dimensions alone.
-125,24-258--bm-quote_1-1/24-258--8820-a00_1-3/24-258--8820-a00_1_2-1,hardware_other,LOW,False,0.320,0.320,0.812,-6.938,-11.311,-1.064,Round hardware but role is not certain from dimensions alone.
-126,24-258--bm-quote_1-1/24-258--8820-a00_1-4/24-258--8820-a00_1_2-1,hardware_other,LOW,False,0.320,0.320,0.812,-5.562,11.311,-1.064,Round hardware but role is not certain from dimensions alone.
-127,24-258--bm-quote_1-1/24-258--8820-a00_1-4/24-258--8820-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-6.938,11.311,-1.064,Round hardware but role is not certain from dimensions alone.
-128,24-258--bm-quote_1-1/24-258--8820-a00_1-3/24-258--8820-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-5.562,-11.311,-1.064,Round hardware but role is not certain from dimensions alone.
-129,24-258--bs-quote_1-1/24-258--8821-a00_1-3/24-258--8821-a00_1-1,hardware_other,LOW,False,0.320,0.320,0.812,-5.562,-11.311,0.564,Round hardware but role is not certain from dimensions alone.
-130,24-258--bs-quote_1-1/24-258--8821-a00_1-4/24-258--8821-a00_1-1,hardware_other,LOW,False,0.320,0.320,0.812,-6.938,11.311,0.564,Round hardware but role is not certain from dimensions alone.
-131,24-258--bs-quote_1-1/24-258--8821-a00_1-2/24-258--8821-a00_1-1,hardware_other,LOW,False,0.320,0.320,0.812,-11.749,-0.688,0.564,Round hardware but role is not certain from dimensions alone.
-132,24-258--bm-quote_1-1/24-258--8820-a00_1-2/24-258--8820-a00_1_2-1,hardware_other,LOW,False,0.320,0.320,0.812,-11.749,0.688,-1.064,Round hardware but role is not certain from dimensions alone.
-133,24-258--bm-quote_1-1/24-258--8820-a00_1-2/24-258--8820-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-11.749,-0.688,-1.064,Round hardware but role is not certain from dimensions alone.
-134,24-258--bs-quote_1-1/24-258--8821-a00_1-3/24-258--8821-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-6.938,-11.311,0.564,Round hardware but role is not certain from dimensions alone.
-135,24-258--bs-quote_1-1/24-258--8821-a00_1-4/24-258--8821-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-5.562,11.311,0.564,Round hardware but role is not certain from dimensions alone.
-136,24-258--bs-quote_1-1/24-258--8821-a00_1-1/24-258--8821-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-0.751,-0.688,0.564,Round hardware but role is not certain from dimensions alone.
-137,24-258--bs-quote_1-1/24-258--8821-a00_1-2/24-258--8821-a00_1_3-1,hardware_other,LOW,False,0.320,0.320,0.812,-11.749,0.688,0.564,Round hardware but role is not certain from dimensions alone.
+1,Plate8-1,bottom_clamp_plate,HIGH,True,3.875,7.875,11.875,0.000,-4.688,0.000,"Full-footprint plate, named outward from the A/B pair that geometry found. A/B pair identified by the opposed pocket faces that form the mold gap: idx 2 opens downward (5.5 in2, 0.560 deep) onto idx 4 opening upward (5.7 in2, 1.250 deep)."
+2,Plate3-1/Plate3_2-1,a_plate,HIGH,True,1.382,7.875,11.875,0.000,-0.684,0.000,"Full-footprint plate, named outward from the A/B pair that geometry found. A/B pair identified by the opposed pocket faces that form the mold gap: idx 2 opens downward (5.5 in2, 0.560 deep) onto idx 4 opening upward (5.7 in2, 1.250 deep)."
+3,Plate2-1/Plate2_2-1,manifold_plate,HIGH,True,1.381,7.875,11.875,0.000,0.685,0.000,"Full-footprint plate, named outward from the A/B pair that geometry found. A/B pair identified by the opposed pocket faces that form the mold gap: idx 2 opens downward (5.5 in2, 0.560 deep) onto idx 4 opening upward (5.7 in2, 1.250 deep)."
+4,Plate9-1,b_plate,HIGH,True,1.375,7.875,11.875,0.000,-2.063,0.000,"Full-footprint plate, named outward from the A/B pair that geometry found. A/B pair identified by the opposed pocket faces that form the mold gap: idx 2 opens downward (5.5 in2, 0.560 deep) onto idx 4 opening upward (5.7 in2, 1.250 deep)."
+5,Plate1-1,top_clamp_plate,HIGH,True,0.875,7.875,11.875,0.000,1.813,0.000,"Full-footprint plate, named outward from the A/B pair that geometry found. A/B pair identified by the opposed pocket faces that form the mold gap: idx 2 opens downward (5.5 in2, 0.560 deep) onto idx 4 opening upward (5.7 in2, 1.250 deep)."
+6,Plate7-1,ignore,LOW,False,1.000,5.250,11.875,0.000,-5.063,0.000,Outside main standard-base classification rules.
+7,Plate6-1,ejector_plate,MEDIUM,True,0.500,5.250,11.875,0.000,-4.313,0.000,Thinner centered ejector-stack plate. CMS naming: Ejector Plate.
+8,Sprue Bushing B-6600_B-6600-1,leader_pin_bushing,MEDIUM,False,2.000,2.000,2.419,0.000,1.203,0.000,Short round cylinder near guide hardware size.
+9,LR504-1/LR504_4-1,hardware_other,LOW,False,0.553,3.990,3.990,0.000,2.308,0.000,Round hardware but role is not certain from dimensions alone.
+10,Support Pillar 6141 29 2_6141-1,hardware_other,LOW,False,1.500,1.500,3.000,2.875,-4.250,0.000,Round hardware but role is not certain from dimensions alone.
+11,Support Pillar 6141 29 1_6141-1,hardware_other,LOW,False,1.500,1.500,3.000,-2.875,-4.250,0.000,Round hardware but role is not certain from dimensions alone.
+12,5412_Return Pin Spring_SMD5014-4,hardware_other,LOW,False,1.400,1.400,3.250,5.375,-2.438,1.125,Round hardware but role is not certain from dimensions alone.
+13,5412_Return Pin Spring_SMD5014-3,hardware_other,LOW,False,1.314,1.314,3.250,5.375,-2.438,-1.000,Round hardware but role is not certain from dimensions alone.
+14,Leader Pin 5006-GL_5006-GL-1,hardware_other,LOW,False,1.020,1.020,4.750,-4.375,-3.750,-1.875,Round hardware but role is not certain from dimensions alone.
+15,Leader Pin 5006-GL_5006-GL-3,hardware_other,LOW,False,1.020,1.020,4.750,4.375,-3.750,1.875,Round hardware but role is not certain from dimensions alone.
+16,Leader Pin 5006-GL_5006-GL-2,hardware_other,LOW,False,1.020,1.020,4.750,4.375,-3.750,-1.875,Round hardware but role is not certain from dimensions alone.
+17,Leader Pin 5006-GL_5006-GL-4,hardware_other,LOW,False,1.020,1.020,4.750,-4.375,-3.750,1.875,Round hardware but role is not certain from dimensions alone.
+18,5412_Return Pin Spring_SMD5014-2,hardware_other,LOW,False,1.171,1.171,3.250,-5.375,-2.438,1.125,Round hardware but role is not certain from dimensions alone.
+19,Leader Pin 5004-GL_5004-GL-3,hardware_other,LOW,False,1.020,1.020,3.750,5.125,-0.500,-3.125,Round hardware but role is not certain from dimensions alone.
+20,Leader Pin 5004-GL_5004-GL-1,hardware_other,LOW,False,1.020,1.020,3.750,-5.125,-0.500,3.125,Round hardware but role is not certain from dimensions alone.
+21,Leader Pin 5004-GL_5004-GL-2,hardware_other,LOW,False,1.020,1.020,3.750,5.125,-0.500,3.125,Round hardware but role is not certain from dimensions alone.
+22,Leader Pin 5004-GL_5004-GL-4,hardware_other,LOW,False,1.020,1.020,3.750,-5.000,-0.500,-3.125,Round hardware but role is not certain from dimensions alone.
+23,Cap Screw SC1_2X5-1_2_SC1_2X5-1_2-3,hardware_other,LOW,False,0.750,0.750,6.000,1.875,-3.594,-3.125,Round hardware but role is not certain from dimensions alone.
+24,Cap Screw SC1_2X5-1_2_SC1_2X5-1_2-1,hardware_other,LOW,False,0.750,0.750,6.000,-1.875,-3.594,3.125,Round hardware but role is not certain from dimensions alone.
+25,Cap Screw SC1_2X5-1_2_SC1_2X5-1_2-4,hardware_other,LOW,False,0.750,0.750,6.000,-1.875,-3.594,-3.125,Round hardware but role is not certain from dimensions alone.
+26,Cap Screw SC1_2X5-1_2_SC1_2X5-1_2-2,hardware_other,LOW,False,0.750,0.750,6.000,1.875,-3.594,3.125,Round hardware but role is not certain from dimensions alone.
+27,5412_Return Pin Spring_SMD5014-1,hardware_other,LOW,False,1.000,1.000,3.250,-5.250,-2.438,-1.000,Round hardware but role is not certain from dimensions alone.
+28,Support Pillar 6091 28 2_6091-1,hardware_other,LOW,False,1.000,1.000,3.000,1.375,-4.250,-1.875,Round hardware but role is not certain from dimensions alone.
+29,Support Pillar 6091 28 1_6091-1,hardware_other,LOW,False,1.000,1.000,3.000,-1.375,-4.250,-1.875,Round hardware but role is not certain from dimensions alone.
+30,Support Pillar 6091 28 3_6091-1,hardware_other,LOW,False,1.000,1.000,3.000,-2.250,-4.250,1.875,Round hardware but role is not certain from dimensions alone.
+31,Support Pillar 6091 28 4_6091-1,hardware_other,LOW,False,1.000,1.000,3.000,2.250,-4.250,1.875,Round hardware but role is not certain from dimensions alone.
+32,Ejector EX33M6 14_EX33M6-1,hardware_other,LOW,False,0.750,0.750,4.563,-5.375,-2.281,1.125,Round hardware but role is not certain from dimensions alone.
+33,Ejector EX33M6 14_EX33M6-2,hardware_other,LOW,False,0.750,0.750,4.563,5.375,-2.281,1.125,Round hardware but role is not certain from dimensions alone.
+34,Ejector EX33M6 14_EX33M6-3,hardware_other,LOW,False,0.750,0.750,4.563,5.375,-2.281,-1.000,Round hardware but role is not certain from dimensions alone.
+35,Ejector EX33M6 14_EX33M6-4,hardware_other,LOW,False,0.750,0.750,4.563,-5.250,-2.281,-1.000,Round hardware but role is not certain from dimensions alone.
+36,Bushing 5701_5701-4,guided_ejector_bushing,MEDIUM,False,1.360,1.360,1.375,-5.000,-0.688,-3.125,Short round cylinder in ejector half; likely guided-ejector bushing.
+37,Bushing 5701_5701-1,guided_ejector_bushing,MEDIUM,False,1.360,1.360,1.375,-5.125,-0.688,3.125,Short round cylinder in ejector half; likely guided-ejector bushing.
+38,Bushing 5701_5701-3,guided_ejector_bushing,MEDIUM,False,1.360,1.360,1.375,5.125,-0.688,-3.125,Short round cylinder in ejector half; likely guided-ejector bushing.
+39,Bushing 5701_5701-2,guided_ejector_bushing,MEDIUM,False,1.360,1.360,1.375,5.125,-0.688,3.125,Short round cylinder in ejector half; likely guided-ejector bushing.
+40,Bushing GEB-750_GEB-750-1,guided_ejector_bushing,MEDIUM,False,1.302,1.302,1.500,-4.375,-4.813,-1.875,Short round cylinder in ejector half; likely guided-ejector bushing.
+41,Bushing GEB-750_GEB-750-2,guided_ejector_bushing,MEDIUM,False,1.302,1.302,1.500,4.375,-4.813,-1.875,Short round cylinder in ejector half; likely guided-ejector bushing.
+42,Bushing GEB-750_GEB-750-3,guided_ejector_bushing,MEDIUM,False,1.302,1.302,1.500,4.375,-4.813,1.875,Short round cylinder in ejector half; likely guided-ejector bushing.
+43,Bushing GEB-750_GEB-750-4,guided_ejector_bushing,MEDIUM,False,1.302,1.302,1.500,-4.375,-4.813,1.875,Short round cylinder in ejector half; likely guided-ejector bushing.
+44,Ejector THX2506 27_THX2506-1,hardware_other,LOW,False,0.625,0.625,4.312,0.000,-2.406,0.000,Round hardware but role is not certain from dimensions alone.
+45,Tubular Dowel TD-3_4x15_8_TD-3_4x15_8-2,hardware_other,LOW,False,0.750,0.750,1.875,-1.875,-2.063,-3.125,Round hardware but role is not certain from dimensions alone.
+46,Tubular Dowel TD-3_4x15_8_TD-3_4x15_8-1,hardware_other,LOW,False,0.750,0.750,1.875,1.875,-2.063,3.125,Round hardware but role is not certain from dimensions alone.
+47,Cap Screw SC1_2X1-1_4_SC1_2X1-1_4-1,hardware_other,LOW,False,0.750,0.750,1.750,-1.875,1.344,3.125,Round hardware but role is not certain from dimensions alone.
+48,Cap Screw SC1_2X1-1_4_SC1_2X1-1_4-2,hardware_other,LOW,False,0.750,0.750,1.750,1.875,1.344,3.125,Round hardware but role is not certain from dimensions alone.
+49,Cap Screw SC1_2X1-1_4_SC1_2X1-1_4-4,hardware_other,LOW,False,0.750,0.750,1.750,-1.875,1.344,-3.125,Round hardware but role is not certain from dimensions alone.
+50,Cap Screw SC1_2X1-1_4_SC1_2X1-1_4-3,hardware_other,LOW,False,0.750,0.750,1.750,1.875,1.344,-3.125,Round hardware but role is not certain from dimensions alone.
+51,Plate3-1/Plate3_3-1,hardware_other,LOW,False,0.750,0.750,1.540,-2.345,-0.605,1.276,Round hardware but role is not certain from dimensions alone.
+52,Plate3-1/Plate3-1,hardware_other,LOW,False,0.750,0.750,1.540,2.345,-0.605,1.276,Round hardware but role is not certain from dimensions alone.
+53,Ejector THX1706 25_THX1706-1,hardware_other,LOW,False,0.437,0.437,4.483,0.625,-2.321,1.550,Round hardware but role is not certain from dimensions alone.
+54,Ejector THX1706 25_THX1706-2,hardware_other,LOW,False,0.437,0.437,4.483,-0.625,-2.321,1.550,Round hardware but role is not certain from dimensions alone.
+55,Plate2-1/Plate2-1,hardware_other,LOW,False,0.750,0.750,1.489,2.261,0.630,1.276,Round hardware but role is not certain from dimensions alone.
+56,Plate2-1/Plate2_3-1,hardware_other,LOW,False,0.750,0.750,1.489,-2.261,0.630,1.276,Round hardware but role is not certain from dimensions alone.
+57,Cap Screw SC3_8X1_SC3_8X1-4,hardware_other,LOW,False,0.563,0.563,1.375,2.250,-5.906,1.875,Round hardware but role is not certain from dimensions alone.
+58,Cap Screw SC3_8X1_SC3_8X1-3,hardware_other,LOW,False,0.563,0.563,1.375,-2.250,-5.906,1.875,Round hardware but role is not certain from dimensions alone.
+59,Cap Screw SC3_8X1_SC3_8X1-2,hardware_other,LOW,False,0.563,0.563,1.375,1.375,-5.906,-1.875,Round hardware but role is not certain from dimensions alone.
+60,Cap Screw SC3_8X1_SC3_8X1-1,hardware_other,LOW,False,0.563,0.563,1.375,-1.375,-5.906,-1.875,Round hardware but role is not certain from dimensions alone.
+61,Cap Screw SC3_8X1_SC3_8X1-6,hardware_other,LOW,False,0.563,0.563,1.375,2.875,-5.906,0.000,Round hardware but role is not certain from dimensions alone.
+62,Cap Screw SC3_8X1_SC3_8X1-5,hardware_other,LOW,False,0.563,0.563,1.375,-2.875,-5.906,0.000,Round hardware but role is not certain from dimensions alone.
+63,LR504-1/LR504_3-1,hardware_other,LOW,False,0.600,0.600,1.000,-1.656,2.041,0.000,Round hardware but role is not certain from dimensions alone.
+64,LR504-1/LR504_2-1,hardware_other,LOW,False,0.600,0.600,1.000,1.656,2.041,0.000,Round hardware but role is not certain from dimensions alone.
+65,Stop Pin 7100_7100-5,hardware_other,LOW,False,0.625,0.625,0.812,0.000,-5.344,-1.500,Round hardware but role is not certain from dimensions alone.
+66,Stop Pin 7100_7100-2,hardware_other,LOW,False,0.625,0.625,0.812,0.000,-5.344,1.500,Round hardware but role is not certain from dimensions alone.
+67,Stop Pin 7100_7100-1,hardware_other,LOW,False,0.625,0.625,0.812,-5.375,-5.344,1.125,Round hardware but role is not certain from dimensions alone.
+68,Stop Pin 7100_7100-4,hardware_other,LOW,False,0.625,0.625,0.812,5.375,-5.344,-1.000,Round hardware but role is not certain from dimensions alone.
+69,Stop Pin 7100_7100-3,hardware_other,LOW,False,0.625,0.625,0.812,5.375,-5.344,1.125,Round hardware but role is not certain from dimensions alone.
+70,Stop Pin 7100_7100-6,hardware_other,LOW,False,0.625,0.625,0.812,-5.250,-5.344,-1.000,Round hardware but role is not certain from dimensions alone.
+71,MLDST088-1,hardware_other,LOW,False,0.200,0.880,1.750,-6.038,-0.002,0.625,Inside mold stack but not enough geometry to name confidently.
+72,Cap Screw SC5_16X1_SC5_16X1-3,hardware_other,LOW,False,0.469,0.469,1.313,5.375,-4.750,-2.250,Round hardware but role is not certain from dimensions alone.
+73,Cap Screw SC5_16X1_SC5_16X1-2,hardware_other,LOW,False,0.469,0.469,1.313,5.375,-4.750,2.250,Round hardware but role is not certain from dimensions alone.
+74,Cap Screw SC5_16X1_SC5_16X1-1,hardware_other,LOW,False,0.469,0.469,1.313,-5.375,-4.750,2.250,Round hardware but role is not certain from dimensions alone.
+75,Cap Screw SC5_16X1_SC5_16X1-4,hardware_other,LOW,False,0.469,0.469,1.313,-5.375,-4.750,-2.250,Round hardware but role is not certain from dimensions alone.
+76,Ejector THX0906 24_THX0906-2,hardware_other,LOW,False,0.250,0.250,4.483,-0.750,-2.321,1.140,Round hardware but role is not certain from dimensions alone.
+77,Ejector THX0906 24_THX0906-1,hardware_other,LOW,False,0.250,0.250,4.483,0.750,-2.321,1.140,Round hardware but role is not certain from dimensions alone.
+78,Shoulder Ejector EX7M6 23_EX7M6-4,hardware_other,LOW,False,0.250,0.250,4.481,1.375,-2.322,1.645,Round hardware but role is not certain from dimensions alone.
+79,Shoulder Ejector EX7M6 23_EX7M6-1,hardware_other,LOW,False,0.250,0.250,4.481,-1.375,-2.322,1.645,Round hardware but role is not certain from dimensions alone.
+80,Shoulder Ejector EX7M6 23_EX7M6-2,hardware_other,LOW,False,0.250,0.250,4.481,-3.250,-2.322,1.645,Round hardware but role is not certain from dimensions alone.
+81,Shoulder Ejector EX7M6 23_EX7M6-3,hardware_other,LOW,False,0.250,0.250,4.481,3.250,-2.322,1.645,Round hardware but role is not certain from dimensions alone.
+82,Ejector THX0906 26_THX0906-1,hardware_other,LOW,False,0.250,0.250,4.468,-1.125,-2.329,-0.315,Round hardware but role is not certain from dimensions alone.
+83,Ejector THX0906 26_THX0906-4,hardware_other,LOW,False,0.250,0.250,4.468,1.125,-2.329,-0.315,Round hardware but role is not certain from dimensions alone.
+84,Ejector THX0906 26_THX0906-3,hardware_other,LOW,False,0.250,0.250,4.468,1.500,-2.329,0.315,Round hardware but role is not certain from dimensions alone.
+85,Ejector THX0906 26_THX0906-2,hardware_other,LOW,False,0.250,0.250,4.468,-1.500,-2.329,0.315,Round hardware but role is not certain from dimensions alone.
+86,Shoulder Ejector EX7M6 22_EX7M6-1,hardware_other,LOW,False,0.250,0.250,4.280,-1.750,-2.423,1.102,Round hardware but role is not certain from dimensions alone.
+87,Shoulder Ejector EX7M6 22_EX7M6-6,hardware_other,LOW,False,0.250,0.250,4.280,1.750,-2.423,1.102,Round hardware but role is not certain from dimensions alone.
+88,Shoulder Ejector EX7M6 22_EX7M6-4,hardware_other,LOW,False,0.250,0.250,4.280,3.741,-2.423,1.375,Round hardware but role is not certain from dimensions alone.
+89,Shoulder Ejector EX7M6 22_EX7M6-3,hardware_other,LOW,False,0.250,0.250,4.280,-3.741,-2.423,1.375,Round hardware but role is not certain from dimensions alone.
+90,Shoulder Ejector EX7M6 22_EX7M6-2,hardware_other,LOW,False,0.250,0.250,4.280,-3.125,-2.423,1.102,Round hardware but role is not certain from dimensions alone.
+91,Shoulder Ejector EX7M6 22_EX7M6-5,hardware_other,LOW,False,0.250,0.250,4.280,3.125,-2.423,1.102,Round hardware but role is not certain from dimensions alone.
+92,Shoulder Ejector EX7M6 21_EX7M6-3,hardware_other,LOW,False,0.250,0.250,4.213,1.875,-2.456,-1.125,Round hardware but role is not certain from dimensions alone.
+93,Shoulder Ejector EX7M6 21_EX7M6-2,hardware_other,LOW,False,0.250,0.250,4.213,2.281,-2.456,-1.330,Round hardware but role is not certain from dimensions alone.
+94,Shoulder Ejector EX7M6 21_EX7M6-11,hardware_other,LOW,False,0.250,0.250,4.213,-1.875,-2.456,-1.125,Round hardware but role is not certain from dimensions alone.
+95,Shoulder Ejector EX7M6 21_EX7M6-12,hardware_other,LOW,False,0.250,0.250,4.213,-2.281,-2.456,-1.330,Round hardware but role is not certain from dimensions alone.
+96,Shoulder Ejector EX7M6 21_EX7M6-1,hardware_other,LOW,False,0.250,0.250,4.213,2.281,-2.456,-0.920,Round hardware but role is not certain from dimensions alone.
+97,Shoulder Ejector EX7M6 21_EX7M6-10,hardware_other,LOW,False,0.250,0.250,4.213,-2.281,-2.456,-0.920,Round hardware but role is not certain from dimensions alone.
+98,Shoulder Ejector EX7M6 21_EX7M6-5,hardware_other,LOW,False,0.250,0.250,4.213,0.875,-2.456,-1.125,Round hardware but role is not certain from dimensions alone.
+99,Shoulder Ejector EX7M6 21_EX7M6-7,hardware_other,LOW,False,0.250,0.250,4.213,-0.469,-2.456,-1.330,Round hardware but role is not certain from dimensions alone.
+100,Shoulder Ejector EX7M6 21_EX7M6-6,hardware_other,LOW,False,0.250,0.250,4.213,0.469,-2.456,-1.330,Round hardware but role is not certain from dimensions alone.
+101,Shoulder Ejector EX7M6 21_EX7M6-8,hardware_other,LOW,False,0.250,0.250,4.213,-0.875,-2.456,-1.125,Round hardware but role is not certain from dimensions alone.
+102,Shoulder Ejector EX7M6 21_EX7M6-4,hardware_other,LOW,False,0.250,0.250,4.213,0.469,-2.456,-0.920,Round hardware but role is not certain from dimensions alone.
+103,Shoulder Ejector EX7M6 21_EX7M6-9,hardware_other,LOW,False,0.250,0.250,4.213,-0.469,-2.456,-0.920,Round hardware but role is not certain from dimensions alone.
+104,LR504-1/LR504-1,hardware_other,LOW,False,0.188,0.188,2.000,0.844,2.126,0.000,Round hardware but role is not certain from dimensions alone.
